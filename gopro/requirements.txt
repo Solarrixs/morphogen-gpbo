@@ -1,0 +1,23 @@
+# Core scientific computing
+numpy
+pandas
+scipy
+scikit-learn
+
+# Single-cell analysis
+scanpy
+anndata
+
+# scArches + HNOCA mapping (install after core packages)
+scvi-tools
+scarches
+hnoca
+
+# GP-BO (production - uncomment when ready)
+# botorch
+# gpytorch
+# torch
+
+# Visualization
+matplotlib
+seaborn
