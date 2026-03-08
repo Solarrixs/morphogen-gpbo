@@ -9,9 +9,8 @@ GP-BO (Gaussian Process Bayesian Optimization) pipeline for brain organoid morph
 ## Repository Structure
 
 - **`gopro/`** — Main pipeline code (Python). This is where active development happens.
+- **`data/`** — All large data files (h5ad, GSE, patterning screen). Not tracked by git. See `data/README.md` for download instructions.
 - **`neural_organoid_atlas/`** — Cloned HNOCA reproducibility repo (theislab). Contains the trained scPoli model params at `supplemental_files/scpoli_model_params/`.
-- **`patterning_screen/`** — Downloaded patterning screen data.
-- Root-level `.h5ad` files and `GSE233574_*` files are large data assets.
 
 ## Pipeline Steps (run sequentially from `gopro/`)
 

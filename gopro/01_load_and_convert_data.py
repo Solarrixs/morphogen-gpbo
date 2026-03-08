@@ -77,12 +77,12 @@ def verify_references():
     print("="*60)
 
     files = {
-        "HNOCA minimal": PROJECT_DIR / "hnoca_minimal_for_mapping.h5ad",
-        "Braun fetal brain": PROJECT_DIR / "braun-et-al_minimal_for_mapping.h5ad",
+        "HNOCA minimal": DATA_DIR / "hnoca_minimal_for_mapping.h5ad",
+        "Braun fetal brain": DATA_DIR / "braun-et-al_minimal_for_mapping.h5ad",
         "scPoli model_params.pt": PROJECT_DIR / "neural_organoid_atlas/supplemental_files/scpoli_model_params/model_params.pt",
         "scPoli attr.pkl": PROJECT_DIR / "neural_organoid_atlas/supplemental_files/scpoli_model_params/attr.pkl",
         "scPoli var_names.csv": PROJECT_DIR / "neural_organoid_atlas/supplemental_files/scpoli_model_params/var_names.csv",
-        "Disease atlas": PROJECT_DIR / "disease_atlas.h5ad",
+        "Disease atlas": DATA_DIR / "disease_atlas.h5ad",
     }
 
     all_ok = True
@@ -107,24 +107,24 @@ if __name__ == "__main__":
 
     # 2. Convert Amin/Kelley primary screen (46 conditions, Day 72-74)
     convert_geo_to_anndata(
-        counts_path=PROJECT_DIR / "GSE233574_OrganoidScreen_counts.mtx.gz",
-        metadata_path=PROJECT_DIR / "GSE233574_OrganoidScreen_cellMetaData.csv.gz",
-        genes_path=PROJECT_DIR / "GSE233574_OrganoidScreen_geneInfo.csv.gz",
+        counts_path=DATA_DIR / "GSE233574_OrganoidScreen_counts.mtx.gz",
+        metadata_path=DATA_DIR / "GSE233574_OrganoidScreen_cellMetaData.csv.gz",
+        genes_path=DATA_DIR / "GSE233574_OrganoidScreen_geneInfo.csv.gz",
         output_path=DATA_DIR / "amin_kelley_2024.h5ad",
         name="Amin/Kelley 2024 Primary Morphogen Screen (GSE233574)",
     )
 
     # 3. Convert Amin/Kelley SAG secondary screen
     convert_geo_to_anndata(
-        counts_path=PROJECT_DIR / "GSE233574_Organoid.SAG.secondaryScreen_counts.mtx.gz",
-        metadata_path=PROJECT_DIR / "GSE233574_Organoid.SAG.secondaryScreen_cellMetaData.csv.gz",
-        genes_path=PROJECT_DIR / "GSE233574_Organoid.SAG.secondaryScreen_geneInfo.csv.gz",
+        counts_path=DATA_DIR / "GSE233574_Organoid.SAG.secondaryScreen_counts.mtx.gz",
+        metadata_path=DATA_DIR / "GSE233574_Organoid.SAG.secondaryScreen_cellMetaData.csv.gz",
+        genes_path=DATA_DIR / "GSE233574_Organoid.SAG.secondaryScreen_geneInfo.csv.gz",
         output_path=DATA_DIR / "amin_kelley_sag_screen.h5ad",
         name="Amin/Kelley 2024 SAG Secondary Screen",
     )
 
     # 4. Convert hCbO cerebellar organoid validation (1 protocol, high-fidelity anchor)
-    hcbo_rds = PROJECT_DIR / "GSE233574_hCbO_processed_SeuratObject.rds.gz"
+    hcbo_rds = DATA_DIR / "GSE233574_hCbO_processed_SeuratObject.rds.gz"
     if hcbo_rds.exists():
         print(f"\n  NOTE: hCbO Seurat object found ({hcbo_rds.stat().st_size / 1e9:.2f} GB)")
         print("  This is an RDS file — needs R/sceasy conversion.")
@@ -135,7 +135,7 @@ if __name__ == "__main__":
         print("  hCbO Seurat object not found (optional)")
 
     # 5. Convert hMPO medial pallium organoid validation (1 protocol, high-fidelity anchor)
-    hmpo_rds = PROJECT_DIR / "GSE233574_hMPO_processed_SeuratObject.rds.gz"
+    hmpo_rds = DATA_DIR / "GSE233574_hMPO_processed_SeuratObject.rds.gz"
     if hmpo_rds.exists():
         print(f"\n  NOTE: hMPO Seurat object found ({hmpo_rds.stat().st_size / 1e9:.2f} GB)")
         print("  This is an RDS file — needs R/sceasy conversion.")

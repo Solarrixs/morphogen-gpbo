@@ -130,7 +130,7 @@ def compute_gp_training_data(adata, condition_key="condition"):
 
 if __name__ == "__main__":
     # Check prerequisites
-    ref_path = PROJECT_DIR / "hnoca_minimal_for_mapping.h5ad"
+    ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
     if not ref_path.exists():
         print("ERROR: hnoca_minimal_for_mapping.h5ad not found!")
         print("Run: bash download_zenodo.sh")

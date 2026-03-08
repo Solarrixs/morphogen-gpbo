@@ -4,16 +4,9 @@ __pycache__/
 *.pyc
 *.egg-info/
 
-# Large data files
-*.h5ad
-*.rds
-*.rds.gz
-*.mtx.gz
-*.tar.gz
-GSE233574_*
-
-# Downloaded data
-patterning_screen/
+# Data directory (all large files live here)
+data/*
+!data/README.md
 
 # Neural organoid atlas (cloned repo + large model files)
 neural_organoid_atlas/

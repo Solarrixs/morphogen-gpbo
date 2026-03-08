@@ -131,7 +131,7 @@ def compute_fidelity_scores(query_adata, condition_key="condition"):
 
 if __name__ == "__main__":
     # Check prerequisites
-    fetal_path = PROJECT_DIR / "braun-et-al_minimal_for_mapping.h5ad"
+    fetal_path = DATA_DIR / "braun-et-al_minimal_for_mapping.h5ad"
     mapped_path = DATA_DIR / "amin_kelley_mapped.h5ad"
 
     if not fetal_path.exists():

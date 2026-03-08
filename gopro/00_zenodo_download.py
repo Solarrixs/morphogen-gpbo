@@ -173,7 +173,7 @@ def download_known_records():
 
         for filename, file_info in info["files"].items():
             print(f"\n  {file_info['description']}")
-            output_path = PROJECT_DIR / filename
+            output_path = PROJECT_DIR / "data" / filename
 
             if filename in api_files:
                 url = api_files[filename]["links"]["self"]
@@ -268,7 +268,7 @@ if __name__ == "__main__":
         print("SUMMARY")
         print("=" * 60)
         for filename in ["hnoca_minimal_for_mapping.h5ad", "braun-et-al_minimal_for_mapping.h5ad"]:
-            path = PROJECT_DIR / filename
+            path = PROJECT_DIR / "data" / filename
             if path.exists():
                 print(f"  ✓ {filename}: {path.stat().st_size / 1e9:.2f} GB")
             else:

@@ -31,7 +31,7 @@ from urllib.request import Request, urlopen
 RECORD_ID = "17225179"
 ZENODO_API = "https://zenodo.org/api"
 PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
-OUTPUT_DIR = PROJECT_DIR / "patterning_screen"
+OUTPUT_DIR = PROJECT_DIR / "data" / "patterning_screen"
 
 
 def get_record_files(record_id: str) -> list[dict]:
