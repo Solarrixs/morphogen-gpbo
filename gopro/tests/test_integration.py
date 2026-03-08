@@ -264,6 +264,96 @@ class TestFidelityScoringIntegration:
         assert result.obs["is_off_target"].iloc[1] == True  # PSC is off-target
 
 
+class TestVisualizationIntegration:
+    """Integration tests for visualization report."""
+
+    @pytest.fixture
+    def report_data(self, tmp_path):
+        """Create a complete set of mock data files for report generation."""
+        np.random.seed(42)
+        n_cond = 10
+        conditions = [f"cond_{i}" for i in range(n_cond)]
+
+        # fidelity_report.csv
+        fidelity = pd.DataFrame({
+            "composite_fidelity": np.random.uniform(0.5, 0.95, n_cond),
+            "rss_score": np.random.uniform(0.5, 0.9, n_cond),
+            "on_target_fraction": np.random.uniform(0.6, 1.0, n_cond),
+            "off_target_fraction": np.random.uniform(0.0, 0.15, n_cond),
+            "dominant_region": ["Cortex"] * n_cond,
+        }, index=pd.Index(conditions, name="condition"))
+        fidelity.to_csv(tmp_path / "fidelity_report.csv")
+
+        # morphogen_matrix_amin_kelley.csv
+        morph_cols = ["CHIR99021_uM", "BMP4_ng_mL", "SAG_nM", "log_harvest_day"]
+        morphogens = pd.DataFrame(
+            np.random.rand(n_cond, 4) * [3, 50, 1000, 4.5],
+            columns=morph_cols, index=conditions,
+        )
+        morphogens.to_csv(tmp_path / "morphogen_matrix_amin_kelley.csv")
+
+        # gp_recommendations_round1.csv
+        wells = [f"A{i+1}" for i in range(6)]
+        recs = pd.DataFrame(
+            np.random.rand(6, 4) * [3, 50, 1000, 4.5],
+            columns=morph_cols, index=pd.Index(wells, name="well"),
+        )
+        recs["fidelity"] = 1.0
+        recs["predicted_y0_mean"] = np.random.randn(6)
+        recs["predicted_y0_std"] = np.abs(np.random.randn(6))
+        recs["acquisition_value"] = np.random.randn(6)
+        recs.to_csv(tmp_path / "gp_recommendations_round1.csv")
+
+        # gp_diagnostics_round1.csv (no lengthscales)
+        diag = pd.DataFrame([{"round": 1, "n_training_points": n_cond,
+                              "n_morphogens": 4, "n_cell_types": 5,
+                              "target_cell_types": "all"}])
+        diag.to_csv(tmp_path / "gp_diagnostics_round1.csv", index=False)
+
+        # gp_training_labels_amin_kelley.csv
+        ct_cols = ["Neuron", "NPC", "Glia", "CP", "MC"]
+        labels = pd.DataFrame(
+            np.random.dirichlet(np.ones(5), size=n_cond),
+            columns=ct_cols, index=pd.Index(conditions, name="condition"),
+        )
+        labels.to_csv(tmp_path / "gp_training_labels_amin_kelley.csv")
+
+        # gp_training_regions_amin_kelley.csv
+        region_cols = ["Cortex", "Thalamus", "Midbrain"]
+        regions = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=n_cond),
+            columns=region_cols, index=pd.Index(conditions, name="condition"),
+        )
+        regions.to_csv(tmp_path / "gp_training_regions_amin_kelley.csv")
+
+        return tmp_path
+
+    def test_generate_report(self, report_data):
+        """Test full report generation with mock data."""
+        from gopro.visualize_report import generate_report
+        report_path = generate_report(report_data)
+        assert report_path.exists()
+        html = report_path.read_text()
+        assert "GP-BO Visualization Report" in html
+        assert "plotly" in html.lower()
+        assert "Summary" in html
+        assert "Leaderboard" in html
+
+    def test_assemble_html_report(self, tmp_path):
+        """Test HTML assembly with dummy figures."""
+        from gopro.visualize_report import assemble_html_report, _placeholder_figure
+        sections = {
+            "Test Summary": "This is a test summary.",
+            "Test Chart": _placeholder_figure("test placeholder"),
+        }
+        out = assemble_html_report(sections, tmp_path / "test.html")
+        assert out.exists()
+        html = out.read_text()
+        assert "Test Summary" in html
+        assert "test summary" in html
+        assert "Test Chart" in html
+
+
 class TestRealDataExists:
     """Tests that real data files are accessible (smoke tests)."""
 

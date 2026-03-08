@@ -32,3 +32,4 @@ moscot
 # Visualization
 matplotlib
 seaborn
+plotly

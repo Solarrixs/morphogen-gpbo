@@ -6,6 +6,7 @@ import pandas as pd
 from pathlib import Path
 import sys
 import importlib.util
+import plotly.graph_objects as go
 
 # Import pipeline modules using spec loader (handles numeric prefixes)
 GOPRO_DIR = Path(__file__).parent.parent
@@ -304,6 +305,185 @@ class TestFidelityScoring:
         assert aligned.sum() == pytest.approx(1.0)
         # NPC and IP both map to Radial glia and Neuronal IPC
         assert "Neuron" in aligned.index
+
+
+class TestVisualizationReport:
+    """Tests for visualization report module."""
+
+    @pytest.fixture
+    def sample_fidelity(self):
+        return pd.DataFrame({
+            "composite_fidelity": [0.85, 0.72, 0.91],
+            "rss_score": [0.80, 0.65, 0.88],
+            "on_target_fraction": [0.9, 0.7, 0.95],
+            "off_target_fraction": [0.05, 0.1, 0.02],
+        }, index=pd.Index(["cond_A", "cond_B", "cond_C"], name="condition"))
+
+    @pytest.fixture
+    def sample_morphogens(self):
+        np.random.seed(42)
+        return pd.DataFrame(
+            np.random.rand(10, 5),
+            columns=["CHIR99021_uM", "BMP4_ng_mL", "SAG_nM", "RA_nM", "log_harvest_day"],
+            index=[f"cond_{i}" for i in range(10)],
+        )
+
+    @pytest.fixture
+    def sample_recs(self):
+        return pd.DataFrame({
+            "CHIR99021_uM": [1.5, 3.0],
+            "BMP4_ng_mL": [10.0, 20.0],
+            "SAG_nM": [250, 500],
+            "RA_nM": [0, 100],
+            "log_harvest_day": [4.0, 4.2],
+            "predicted_y0_mean": [0.5, 0.6],
+            "predicted_y0_std": [0.1, 0.2],
+            "acquisition_value": [-1.3, -1.5],
+        }, index=pd.Index(["A1", "A2"], name="well"))
+
+    def test_discover_rounds(self, tmp_path):
+        from gopro.visualize_report import discover_rounds
+        (tmp_path / "gp_recommendations_round1.csv").touch()
+        (tmp_path / "gp_recommendations_round3.csv").touch()
+        (tmp_path / "gp_recommendations_round2.csv").touch()
+        assert discover_rounds(tmp_path) == [1, 2, 3]
+
+    def test_discover_rounds_empty(self, tmp_path):
+        from gopro.visualize_report import discover_rounds
+        assert discover_rounds(tmp_path) == []
+
+    def test_load_fidelity_report(self, tmp_path, sample_fidelity):
+        from gopro.visualize_report import load_fidelity_report
+        path = tmp_path / "fidelity_report.csv"
+        sample_fidelity.to_csv(path)
+        df = load_fidelity_report(path)
+        assert df.shape == (3, 4)
+        assert df.index.name == "condition"
+
+    def test_load_recommendations(self, tmp_path, sample_recs):
+        from gopro.visualize_report import load_recommendations
+        path = tmp_path / "recs.csv"
+        sample_recs.to_csv(path)
+        df = load_recommendations(path)
+        assert len(df) == 2
+        assert df.index.name == "well"
+
+    def test_load_morphogen_matrix(self, tmp_path, sample_morphogens):
+        from gopro.visualize_report import load_morphogen_matrix
+        path = tmp_path / "morph.csv"
+        sample_morphogens.to_csv(path)
+        df = load_morphogen_matrix(path)
+        assert df.shape == (10, 5)
+
+    def test_load_cell_type_fractions(self, tmp_path):
+        from gopro.visualize_report import load_cell_type_fractions
+        fracs = pd.DataFrame(
+            {"Neuron": [0.6, 0.3], "NPC": [0.4, 0.7]},
+            index=pd.Index(["cond_A", "cond_B"], name="condition"),
+        )
+        path = tmp_path / "fracs.csv"
+        fracs.to_csv(path)
+        df = load_cell_type_fractions(path)
+        assert df.shape == (2, 2)
+
+    def test_load_diagnostics_no_lengthscales(self, tmp_path):
+        from gopro.visualize_report import load_diagnostics
+        diag = pd.DataFrame([{"round": 1, "n_training_points": 20}])
+        path = tmp_path / "diag.csv"
+        diag.to_csv(path, index=False)
+        d = load_diagnostics(path)
+        assert d["round"] == 1
+        assert d["lengthscales"] is None
+
+    def test_load_diagnostics_with_lengthscales(self, tmp_path):
+        from gopro.visualize_report import load_diagnostics
+        diag = pd.DataFrame([{
+            "round": 1, "n_training_points": 20,
+            "lengthscale_CHIR99021_uM": 0.5, "lengthscale_SAG_nM": 1.2,
+        }])
+        path = tmp_path / "diag.csv"
+        diag.to_csv(path, index=False)
+        d = load_diagnostics(path)
+        assert d["lengthscales"]["CHIR99021_uM"] == 0.5
+
+    def test_generate_summary_text(self, sample_fidelity):
+        from gopro.visualize_report import generate_summary_text
+        diag = {"round": 1, "lengthscales": None}
+        text = generate_summary_text(sample_fidelity, diag, 6)
+        assert "Round 1" in text
+        assert "cond_C" in text
+        assert "0.910" in text
+        assert "6 new experiments" in text
+
+    def test_generate_summary_with_lengthscales(self, sample_fidelity):
+        from gopro.visualize_report import generate_summary_text
+        diag = {"round": 1, "lengthscales": {"CHIR": 0.1, "SAG": 0.5, "BMP": 0.3, "RA": 2.0}}
+        text = generate_summary_text(sample_fidelity, diag, 6)
+        assert "CHIR" in text
+
+    def test_build_morphogen_umap_figure(self):
+        from gopro.visualize_report import build_morphogen_umap_figure
+        coords = pd.DataFrame(
+            {"UMAP1": [1, 2, 3], "UMAP2": [4, 5, 6]},
+            index=["A", "B", "C"],
+        )
+        fidelity = pd.Series([0.5, 0.7, 0.9], index=["A", "B", "C"])
+        fig = build_morphogen_umap_figure(coords, fidelity)
+        assert isinstance(fig, go.Figure)
+
+    def test_compute_morphogen_umap_shape(self, sample_morphogens):
+        from gopro.visualize_report import compute_morphogen_umap
+        coords = compute_morphogen_umap(sample_morphogens)
+        assert coords.shape == (10, 2)
+        assert list(coords.columns) == ["UMAP1", "UMAP2"]
+
+    def test_build_plate_map_figure(self, sample_recs):
+        from gopro.visualize_report import build_plate_map_figure
+        fig = build_plate_map_figure(sample_recs)
+        assert isinstance(fig, go.Figure)
+
+    def test_build_importance_with_lengthscales(self):
+        from gopro.visualize_report import build_importance_figure
+        ls = {"CHIR": 0.5, "SAG": 2.0, "BMP": 1.0}
+        fig = build_importance_figure(lengthscales=ls)
+        assert isinstance(fig, go.Figure)
+
+    def test_build_importance_fallback_variance(self, sample_morphogens):
+        from gopro.visualize_report import build_importance_figure
+        fig = build_importance_figure(morphogen_df=sample_morphogens)
+        assert isinstance(fig, go.Figure)
+
+    def test_build_leaderboard_figure(self, sample_fidelity):
+        from gopro.visualize_report import build_leaderboard_figure
+        fig = build_leaderboard_figure(sample_fidelity, top_n=2)
+        assert isinstance(fig, go.Figure)
+
+    def test_build_composition_figure(self):
+        from gopro.visualize_report import build_composition_figure
+        fracs = pd.DataFrame(
+            {"Neuron": [0.6, 0.3], "NPC": [0.4, 0.7]},
+            index=["cond_A", "cond_B"],
+        )
+        fig = build_composition_figure(fracs)
+        assert isinstance(fig, go.Figure)
+
+    def test_build_convergence_figure(self):
+        from gopro.visualize_report import build_convergence_figure
+        fig = build_convergence_figure({1: 0.7})
+        assert isinstance(fig, go.Figure)
+
+    def test_build_convergence_multi_round(self):
+        from gopro.visualize_report import build_convergence_figure
+        fig = build_convergence_figure({1: 0.7, 2: 0.8, 3: 0.85})
+        assert isinstance(fig, go.Figure)
+
+    def test_build_cell_umap_figure(self):
+        from gopro.visualize_report import build_cell_umap_figure
+        coords = np.random.rand(50, 2)
+        cell_types = pd.Series(["A"] * 25 + ["B"] * 25)
+        conditions = pd.Series(["cond1"] * 25 + ["cond2"] * 25)
+        fig = build_cell_umap_figure(coords, cell_types, conditions)
+        assert isinstance(fig, go.Figure)
 
 
 class TestMorphogenColumns:
