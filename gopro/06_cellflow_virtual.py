@@ -37,6 +37,12 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
+from gopro.config import (
+    PROTEIN_MW_KDA as MW,
+    nM_to_uM,
+    ng_mL_to_uM,
+)
+
 PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
 DATA_DIR = PROJECT_DIR / "data"
 
@@ -47,21 +53,21 @@ FIDELITY_LEVEL = 0.0
 # Maps morphogen column names to (molecule_type, canonical_name) pairs
 MORPHOGEN_IDENTITIES: dict[str, tuple[str, str]] = {
     "CHIR99021_uM": ("small_molecule", "CHIR99021"),
-    "BMP4_ng_mL": ("protein", "BMP4"),
-    "BMP7_ng_mL": ("protein", "BMP7"),
-    "SHH_ng_mL": ("protein", "SHH"),
-    "SAG_nM": ("small_molecule", "SAG"),
-    "RA_nM": ("small_molecule", "retinoic_acid"),
-    "FGF8_ng_mL": ("protein", "FGF8"),
-    "FGF2_ng_mL": ("protein", "FGF2"),
-    "FGF4_ng_mL": ("protein", "FGF4"),
+    "BMP4_uM": ("protein", "BMP4"),
+    "BMP7_uM": ("protein", "BMP7"),
+    "SHH_uM": ("protein", "SHH"),
+    "SAG_uM": ("small_molecule", "SAG"),
+    "RA_uM": ("small_molecule", "retinoic_acid"),
+    "FGF8_uM": ("protein", "FGF8"),
+    "FGF2_uM": ("protein", "FGF2"),
+    "FGF4_uM": ("protein", "FGF4"),
     "IWP2_uM": ("small_molecule", "IWP2"),
     "XAV939_uM": ("small_molecule", "XAV939"),
     "SB431542_uM": ("small_molecule", "SB431542"),
-    "LDN193189_nM": ("small_molecule", "LDN193189"),
+    "LDN193189_uM": ("small_molecule", "LDN193189"),
     "DAPT_uM": ("small_molecule", "DAPT"),
-    "EGF_ng_mL": ("protein", "EGF"),
-    "ActivinA_ng_mL": ("protein", "ActivinA"),
+    "EGF_uM": ("protein", "EGF"),
+    "ActivinA_uM": ("protein", "ActivinA"),
     "purmorphamine_uM": ("small_molecule", "purmorphamine"),
     "cyclopamine_uM": ("small_molecule", "cyclopamine"),
     "Dorsomorphin_uM": ("small_molecule", "Dorsomorphin"),
@@ -70,21 +76,21 @@ MORPHOGEN_IDENTITIES: dict[str, tuple[str, str]] = {
 # Signaling pathway annotations for morphogens
 MORPHOGEN_PATHWAYS: dict[str, str] = {
     "CHIR99021_uM": "WNT",
-    "BMP4_ng_mL": "BMP",
-    "BMP7_ng_mL": "BMP",
-    "SHH_ng_mL": "SHH",
-    "SAG_nM": "SHH",
-    "RA_nM": "RA",
-    "FGF8_ng_mL": "FGF",
-    "FGF2_ng_mL": "FGF",
-    "FGF4_ng_mL": "FGF",
+    "BMP4_uM": "BMP",
+    "BMP7_uM": "BMP",
+    "SHH_uM": "SHH",
+    "SAG_uM": "SHH",
+    "RA_uM": "RA",
+    "FGF8_uM": "FGF",
+    "FGF2_uM": "FGF",
+    "FGF4_uM": "FGF",
     "IWP2_uM": "WNT",
     "XAV939_uM": "WNT",
     "SB431542_uM": "TGFb",
-    "LDN193189_nM": "BMP",
+    "LDN193189_uM": "BMP",
     "DAPT_uM": "Notch",
-    "EGF_ng_mL": "EGF",
-    "ActivinA_ng_mL": "TGFb",
+    "EGF_uM": "EGF",
+    "ActivinA_uM": "TGFb",
     "purmorphamine_uM": "SHH",
     "cyclopamine_uM": "SHH",
     "Dorsomorphin_uM": "BMP",
@@ -393,37 +399,37 @@ def _predict_baseline(
             fracs[1] += 0.15  # More NPC with WNT inhibition
             fracs[3] += 0.1   # More neuroepithelium
 
-        # SHH pathway -> ventral fates
-        shh = row.get("SHH_ng_mL", 0) + row.get("SAG_nM", 0) / 20
+        # SHH pathway -> ventral fates (all values now in µM)
+        shh = row.get("SHH_uM", 0) + row.get("SAG_uM", 0)
         if shh > 0:
-            fracs[0] += 0.1 * min(shh / 100, 1)  # Ventral neurons
+            fracs[0] += 0.1 * min(shh / 0.05, 1)  # Ventral neurons
             fracs[2] += 0.05  # Intermediate progenitors
 
-        # BMP -> dorsal / choroid plexus
-        bmp = row.get("BMP4_ng_mL", 0) + row.get("BMP7_ng_mL", 0)
+        # BMP -> dorsal / choroid plexus (all values now in µM)
+        bmp = row.get("BMP4_uM", 0) + row.get("BMP7_uM", 0)
         if bmp > 0:
-            fracs[7] += 0.15 * min(bmp / 50, 1)  # Choroid plexus
+            fracs[7] += 0.15 * min(bmp / 0.003, 1)  # Choroid plexus
             fracs[9] += 0.05  # Some mesenchymal
 
-        # FGF -> proliferation / gliogenesis
-        fgf = (row.get("FGF2_ng_mL", 0) + row.get("FGF4_ng_mL", 0)
-               + row.get("FGF8_ng_mL", 0))
+        # FGF -> proliferation / gliogenesis (all values now in µM)
+        fgf = (row.get("FGF2_uM", 0) + row.get("FGF4_uM", 0)
+               + row.get("FGF8_uM", 0))
         if fgf > 0:
-            fracs[4] += 0.1 * min(fgf / 100, 1)  # Glioblast
+            fracs[4] += 0.1 * min(fgf / 0.005, 1)  # Glioblast
             fracs[1] += 0.05  # NPC maintenance
 
-        # LDN/SB -> dual SMAD inhibition -> neural induction
-        ldn = row.get("LDN193189_nM", 0)
+        # LDN/SB -> dual SMAD inhibition -> neural induction (all in µM)
+        ldn = row.get("LDN193189_uM", 0)
         sb = row.get("SB431542_uM", 0)
         if ldn > 0 or sb > 0:
             fracs[3] += 0.15  # Neuroepithelium
             fracs[8] -= 0.03  # Less PSC
             fracs[9] -= 0.03  # Less MC
 
-        # RA -> caudal / hindbrain
-        ra = row.get("RA_nM", 0)
+        # RA -> caudal / hindbrain (all values now in µM)
+        ra = row.get("RA_uM", 0)
         if ra > 0:
-            fracs[0] += 0.1 * min(ra / 500, 1)  # Neurons
+            fracs[0] += 0.1 * min(ra / 0.5, 1)  # Neurons
             fracs[2] += 0.05  # IP
 
         # DAPT -> Notch inhibition -> neuronal differentiation
@@ -564,14 +570,14 @@ def main() -> None:
     # Based on literature ranges from Sanchis-Calleja + Amin/Kelley
     morphogen_ranges = {
         "CHIR99021_uM": [0.0, 0.5, 1.0, 1.5, 3.0, 6.0, 9.0],
-        "BMP4_ng_mL": [0.0, 5.0, 10.0, 25.0],
-        "SHH_ng_mL": [0.0, 50.0, 100.0, 200.0],
-        "SAG_nM": [0.0, 50.0, 250.0, 500.0, 1000.0],
-        "RA_nM": [0.0, 10.0, 50.0, 100.0, 500.0],
-        "FGF8_ng_mL": [0.0, 50.0, 100.0],
+        "BMP4_uM": [0.0, ng_mL_to_uM(5.0, MW["BMP4"]), ng_mL_to_uM(10.0, MW["BMP4"]), ng_mL_to_uM(25.0, MW["BMP4"])],
+        "SHH_uM": [0.0, ng_mL_to_uM(50.0, MW["SHH"]), ng_mL_to_uM(100.0, MW["SHH"]), ng_mL_to_uM(200.0, MW["SHH"])],
+        "SAG_uM": [0.0, nM_to_uM(50.0), nM_to_uM(250.0), nM_to_uM(500.0), nM_to_uM(1000.0)],
+        "RA_uM": [0.0, nM_to_uM(10.0), nM_to_uM(50.0), nM_to_uM(100.0), nM_to_uM(500.0)],
+        "FGF8_uM": [0.0, ng_mL_to_uM(50.0, MW["FGF8"]), ng_mL_to_uM(100.0, MW["FGF8"])],
         "IWP2_uM": [0.0, 2.5, 5.0],
         "SB431542_uM": [0.0, 5.0, 10.0],
-        "LDN193189_nM": [0.0, 50.0, 100.0, 200.0],
+        "LDN193189_uM": [0.0, nM_to_uM(50.0), nM_to_uM(100.0), nM_to_uM(200.0)],
     }
 
     print("\n  Screening ranges:")

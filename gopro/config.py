@@ -22,34 +22,60 @@ if isinstance(DATA_DIR, str):
 
 MODEL_DIR = Path(os.environ.get(
     "GPBO_MODEL_DIR",
-    str(PROJECT_DIR / "neural_organoid_atlas" / "supplemental_files" / "scpoli_model_params"),
+    str(PROJECT_DIR / "data" / "neural_organoid_atlas" / "supplemental_files" / "scpoli_model_params"),
 ))
 if isinstance(MODEL_DIR, str):
     MODEL_DIR = Path(MODEL_DIR)
 
-# --- Morphogen columns (canonical ordering) ---
+# --- Morphogen columns (canonical ordering, all concentrations in µM) ---
 MORPHOGEN_COLUMNS: list[str] = [
     "CHIR99021_uM",       # 0 - WNT agonist
-    "BMP4_ng_mL",         # 1 - BMP signaling
-    "BMP7_ng_mL",         # 2 - BMP signaling
-    "SHH_ng_mL",          # 3 - Sonic hedgehog
-    "SAG_nM",             # 4 - Smoothened agonist
-    "RA_nM",              # 5 - Retinoic acid
-    "FGF8_ng_mL",         # 6 - FGF8
-    "FGF2_ng_mL",         # 7 - FGF2
-    "FGF4_ng_mL",         # 8 - FGF4
+    "BMP4_uM",            # 1 - BMP signaling
+    "BMP7_uM",            # 2 - BMP signaling
+    "SHH_uM",             # 3 - Sonic hedgehog
+    "SAG_uM",             # 4 - Smoothened agonist
+    "RA_uM",              # 5 - Retinoic acid
+    "FGF8_uM",            # 6 - FGF8
+    "FGF2_uM",            # 7 - FGF2
+    "FGF4_uM",            # 8 - FGF4
     "IWP2_uM",            # 9 - WNT inhibitor
     "XAV939_uM",          # 10 - WNT inhibitor
     "SB431542_uM",        # 11 - TGF-beta inhibitor
-    "LDN193189_nM",       # 12 - BMP inhibitor
+    "LDN193189_uM",       # 12 - BMP inhibitor
     "DAPT_uM",            # 13 - Notch inhibitor
-    "EGF_ng_mL",          # 14 - EGF
-    "ActivinA_ng_mL",     # 15 - Activin
+    "EGF_uM",             # 14 - EGF
+    "ActivinA_uM",        # 15 - Activin
     "Dorsomorphin_uM",    # 16 - BMP inhibitor
     "purmorphamine_uM",   # 17 - SHH agonist
     "cyclopamine_uM",     # 18 - SHH antagonist
     "log_harvest_day",    # 19 - Time dimension
 ]
+
+# --- Molecular weights (kDa) for recombinant protein morphogens ---
+# Used to convert ng/mL → µM: µM = (ng/mL) / (MW_kDa × 1000)
+PROTEIN_MW_KDA: dict[str, float] = {
+    "BMP4":     13.0,   # Mature monomer (recombinant human BMP4)
+    "BMP7":     15.7,   # Mature monomer
+    "SHH":      19.6,   # N-terminal signaling domain
+    "FGF2":     17.2,   # 154-aa isoform (bFGF)
+    "FGF4":     19.2,
+    "FGF8":     22.5,   # FGF8b isoform
+    "EGF":       6.2,
+    "ActivinA": 26.0,   # Homodimer
+}
+
+
+def ng_mL_to_uM(ng_per_mL: float, mw_kda: float) -> float:
+    """Convert ng/mL to µM using molecular weight.
+
+    Formula: µM = (ng/mL) / (MW_Da) = (ng/mL) / (MW_kDa × 1000)
+    """
+    return ng_per_mL / (mw_kda * 1000.0)
+
+
+def nM_to_uM(nM: float) -> float:
+    """Convert nM to µM."""
+    return nM / 1000.0
 
 # --- HNOCA annotation column names ---
 ANNOT_LEVEL_1 = "annot_level_1"

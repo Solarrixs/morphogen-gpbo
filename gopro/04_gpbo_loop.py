@@ -26,7 +26,14 @@ import torch
 from pathlib import Path
 from typing import Optional
 
-from gopro.config import DATA_DIR, MORPHOGEN_COLUMNS, get_logger
+from gopro.config import (
+    DATA_DIR,
+    MORPHOGEN_COLUMNS,
+    PROTEIN_MW_KDA,
+    nM_to_uM,
+    ng_mL_to_uM,
+    get_logger,
+)
 
 logger = get_logger(__name__)
 
@@ -35,29 +42,100 @@ logger = get_logger(__name__)
 DEVICE = torch.device("cpu")
 DTYPE = torch.double
 
-# Realistic morphogen bounds per dimension (for acquisition function search)
-MORPHOGEN_BOUNDS = {
+# Literature-based morphogen bounds (all in µM).
+# These serve as fallback maxima; actual bounds used during optimization
+# are computed dynamically from training data (see _compute_active_bounds).
+MORPHOGEN_BOUNDS_LITERATURE = {
     "CHIR99021_uM":     (0.0, 12.0),
-    "BMP4_ng_mL":       (0.0, 50.0),
-    "BMP7_ng_mL":       (0.0, 50.0),
-    "SHH_ng_mL":        (0.0, 500.0),
-    "SAG_nM":           (0.0, 2000.0),
-    "RA_nM":            (0.0, 1000.0),
-    "FGF8_ng_mL":       (0.0, 200.0),
-    "FGF2_ng_mL":       (0.0, 100.0),
-    "FGF4_ng_mL":       (0.0, 200.0),
+    "BMP4_uM":          (0.0, ng_mL_to_uM(50.0, PROTEIN_MW_KDA["BMP4"])),
+    "BMP7_uM":          (0.0, ng_mL_to_uM(50.0, PROTEIN_MW_KDA["BMP7"])),
+    "SHH_uM":           (0.0, ng_mL_to_uM(500.0, PROTEIN_MW_KDA["SHH"])),
+    "SAG_uM":           (0.0, nM_to_uM(2000.0)),
+    "RA_uM":            (0.0, nM_to_uM(1000.0)),
+    "FGF8_uM":          (0.0, ng_mL_to_uM(200.0, PROTEIN_MW_KDA["FGF8"])),
+    "FGF2_uM":          (0.0, ng_mL_to_uM(100.0, PROTEIN_MW_KDA["FGF2"])),
+    "FGF4_uM":          (0.0, ng_mL_to_uM(200.0, PROTEIN_MW_KDA["FGF4"])),
     "IWP2_uM":          (0.0, 10.0),
     "XAV939_uM":        (0.0, 10.0),
     "SB431542_uM":      (0.0, 20.0),
-    "LDN193189_nM":     (0.0, 500.0),
+    "LDN193189_uM":     (0.0, nM_to_uM(500.0)),
     "DAPT_uM":          (0.0, 10.0),
-    "EGF_ng_mL":        (0.0, 50.0),
-    "ActivinA_ng_mL":   (0.0, 100.0),
+    "EGF_uM":           (0.0, ng_mL_to_uM(50.0, PROTEIN_MW_KDA["EGF"])),
+    "ActivinA_uM":      (0.0, ng_mL_to_uM(100.0, PROTEIN_MW_KDA["ActivinA"])),
+    "Dorsomorphin_uM":  (0.0, 5.0),
     "purmorphamine_uM": (0.0, 2.0),
     "cyclopamine_uM":   (0.0, 10.0),
-    "Dorsomorphin_uM":  (0.0, 5.0),
     "log_harvest_day":  (np.log(7), np.log(120)),  # Day 7 to Day 120
 }
+
+# Keep legacy name for backwards compatibility
+MORPHOGEN_BOUNDS = MORPHOGEN_BOUNDS_LITERATURE
+
+
+def _compute_active_bounds(
+    X: pd.DataFrame,
+    columns: list[str],
+    padding: float = 0.5,
+) -> tuple[dict[str, tuple[float, float]], list[str]]:
+    """Compute bounds from training data, dropping zero-variance columns.
+
+    Args:
+        X: Training morphogen matrix (without fidelity column).
+        columns: Morphogen column names.
+        padding: Fraction of training range to add as padding (default 50%).
+
+    Returns:
+        Tuple of (bounds_dict, active_columns) where zero-variance columns
+        have been removed and bounds are training_max * (1 + padding).
+    """
+    morph_cols = [c for c in columns if c != "fidelity"]
+    X_morph = X[morph_cols] if isinstance(X, pd.DataFrame) else X
+
+    active_cols = []
+    active_bounds = {}
+
+    for col in morph_cols:
+        if isinstance(X_morph, pd.DataFrame):
+            col_data = X_morph[col]
+        else:
+            idx = morph_cols.index(col)
+            col_data = X_morph[:, idx]
+
+        col_min = float(np.min(col_data))
+        col_max = float(np.max(col_data))
+
+        # Skip zero-variance columns (no information for GP)
+        if col_max == col_min:
+            if col == "log_harvest_day":
+                # Keep time dimension even if constant (single time point)
+                active_cols.append(col)
+                active_bounds[col] = (np.log(7), np.log(120))
+            else:
+                logger.info("Dropping zero-variance column: %s (value=%.6f)", col, col_max)
+            continue
+
+        # Bounds = training range + padding, clamped to literature max
+        padded_upper = col_max * (1.0 + padding)
+        lit_lo, lit_hi = MORPHOGEN_BOUNDS_LITERATURE.get(col, (0.0, padded_upper))
+        upper = min(padded_upper, lit_hi)
+        lower = max(0.0, col_min)  # morphogen concentrations are non-negative
+
+        active_cols.append(col)
+        active_bounds[col] = (lower, upper)
+        logger.info("Bounds for %s: [%.6f, %.6f] (train: [%.6f, %.6f])",
+                     col, lower, upper, col_min, col_max)
+
+    # Always include fidelity if present
+    if "fidelity" in columns:
+        active_cols.append("fidelity")
+        active_bounds["fidelity"] = (1.0, 1.0)
+
+    logger.info("Active dimensions: %d / %d (dropped %d zero-variance)",
+                len([c for c in active_cols if c != "fidelity"]),
+                len(morph_cols),
+                len(morph_cols) - len([c for c in active_cols if c != "fidelity"]))
+
+    return active_bounds, active_cols
 
 
 def _helmert_basis(D: int) -> np.ndarray:
@@ -486,20 +564,38 @@ def run_gpbo_loop(
     else:
         X, Y = build_training_set(fractions_csv, morphogen_csv)
 
-    # Fit GP
+    # Compute active bounds (drops zero-variance columns, adds padding)
+    active_bounds, active_cols = _compute_active_bounds(X, list(X.columns))
+
+    # Filter X to active columns only
+    X_active = X[active_cols]
+    logger.info("Active X shape: %s (from %s)", X_active.shape, X.shape)
+
+    # Fit GP on active dimensions only
     model, train_X, train_Y, cell_type_cols = fit_gp_botorch(
-        X, Y,
+        X_active, Y,
         target_cell_types=target_cell_types,
         use_ilr=use_ilr,
     )
 
-    # Recommend next experiments
+    # Recommend next experiments (in active dimensions)
     recommendations = recommend_next_experiments(
         model, train_X, train_Y,
-        bounds=MORPHOGEN_BOUNDS,
-        columns=list(X.columns),
+        bounds=active_bounds,
+        columns=list(X_active.columns),
         n_recommendations=n_recommendations,
     )
+
+    # Restore dropped zero-variance columns as zeros
+    all_morph_cols = [c for c in X.columns if c != "fidelity"]
+    for col in all_morph_cols:
+        if col not in recommendations.columns:
+            # Use the constant value from training data (usually 0.0)
+            recommendations[col] = float(X[col].iloc[0]) if col in X.columns else 0.0
+    # Reorder columns to match original ordering
+    final_morph_cols = [c for c in X.columns if c in recommendations.columns]
+    pred_cols = [c for c in recommendations.columns if c not in X.columns]
+    recommendations = recommendations[final_morph_cols + pred_cols]
 
     # Save outputs
     output_path = DATA_DIR / f"gp_recommendations_round{round_num}.csv"

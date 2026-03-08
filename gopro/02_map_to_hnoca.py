@@ -253,10 +253,13 @@ def transfer_labels_knn(
     query_obs: pd.DataFrame,
     label_columns: list[str],
     k: int = 50,
+    class_balanced: bool = True,
 ) -> pd.DataFrame:
     """Transfer cell type labels from reference to query via KNN in latent space.
 
-    Uses sklearn KNeighborsClassifier (CPU) instead of cuml (GPU).
+    Uses class-balanced KNN by default: each neighbor's vote is weighted by
+    ``(1/distance) * 1/sqrt(class_frequency)`` to correct for class imbalance
+    in the reference atlas (e.g. HNOCA is ~43% dorsal telencephalon).
 
     Args:
         ref_latent: Reference latent space embeddings.
@@ -265,13 +268,27 @@ def transfer_labels_knn(
         query_obs: Query cell metadata.
         label_columns: List of label columns to transfer.
         k: Number of neighbors.
+        class_balanced: If True, apply inverse-sqrt class frequency weighting
+            to correct for reference class imbalance.
 
     Returns:
         DataFrame with transferred labels and confidence scores.
     """
-    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.neighbors import NearestNeighbors
 
     results = pd.DataFrame(index=query_obs.index)
+
+    # Fit a single NearestNeighbors model (shared across label columns)
+    logger.info("Fitting NearestNeighbors (k=%d) on %d reference cells...", k, len(ref_latent))
+    nn = NearestNeighbors(n_neighbors=k, n_jobs=-1)
+    nn.fit(ref_latent)
+
+    # Get distances and indices for all query cells
+    logger.info("Querying %d cells...", len(query_latent))
+    distances, indices = nn.kneighbors(query_latent)
+
+    # Distance-based weights (inverse distance, avoid division by zero)
+    dist_weights = 1.0 / (distances + 1e-10)  # shape: (n_query, k)
 
     for label_col in label_columns:
         if label_col not in ref_obs.columns:
@@ -279,14 +296,56 @@ def transfer_labels_knn(
             continue
 
         labels = ref_obs[label_col].values
-        logger.info("Transferring %s (%d classes)...", label_col, len(np.unique(labels)))
+        classes = np.unique(labels)
+        n_classes = len(classes)
+        class_to_idx = {c: i for i, c in enumerate(classes)}
+        idx_to_class = {i: c for c, i in class_to_idx.items()}
 
-        knn = KNeighborsClassifier(n_neighbors=k, weights="distance", n_jobs=-1)
-        knn.fit(ref_latent, labels)
+        logger.info("Transferring %s (%d classes, class_balanced=%s)...",
+                     label_col, n_classes, class_balanced)
 
-        predicted = knn.predict(query_latent)
-        probas = knn.predict_proba(query_latent)
-        confidence = probas.max(axis=1)
+        # Map all reference labels to integer indices
+        label_indices = np.empty(len(labels), dtype=np.int32)
+        for c, idx in class_to_idx.items():
+            label_indices[labels == c] = idx
+
+        # Get neighbor labels as integer indices: shape (n_query, k)
+        neighbor_label_idx = label_indices[indices]
+
+        # Compute combined weights
+        if class_balanced:
+            # Inverse-sqrt class frequency weighting per label column
+            class_counts = np.bincount(label_indices, minlength=n_classes).astype(float)
+            class_freq = class_counts / class_counts.sum()
+            class_weight = 1.0 / np.sqrt(class_freq + 1e-10)  # sqrt correction
+            class_weight /= class_weight.sum()  # normalize so weights sum to 1
+
+            # Map class weights to each neighbor
+            neighbor_class_wt = class_weight[neighbor_label_idx]  # (n_query, k)
+            weights = dist_weights * neighbor_class_wt
+
+            # Log the effective boost
+            max_wt = class_weight.max()
+            min_wt = class_weight.min()
+            logger.info("  Class weight range: %.3f - %.3f (max/min ratio: %.1fx)",
+                         min_wt, max_wt, max_wt / min_wt if min_wt > 0 else float('inf'))
+        else:
+            weights = dist_weights
+
+        # Accumulate weighted votes per class for each query cell
+        vote_matrix = np.zeros((len(query_latent), n_classes))
+        for j in range(k):
+            np.add.at(vote_matrix,
+                       (np.arange(len(query_latent)), neighbor_label_idx[:, j]),
+                       weights[:, j])
+
+        # Predict: class with highest vote
+        predicted_idx = vote_matrix.argmax(axis=1)
+        predicted = np.array([idx_to_class[i] for i in predicted_idx])
+
+        # Confidence: fraction of total weight going to the winning class
+        total_weights = vote_matrix.sum(axis=1)
+        confidence = vote_matrix.max(axis=1) / (total_weights + 1e-10)
 
         results[f"predicted_{label_col}"] = predicted
         results[f"{label_col}_confidence"] = confidence

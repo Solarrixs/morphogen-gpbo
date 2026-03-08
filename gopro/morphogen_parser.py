@@ -20,29 +20,35 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from gopro.config import MORPHOGEN_COLUMNS, get_logger
+from gopro.config import (
+    MORPHOGEN_COLUMNS,
+    PROTEIN_MW_KDA,
+    nM_to_uM,
+    ng_mL_to_uM,
+    get_logger,
+)
 
 logger = get_logger(__name__)
 
 # ==============================================================================
-# Default concentrations (from Amin & Kelley 2024)
+# Default concentrations (from Amin & Kelley 2024) — all in µM
 # ==============================================================================
 _DEFAULTS: dict[str, float] = {
-    "CHIR99021_uM": 1.5,
-    "BMP4_ng_mL": 10.0,
-    "BMP7_ng_mL": 25.0,
-    "SAG_nM": 50.0,       # Lowest SAG tier; explicit concentrations override
-    "RA_nM": 100.0,
-    "FGF2_ng_mL": 20.0,
-    "FGF4_ng_mL": 100.0,
-    "FGF8_ng_mL": 100.0,
-    "IWP2_uM": 5.0,
-    "LDN193189_nM": 100.0,
-    "DAPT_uM": 2.5,
+    "CHIR99021_uM":    1.5,
+    "BMP4_uM":         ng_mL_to_uM(10.0, PROTEIN_MW_KDA["BMP4"]),      # 10 ng/mL
+    "BMP7_uM":         ng_mL_to_uM(25.0, PROTEIN_MW_KDA["BMP7"]),      # 25 ng/mL
+    "SAG_uM":          nM_to_uM(50.0),                                   # 50 nM
+    "RA_uM":           nM_to_uM(100.0),                                  # 100 nM
+    "FGF2_uM":         ng_mL_to_uM(20.0, PROTEIN_MW_KDA["FGF2"]),      # 20 ng/mL
+    "FGF4_uM":         ng_mL_to_uM(100.0, PROTEIN_MW_KDA["FGF4"]),     # 100 ng/mL
+    "FGF8_uM":         ng_mL_to_uM(100.0, PROTEIN_MW_KDA["FGF8"]),     # 100 ng/mL
+    "IWP2_uM":         5.0,
+    "LDN193189_uM":    nM_to_uM(100.0),                                  # 100 nM
+    "DAPT_uM":         2.5,
     "Dorsomorphin_uM": 2.5,
-    "EGF_ng_mL": 20.0,
-    "SB431542_uM": 10.0,
-    "ActivinA_ng_mL": 50.0,
+    "EGF_uM":          ng_mL_to_uM(20.0, PROTEIN_MW_KDA["EGF"]),       # 20 ng/mL
+    "SB431542_uM":     10.0,
+    "ActivinA_uM":     ng_mL_to_uM(50.0, PROTEIN_MW_KDA["ActivinA"]),  # 50 ng/mL
 }
 
 # Harvest day for all Amin/Kelley conditions
@@ -107,42 +113,45 @@ def parse_condition_name(name: str) -> dict[str, float]:
 # Individual condition handlers
 # ---------------------------------------------------------------------------
 # Each handler mutates the pre-zeroed vector *vec* in place.
+# All concentration values are in µM. Protein morphogens use _DEFAULTS (which
+# were computed via ng_mL_to_uM at module load). Non-default concentrations
+# use nM_to_uM() or ng_mL_to_uM() inline.
 
 def _bmp4_chir(v: dict[str, float]) -> None:
-    v["BMP4_ng_mL"] = 10.0
+    v["BMP4_uM"] = _DEFAULTS["BMP4_uM"]
     v["CHIR99021_uM"] = 1.5
 
 def _bmp4_chir_d11_16(v: dict[str, float]) -> None:
-    v["BMP4_ng_mL"] = 10.0
+    v["BMP4_uM"] = _DEFAULTS["BMP4_uM"]
     v["CHIR99021_uM"] = 1.5 * _time_fraction(11, 16)
 
 def _bmp4_sag(v: dict[str, float]) -> None:
-    v["BMP4_ng_mL"] = 10.0
-    v["SAG_nM"] = 50.0
+    v["BMP4_uM"] = _DEFAULTS["BMP4_uM"]
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"]
 
 def _bmp7(v: dict[str, float]) -> None:
-    v["BMP7_ng_mL"] = 25.0
+    v["BMP7_uM"] = _DEFAULTS["BMP7_uM"]
 
 def _bmp7_chir(v: dict[str, float]) -> None:
-    v["BMP7_ng_mL"] = 25.0
+    v["BMP7_uM"] = _DEFAULTS["BMP7_uM"]
     v["CHIR99021_uM"] = 1.5
 
 def _bmp7_sag(v: dict[str, float]) -> None:
-    v["BMP7_ng_mL"] = 25.0
-    v["SAG_nM"] = 50.0
+    v["BMP7_uM"] = _DEFAULTS["BMP7_uM"]
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"]
 
 def _c_l_s_fgf8(v: dict[str, float]) -> None:
     """C/L/S/FGF8 = CHIR + LDN + SB431542 + FGF8."""
     v["CHIR99021_uM"] = 1.5
-    v["LDN193189_nM"] = 100.0
+    v["LDN193189_uM"] = _DEFAULTS["LDN193189_uM"]
     v["SB431542_uM"] = 10.0
-    v["FGF8_ng_mL"] = 100.0
+    v["FGF8_uM"] = _DEFAULTS["FGF8_uM"]
 
 def _c_s_bmp7_d(v: dict[str, float]) -> None:
     """C/S/BMP7/D = CHIR + SB431542 + BMP7 + DAPT."""
     v["CHIR99021_uM"] = 1.5
     v["SB431542_uM"] = 10.0
-    v["BMP7_ng_mL"] = 25.0
+    v["BMP7_uM"] = _DEFAULTS["BMP7_uM"]
     v["DAPT_uM"] = 2.5
 
 def _c_s_d_fgf4(v: dict[str, float]) -> None:
@@ -150,26 +159,26 @@ def _c_s_d_fgf4(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 1.5
     v["SB431542_uM"] = 10.0
     v["DAPT_uM"] = 2.5
-    v["FGF4_ng_mL"] = 100.0
+    v["FGF4_uM"] = _DEFAULTS["FGF4_uM"]
 
 def _c_s_r_e_fgf2_d(v: dict[str, float]) -> None:
     """C/S/R/E/FGF2/D = CHIR + SB431542 + RA + EGF + FGF2 + DAPT."""
     v["CHIR99021_uM"] = 1.5
     v["SB431542_uM"] = 10.0
-    v["RA_nM"] = 100.0
-    v["EGF_ng_mL"] = 20.0
-    v["FGF2_ng_mL"] = 20.0
+    v["RA_uM"] = _DEFAULTS["RA_uM"]
+    v["EGF_uM"] = _DEFAULTS["EGF_uM"]
+    v["FGF2_uM"] = _DEFAULTS["FGF2_uM"]
     v["DAPT_uM"] = 2.5
 
 def _chir_sag_fgf4(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 1.5
-    v["SAG_nM"] = 50.0
-    v["FGF4_ng_mL"] = 100.0
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"]
+    v["FGF4_uM"] = _DEFAULTS["FGF4_uM"]
 
 def _chir_sag_fgf8(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 1.5
-    v["SAG_nM"] = 50.0
-    v["FGF8_ng_mL"] = 100.0
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"]
+    v["FGF8_uM"] = _DEFAULTS["FGF8_uM"]
 
 def _chir_switch_iwp2(v: dict[str, float]) -> None:
     """CHIR first half, then IWP2 second half of standard window."""
@@ -187,36 +196,36 @@ def _chir_d6_11(v: dict[str, float]) -> None:
 
 def _chir_sag_d16_21(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 1.5 * _time_fraction(16, 21)
-    v["SAG_nM"] = 50.0 * _time_fraction(16, 21)
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"] * _time_fraction(16, 21)
 
 def _chir_sag_ldn(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 1.5
-    v["SAG_nM"] = 50.0
-    v["LDN193189_nM"] = 100.0
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"]
+    v["LDN193189_uM"] = _DEFAULTS["LDN193189_uM"]
 
 def _chir_sagd10_21(v: dict[str, float]) -> None:
     """CHIR full window, SAG days 10-21 only."""
     v["CHIR99021_uM"] = 1.5
-    v["SAG_nM"] = 50.0 * _time_fraction(10, 21)
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"] * _time_fraction(10, 21)
 
 def _chir1_5_sag1000(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 1.5
-    v["SAG_nM"] = 1000.0
+    v["SAG_uM"] = nM_to_uM(1000.0)  # 1000 nM = 1.0 µM
 
 def _chir1_5_sag250(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 1.5
-    v["SAG_nM"] = 250.0
+    v["SAG_uM"] = nM_to_uM(250.0)  # 250 nM = 0.25 µM
 
 def _chir1_5(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 1.5
 
 def _chir3_sag1000(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 3.0
-    v["SAG_nM"] = 1000.0
+    v["SAG_uM"] = nM_to_uM(1000.0)  # 1000 nM = 1.0 µM
 
 def _chir3_sag250(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 3.0
-    v["SAG_nM"] = 250.0
+    v["SAG_uM"] = nM_to_uM(250.0)  # 250 nM = 0.25 µM
 
 def _chir3(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 3.0
@@ -226,27 +235,27 @@ def _dapt(v: dict[str, float]) -> None:
 
 def _fgf20_egf(v: dict[str, float]) -> None:
     """FGF-20/EGF: FGF2 at 20 ng/mL + EGF."""
-    v["FGF2_ng_mL"] = 20.0
-    v["EGF_ng_mL"] = 20.0
+    v["FGF2_uM"] = _DEFAULTS["FGF2_uM"]
+    v["EGF_uM"] = _DEFAULTS["EGF_uM"]
 
 def _fgf2_20(v: dict[str, float]) -> None:
-    v["FGF2_ng_mL"] = 20.0
+    v["FGF2_uM"] = _DEFAULTS["FGF2_uM"]  # 20 ng/mL
 
 def _fgf2_50(v: dict[str, float]) -> None:
-    v["FGF2_ng_mL"] = 50.0
+    v["FGF2_uM"] = ng_mL_to_uM(50.0, PROTEIN_MW_KDA["FGF2"])  # 50 ng/mL
 
 def _fgf4(v: dict[str, float]) -> None:
-    v["FGF4_ng_mL"] = 100.0
+    v["FGF4_uM"] = _DEFAULTS["FGF4_uM"]
 
 def _fgf8(v: dict[str, float]) -> None:
-    v["FGF8_ng_mL"] = 100.0
+    v["FGF8_uM"] = _DEFAULTS["FGF8_uM"]
 
 def _i_activin_dapt_sr11(v: dict[str, float]) -> None:
     """I/Activin/DAPT/SR11 = IWP2 + Activin A + DAPT + SR11237 (retinoid)."""
     v["IWP2_uM"] = 5.0
-    v["ActivinA_ng_mL"] = 50.0
+    v["ActivinA_uM"] = _DEFAULTS["ActivinA_uM"]
     v["DAPT_uM"] = 2.5
-    v["RA_nM"] = 100.0  # SR11237 treated as RA equivalent
+    v["RA_uM"] = _DEFAULTS["RA_uM"]  # SR11237 treated as RA equivalent
 
 def _iwp2(v: dict[str, float]) -> None:
     v["IWP2_uM"] = 5.0
@@ -258,48 +267,48 @@ def _iwp2_switch_chir(v: dict[str, float]) -> None:
 
 def _iwp2_sag(v: dict[str, float]) -> None:
     v["IWP2_uM"] = 5.0
-    v["SAG_nM"] = 50.0
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"]
 
 def _ldn(v: dict[str, float]) -> None:
-    v["LDN193189_nM"] = 100.0
+    v["LDN193189_uM"] = _DEFAULTS["LDN193189_uM"]
 
 def _ra10(v: dict[str, float]) -> None:
-    v["RA_nM"] = 10.0
+    v["RA_uM"] = nM_to_uM(10.0)  # 10 nM = 0.01 µM
 
 def _ra100(v: dict[str, float]) -> None:
-    v["RA_nM"] = 100.0
+    v["RA_uM"] = _DEFAULTS["RA_uM"]  # 100 nM = 0.1 µM
 
 def _s_i_e_fgf2(v: dict[str, float]) -> None:
     """S/I/E/FGF2 = SB431542 + IWP2 + EGF + FGF2."""
     v["SB431542_uM"] = 10.0
     v["IWP2_uM"] = 5.0
-    v["EGF_ng_mL"] = 20.0
-    v["FGF2_ng_mL"] = 20.0
+    v["EGF_uM"] = _DEFAULTS["EGF_uM"]
+    v["FGF2_uM"] = _DEFAULTS["FGF2_uM"]
 
 def _sag_chir_d16_21(v: dict[str, float]) -> None:
     """SAG full window, CHIR days 16-21 only."""
-    v["SAG_nM"] = 50.0
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"]
     v["CHIR99021_uM"] = 1.5 * _time_fraction(16, 21)
 
 def _sag_chird10_21(v: dict[str, float]) -> None:
     """SAG full window, CHIR days 10-21 only."""
-    v["SAG_nM"] = 50.0
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"]
     v["CHIR99021_uM"] = 1.5 * _time_fraction(10, 21)
 
 def _sag_d11_16(v: dict[str, float]) -> None:
-    v["SAG_nM"] = 50.0 * _time_fraction(11, 16)
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"] * _time_fraction(11, 16)
 
 def _sag_d16_21(v: dict[str, float]) -> None:
-    v["SAG_nM"] = 50.0 * _time_fraction(16, 21)
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"] * _time_fraction(16, 21)
 
 def _sag_d6_11(v: dict[str, float]) -> None:
-    v["SAG_nM"] = 50.0 * _time_fraction(6, 11)
+    v["SAG_uM"] = _DEFAULTS["SAG_uM"] * _time_fraction(6, 11)
 
 def _sag1000(v: dict[str, float]) -> None:
-    v["SAG_nM"] = 1000.0
+    v["SAG_uM"] = nM_to_uM(1000.0)  # 1000 nM = 1.0 µM
 
 def _sag250(v: dict[str, float]) -> None:
-    v["SAG_nM"] = 250.0
+    v["SAG_uM"] = nM_to_uM(250.0)  # 250 nM = 0.25 µM
 
 
 # ==============================================================================
@@ -407,3 +416,9 @@ if __name__ == "__main__":
         logger.info("  %s -> %s", cond, ', '.join(parts))
 
     logger.info("Full matrix:\n%s", df.to_string())
+
+    # Save morphogen matrix for downstream pipeline steps (04, 05, 06)
+    from gopro.config import DATA_DIR
+    output_path = DATA_DIR / "morphogen_matrix_amin_kelley.csv"
+    df.to_csv(str(output_path))
+    logger.info("Saved morphogen matrix to %s", output_path)

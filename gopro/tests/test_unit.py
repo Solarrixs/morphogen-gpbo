@@ -84,7 +84,7 @@ class TestBuildTrainingSet:
             index=["cond_1", "cond_2"],
         )
         X = pd.DataFrame(
-            {"CHIR99021_uM": [1.5, 3.0], "SAG_nM": [250, 1000]},
+            {"CHIR99021_uM": [1.5, 3.0], "SAG_uM": [0.25, 1.0]},
             index=["cond_1", "cond_2"],
         )
         y_path = tmp_path / "Y.csv"
@@ -324,7 +324,7 @@ class TestVisualizationReport:
         np.random.seed(42)
         return pd.DataFrame(
             np.random.rand(10, 5),
-            columns=["CHIR99021_uM", "BMP4_ng_mL", "SAG_nM", "RA_nM", "log_harvest_day"],
+            columns=["CHIR99021_uM", "BMP4_uM", "SAG_uM", "RA_uM", "log_harvest_day"],
             index=[f"cond_{i}" for i in range(10)],
         )
 
@@ -332,9 +332,9 @@ class TestVisualizationReport:
     def sample_recs(self):
         return pd.DataFrame({
             "CHIR99021_uM": [1.5, 3.0],
-            "BMP4_ng_mL": [10.0, 20.0],
-            "SAG_nM": [250, 500],
-            "RA_nM": [0, 100],
+            "BMP4_uM": [0.000769, 0.001538],
+            "SAG_uM": [0.25, 0.5],
+            "RA_uM": [0, 0.1],
             "log_harvest_day": [4.0, 4.2],
             "predicted_y0_mean": [0.5, 0.6],
             "predicted_y0_std": [0.1, 0.2],
@@ -399,7 +399,7 @@ class TestVisualizationReport:
         from gopro.visualize_report import load_diagnostics
         diag = pd.DataFrame([{
             "round": 1, "n_training_points": 20,
-            "lengthscale_CHIR99021_uM": 0.5, "lengthscale_SAG_nM": 1.2,
+            "lengthscale_CHIR99021_uM": 0.5, "lengthscale_SAG_uM": 1.2,
         }])
         path = tmp_path / "diag.csv"
         diag.to_csv(path, index=False)

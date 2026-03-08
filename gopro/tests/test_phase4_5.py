@@ -65,7 +65,7 @@ class TestBuildVirtualMorphogenMatrix:
 
         real_morphogens = pd.DataFrame({
             "CHIR99021_uM": [1.5, 0.0],
-            "SAG_nM": [0.0, 250.0],
+            "SAG_uM": [0.0, 0.25],
             "log_harvest_day": [math.log(72), math.log(72)],
         }, index=["CHIR1.5", "SAG250"])
 
@@ -94,7 +94,7 @@ class TestBuildVirtualMorphogenMatrix:
         virtual_fracs, morph_path = sample_data
         result = step05.build_virtual_morphogen_matrix(virtual_fracs, morph_path)
         assert result.loc["CHIR1.5_day60", "CHIR99021_uM"] == 1.5
-        assert result.loc["SAG250_day90", "SAG_nM"] == 250.0
+        assert result.loc["SAG250_day90", "SAG_uM"] == 0.25
 
     def test_missing_condition_skipped(self, tmp_path):
         virtual_fracs = pd.DataFrame({
@@ -166,14 +166,14 @@ class TestEncodeProtocol:
     """Tests for CellFlow protocol encoding."""
 
     def test_basic_encoding(self):
-        vec = {"CHIR99021_uM": 1.5, "SAG_nM": 250.0, "log_harvest_day": math.log(21)}
+        vec = {"CHIR99021_uM": 1.5, "SAG_uM": 0.25, "log_harvest_day": math.log(21)}
         enc = step06.encode_protocol_cellflow(vec)
         assert "modulators" in enc
         assert len(enc["modulators"]) == 2  # CHIR + SAG
         assert enc["harvest_day"] == 21
 
     def test_zero_morphogens_excluded(self):
-        vec = {"CHIR99021_uM": 0.0, "SAG_nM": 250.0, "log_harvest_day": math.log(21)}
+        vec = {"CHIR99021_uM": 0.0, "SAG_uM": 0.25, "log_harvest_day": math.log(21)}
         enc = step06.encode_protocol_cellflow(vec)
         assert len(enc["modulators"]) == 1  # only SAG
 
@@ -183,7 +183,7 @@ class TestEncodeProtocol:
         assert "smiles" in enc["modulators"][0]
 
     def test_no_smiles_for_proteins(self):
-        vec = {"BMP4_ng_mL": 10.0, "log_harvest_day": math.log(21)}
+        vec = {"BMP4_uM": 0.000769, "log_harvest_day": math.log(21)}
         enc = step06.encode_protocol_cellflow(vec)
         assert "smiles" not in enc["modulators"][0]
 
@@ -204,13 +204,13 @@ class TestVirtualScreenGrid:
     def test_basic_grid(self):
         ranges = {
             "CHIR99021_uM": [0.0, 1.5, 3.0],
-            "SAG_nM": [0.0, 250.0],
+            "SAG_uM": [0.0, 0.25],
         }
         grid = step06.generate_virtual_screen_grid(ranges, harvest_days=[21])
         # 3 * 2 = 6 combinations (all others are [0.0])
         assert len(grid) == 6
         assert "CHIR99021_uM" in grid.columns
-        assert "SAG_nM" in grid.columns
+        assert "SAG_uM" in grid.columns
 
     def test_harvest_day_variation(self):
         ranges = {"CHIR99021_uM": [1.5]}
@@ -224,9 +224,9 @@ class TestVirtualScreenGrid:
     def test_max_combinations_limit(self):
         ranges = {
             "CHIR99021_uM": [0.0, 0.5, 1.0, 1.5, 3.0, 6.0, 9.0, 12.0],
-            "SAG_nM": [0.0, 50, 100, 250, 500, 1000, 1500, 2000],
-            "BMP4_ng_mL": [0.0, 5, 10, 25, 50],
-            "RA_nM": [0.0, 10, 50, 100, 500, 1000],
+            "SAG_uM": [0.0, 0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0],
+            "BMP4_uM": [0.0, 0.000385, 0.000769, 0.001923, 0.003846],
+            "RA_uM": [0.0, 0.01, 0.05, 0.1, 0.5, 1.0],
         }
         grid = step06.generate_virtual_screen_grid(
             ranges, max_combinations=100
@@ -250,8 +250,8 @@ class TestBaselinePredictor:
     def test_produces_valid_fractions(self):
         protocols = pd.DataFrame({
             "CHIR99021_uM": [1.5, 3.0, 0.0],
-            "SAG_nM": [0.0, 250.0, 1000.0],
-            "BMP4_ng_mL": [0.0, 10.0, 0.0],
+            "SAG_uM": [0.0, 0.25, 1.0],
+            "BMP4_uM": [0.0, 0.000769, 0.0],
             "log_harvest_day": [math.log(21)] * 3,
         }, index=["p1", "p2", "p3"])
 
@@ -269,9 +269,9 @@ class TestBaselinePredictor:
     def test_different_protocols_different_results(self):
         protocols = pd.DataFrame({
             "CHIR99021_uM": [0.0, 9.0],
-            "SAG_nM": [0.0, 0.0],
-            "BMP4_ng_mL": [50.0, 0.0],
-            "LDN193189_nM": [0.0, 200.0],
+            "SAG_uM": [0.0, 0.0],
+            "BMP4_uM": [0.003846, 0.0],
+            "LDN193189_uM": [0.0, 0.2],
             "SB431542_uM": [0.0, 10.0],
             "log_harvest_day": [math.log(21)] * 2,
         }, index=["bmp_high", "neural_induction"])
@@ -289,13 +289,13 @@ class TestPredictionConfidence:
     def test_nearby_predictions_high_confidence(self):
         training = pd.DataFrame({
             "CHIR99021_uM": [1.5, 3.0, 0.0],
-            "SAG_nM": [0.0, 250.0, 500.0],
+            "SAG_uM": [0.0, 0.25, 0.5],
         }, index=["t1", "t2", "t3"])
 
         # Near training point
         predictions = pd.DataFrame({
             "CHIR99021_uM": [1.6],
-            "SAG_nM": [10.0],
+            "SAG_uM": [0.01],
         }, index=["near"])
 
         confidence = step06.compute_prediction_confidence(predictions, training)
@@ -304,13 +304,13 @@ class TestPredictionConfidence:
     def test_far_predictions_low_confidence(self):
         training = pd.DataFrame({
             "CHIR99021_uM": [1.5, 3.0],
-            "SAG_nM": [0.0, 250.0],
+            "SAG_uM": [0.0, 0.25],
         }, index=["t1", "t2"])
 
         # Far from training data
         predictions = pd.DataFrame({
             "CHIR99021_uM": [100.0],
-            "SAG_nM": [10000.0],
+            "SAG_uM": [10.0],
         }, index=["far"])
 
         confidence = step06.compute_prediction_confidence(predictions, training)
@@ -319,11 +319,11 @@ class TestPredictionConfidence:
     def test_confidence_in_range(self):
         training = pd.DataFrame({
             "CHIR99021_uM": np.random.rand(20) * 10,
-            "SAG_nM": np.random.rand(20) * 1000,
+            "SAG_uM": np.random.rand(20) * 2.0,
         })
         predictions = pd.DataFrame({
             "CHIR99021_uM": np.random.rand(10) * 10,
-            "SAG_nM": np.random.rand(10) * 1000,
+            "SAG_uM": np.random.rand(10) * 2.0,
         })
 
         confidence = step06.compute_prediction_confidence(predictions, training)
@@ -353,7 +353,7 @@ class TestMultiFidelityIntegration:
         )
         X_real = pd.DataFrame({
             "CHIR99021_uM": np.random.uniform(0, 6, n_real),
-            "SAG_nM": np.random.uniform(0, 1000, n_real),
+            "SAG_uM": np.random.uniform(0, 2.0, n_real),
             "log_harvest_day": np.log(72) * np.ones(n_real),
         }, index=Y_real.index)
 
@@ -366,7 +366,7 @@ class TestMultiFidelityIntegration:
         )
         X_cr2 = pd.DataFrame({
             "CHIR99021_uM": np.random.uniform(0, 6, n_cr2),
-            "SAG_nM": np.random.uniform(0, 1000, n_cr2),
+            "SAG_uM": np.random.uniform(0, 2.0, n_cr2),
             "log_harvest_day": np.log(90) * np.ones(n_cr2),
         }, index=Y_cr2.index)
 
@@ -379,7 +379,7 @@ class TestMultiFidelityIntegration:
         )
         X_cf = pd.DataFrame({
             "CHIR99021_uM": np.random.uniform(0, 6, n_cf),
-            "SAG_nM": np.random.uniform(0, 1000, n_cf),
+            "SAG_uM": np.random.uniform(0, 2.0, n_cf),
             "log_harvest_day": np.log(21) * np.ones(n_cf),
         }, index=Y_cf.index)
 
@@ -484,16 +484,16 @@ class TestPhase45Properties:
         for _ in range(20):
             protocols = pd.DataFrame({
                 "CHIR99021_uM": [np.random.uniform(0, 12)],
-                "SAG_nM": [np.random.uniform(0, 2000)],
-                "BMP4_ng_mL": [np.random.uniform(0, 50)],
-                "SHH_ng_mL": [np.random.uniform(0, 500)],
-                "RA_nM": [np.random.uniform(0, 1000)],
-                "FGF8_ng_mL": [np.random.uniform(0, 200)],
+                "SAG_uM": [np.random.uniform(0, 2.0)],
+                "BMP4_uM": [np.random.uniform(0, 0.004)],
+                "SHH_uM": [np.random.uniform(0, 0.026)],
+                "RA_uM": [np.random.uniform(0, 1.0)],
+                "FGF8_uM": [np.random.uniform(0, 0.009)],
                 "IWP2_uM": [np.random.uniform(0, 10)],
-                "LDN193189_nM": [np.random.uniform(0, 500)],
+                "LDN193189_uM": [np.random.uniform(0, 0.5)],
                 "SB431542_uM": [np.random.uniform(0, 20)],
                 "DAPT_uM": [np.random.uniform(0, 10)],
-                "EGF_ng_mL": [np.random.uniform(0, 50)],
+                "EGF_uM": [np.random.uniform(0, 0.008)],
                 "log_harvest_day": [math.log(np.random.uniform(7, 120))],
             }, index=["test"])
 
@@ -504,7 +504,7 @@ class TestPhase45Properties:
 
     def test_protocol_encoding_deterministic(self):
         """Same input should always produce same encoding."""
-        vec = {"CHIR99021_uM": 1.5, "SAG_nM": 250.0, "log_harvest_day": math.log(21)}
+        vec = {"CHIR99021_uM": 1.5, "SAG_uM": 0.25, "log_harvest_day": math.log(21)}
         enc1 = step06.encode_protocol_cellflow(vec)
         enc2 = step06.encode_protocol_cellflow(vec)
         assert enc1 == enc2
@@ -513,13 +513,13 @@ class TestPhase45Properties:
         """Confidence should decrease with distance from training data."""
         training = pd.DataFrame({
             "CHIR99021_uM": [1.5],
-            "SAG_nM": [250.0],
+            "SAG_uM": [0.25],
         }, index=["t1"])
 
         # Near and far predictions
         predictions = pd.DataFrame({
             "CHIR99021_uM": [1.6, 100.0],
-            "SAG_nM": [260.0, 50000.0],
+            "SAG_uM": [0.26, 50.0],
         }, index=["near", "far"])
 
         confidence = step06.compute_prediction_confidence(predictions, training)

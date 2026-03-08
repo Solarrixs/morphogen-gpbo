@@ -429,6 +429,8 @@ def score_all_conditions(
     query_adata: sc.AnnData,
     braun_profiles: pd.DataFrame,
     condition_key: str = "condition",
+    hnoca_level3_profiles: Optional[pd.DataFrame] = None,
+    label_map: Optional[dict[str, str]] = None,
 ) -> pd.DataFrame:
     """Compute full fidelity report for all conditions in the query data.
 
@@ -439,15 +441,17 @@ def score_all_conditions(
     - off_target_fraction: fraction of non-neural cells
     - shannon_entropy: cell type diversity (bits)
     - normalized_entropy: entropy normalized to [0, 1]
-    - rss_best_region: best-matching Braun fetal brain region
-    - rss_score: cosine similarity to best fetal region
+    - rss_best_region: best-matching brain region via level-3 composition
+    - rss_score: cosine similarity to best region profile
     - composite_fidelity: weighted combination of all scores [0, 1]
 
     Args:
         query_adata: Mapped AnnData with HNOCA-transferred labels in obs.
-        braun_profiles: Fetal brain composition profiles (from
-            extract_braun_region_profiles).
+        braun_profiles: Fetal brain composition profiles (fallback for RSS).
         condition_key: Column identifying experimental conditions.
+        hnoca_level3_profiles: HNOCA region profiles at level-3 granularity.
+            If provided, used for RSS instead of braun_profiles (much better
+            region discrimination).
 
     Returns:
         DataFrame with one row per condition, sorted by composite_fidelity
@@ -456,7 +460,18 @@ def score_all_conditions(
     obs = query_adata.obs
     pred_level1 = f"predicted_{ANNOT_LEVEL_1}"
     pred_level2 = f"predicted_{ANNOT_LEVEL_2}"
+    pred_level3 = f"predicted_{ANNOT_LEVEL_3}"
     pred_region = f"predicted_{ANNOT_REGION}"
+
+    # Determine which profiles and label level to use for RSS
+    if hnoca_level3_profiles is not None and pred_level3 in obs.columns:
+        rss_profiles = hnoca_level3_profiles
+        rss_label_key = pred_level3
+        logger.info("Using HNOCA level-3 profiles for RSS (region-specific cell types)")
+    else:
+        rss_profiles = braun_profiles
+        rss_label_key = pred_level1
+        logger.info("Using Braun CellClass profiles for RSS (level-1 fallback)")
 
     conditions = obs[condition_key].unique()
     logger.info("Scoring %d conditions...", len(conditions))
@@ -486,10 +501,11 @@ def score_all_conditions(
         h = shannon_entropy(frac_array)
         h_norm = normalized_entropy(frac_array)
 
-        # RSS: cosine similarity to fetal brain region profiles
-        # Map the condition's level-1 composition to Braun CellClass space
-        level1_fracs = subset[pred_level1].value_counts(normalize=True)
-        rss_region, rss_score = compute_rss(level1_fracs, braun_profiles)
+        # RSS: cosine similarity to region profiles
+        rss_fracs = subset[rss_label_key].value_counts(normalize=True)
+        if label_map is not None and rss_label_key == pred_level1:
+            rss_fracs = align_composition_to_braun(rss_fracs, label_map)
+        rss_region, rss_score = compute_rss(rss_fracs, rss_profiles)
 
         # Composite fidelity
         fidelity = compute_composite_fidelity(
@@ -572,6 +588,53 @@ def assign_cell_level_fidelity(
 # ---------------------------------------------------------------------------
 # Label alignment utilities
 # ---------------------------------------------------------------------------
+
+def build_hnoca_region_profiles_level3(
+    ref_path: Path,
+    cache_path: Optional[Path] = None,
+) -> pd.DataFrame:
+    """Build region-level cell type profiles from HNOCA reference using level-3 labels.
+
+    Level-3 labels (e.g. "Cerebellar NPC", "Thalamic Neuron") are region-specific,
+    giving perfect discrimination between brain regions (cosine similarity ≈ 0
+    between all region pairs). This is much more informative than level-1 labels
+    for RSS scoring.
+
+    Args:
+        ref_path: Path to hnoca_minimal_for_mapping.h5ad.
+        cache_path: If provided and exists, load cached profiles instead.
+
+    Returns:
+        DataFrame with rows=annot_region_rev2, columns=annot_level_3_rev2,
+        values=fractions.
+    """
+    if cache_path is not None and cache_path.exists():
+        logger.info("Loading cached HNOCA level-3 region profiles from %s", cache_path.name)
+        return pd.read_csv(str(cache_path), index_col=0)
+
+    logger.info("Building HNOCA region profiles from level-3 labels...")
+    ref = ad.read_h5ad(str(ref_path), backed="r")
+
+    profiles = (
+        ref.obs
+        .groupby("annot_region_rev2")["annot_level_3_rev2"]
+        .value_counts(normalize=True)
+        .unstack(fill_value=0.0)
+    )
+    ref.file.close()
+
+    # Drop "Unspecific" region — not a real brain region
+    if "Unspecific" in profiles.index:
+        profiles = profiles.drop("Unspecific")
+
+    logger.info("Built profiles: %d regions x %d cell types", profiles.shape[0], profiles.shape[1])
+
+    if cache_path is not None:
+        profiles.to_csv(str(cache_path))
+        logger.info("Cached to %s", cache_path.name)
+
+    return profiles
+
 
 def build_hnoca_to_braun_label_map() -> dict[str, str]:
     """Build a mapping from HNOCA level-1 labels to Braun CellClass labels.
@@ -700,17 +763,22 @@ def main() -> None:
                 condition_key, query.obs[condition_key].nunique())
 
     # -----------------------------------------------------------------------
-    # Step 3: Build label alignment map
+    # Step 3: Build region profiles for RSS scoring
     # -----------------------------------------------------------------------
-    logger.info("--- STEP 3: Align HNOCA labels to Braun CellClass space ---")
+    logger.info("--- STEP 3: Build region profiles for RSS ---")
+
+    # Build HNOCA-based level-3 profiles (region-specific cell types)
+    ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
+    hnoca_l3_profiles = None
+    if ref_path.exists():
+        hnoca_l3_profiles = build_hnoca_region_profiles_level3(
+            ref_path,
+            cache_path=DATA_DIR / "hnoca_region_profiles_level3.csv",
+        )
+    else:
+        logger.warning("HNOCA reference not found — falling back to Braun CellClass RSS")
 
     label_map = build_hnoca_to_braun_label_map()
-    logger.info("HNOCA -> Braun label mapping:")
-    for hnoca, braun in sorted(label_map.items()):
-        logger.info("  %s -> %s", hnoca, braun)
-
-    # Re-key per-condition level-1 compositions into Braun space for RSS
-    # This is done inside score_all_conditions via compute_rss
 
     # -----------------------------------------------------------------------
     # Step 4: Score all conditions
@@ -721,6 +789,8 @@ def main() -> None:
         query_adata=query,
         braun_profiles=braun_profiles,
         condition_key=condition_key,
+        hnoca_level3_profiles=hnoca_l3_profiles,
+        label_map=label_map,
     )
 
     # -----------------------------------------------------------------------

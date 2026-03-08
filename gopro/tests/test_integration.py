@@ -52,8 +52,8 @@ class TestMorphogenParserIntegration:
     def test_sag_concentrations(self):
         conditions = ["SAG250", "SAG1000"]
         matrix = morphogen_parser.build_morphogen_matrix(conditions)
-        assert matrix.loc["SAG250", "SAG_nM"] == 250.0
-        assert matrix.loc["SAG1000", "SAG_nM"] == 1000.0
+        assert matrix.loc["SAG250", "SAG_uM"] == pytest.approx(0.25)
+        assert matrix.loc["SAG1000", "SAG_uM"] == pytest.approx(1.0)
 
     def test_chir_concentrations(self):
         conditions = ["CHIR1.5", "CHIR3"]
@@ -90,8 +90,8 @@ class TestGPBOIntegration:
         )
 
         X = pd.DataFrame(
-            np.random.rand(n_conditions, 4) * np.array([3, 50, 1000, 4.5]),
-            columns=["CHIR99021_uM", "BMP4_ng_mL", "SAG_nM", "log_harvest_day"],
+            np.random.rand(n_conditions, 4) * np.array([3, 0.004, 1.0, 4.5]),
+            columns=["CHIR99021_uM", "BMP4_uM", "SAG_uM", "log_harvest_day"],
             index=conditions,
         )
 
@@ -138,10 +138,11 @@ class TestGPBOIntegration:
             n_recommendations=6,
             round_num=1,
         )
-        # Check bounds for columns that have them
-        for col in X.columns:
-            if col in step04.MORPHOGEN_BOUNDS and col in recs.columns:
-                lo, hi = step04.MORPHOGEN_BOUNDS[col]
+        # Check bounds: use dynamic bounds (training range + padding)
+        active_bounds, _ = step04._compute_active_bounds(X, list(X.columns))
+        for col in recs.columns:
+            if col in active_bounds:
+                lo, hi = active_bounds[col]
                 assert recs[col].min() >= lo - 0.01, f"{col} below lower bound"
                 assert recs[col].max() <= hi + 0.01, f"{col} above upper bound"
 
@@ -285,9 +286,9 @@ class TestVisualizationIntegration:
         fidelity.to_csv(tmp_path / "fidelity_report.csv")
 
         # morphogen_matrix_amin_kelley.csv
-        morph_cols = ["CHIR99021_uM", "BMP4_ng_mL", "SAG_nM", "log_harvest_day"]
+        morph_cols = ["CHIR99021_uM", "BMP4_uM", "SAG_uM", "log_harvest_day"]
         morphogens = pd.DataFrame(
-            np.random.rand(n_cond, 4) * [3, 50, 1000, 4.5],
+            np.random.rand(n_cond, 4) * [3, 0.004, 1.0, 4.5],
             columns=morph_cols, index=conditions,
         )
         morphogens.to_csv(tmp_path / "morphogen_matrix_amin_kelley.csv")
@@ -295,7 +296,7 @@ class TestVisualizationIntegration:
         # gp_recommendations_round1.csv
         wells = [f"A{i+1}" for i in range(6)]
         recs = pd.DataFrame(
-            np.random.rand(6, 4) * [3, 50, 1000, 4.5],
+            np.random.rand(6, 4) * [3, 0.004, 1.0, 4.5],
             columns=morph_cols, index=pd.Index(wells, name="well"),
         )
         recs["fidelity"] = 1.0

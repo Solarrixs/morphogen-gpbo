@@ -39,8 +39,9 @@ import scanpy as sc
 
 warnings.filterwarnings("ignore")
 
-PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
-DATA_DIR = PROJECT_DIR / "data"
+from gopro.config import DATA_DIR, get_logger
+
+logger = get_logger(__name__)
 
 # Timepoints in the Azbukina temporal atlas
 ATLAS_TIMEPOINTS = [7, 15, 30, 60, 90, 120]
@@ -70,9 +71,9 @@ def load_temporal_atlas(
     Returns:
         AnnData with numeric time_key in obs.
     """
-    print(f"  Loading temporal atlas from {atlas_path.name}...")
+    logger.info("Loading temporal atlas from %s...", atlas_path.name)
     adata = sc.read_h5ad(str(atlas_path))
-    print(f"  Atlas: {adata.n_obs:,} cells x {adata.n_vars:,} genes")
+    logger.info("Atlas: %s cells x %s genes", f"{adata.n_obs:,}", f"{adata.n_vars:,}")
 
     if time_key not in adata.obs.columns:
         raise ValueError(
@@ -83,11 +84,11 @@ def load_temporal_atlas(
     # Ensure time key is numeric
     adata.obs[time_key] = pd.to_numeric(adata.obs[time_key])
     timepoints = sorted(adata.obs[time_key].unique())
-    print(f"  Timepoints: {timepoints}")
+    logger.info("Timepoints: %s", timepoints)
 
     for tp in timepoints:
         n = (adata.obs[time_key] == tp).sum()
-        print(f"    Day {tp}: {n:,} cells")
+        logger.info("Day %s: %s cells", tp, f"{n:,}")
 
     return adata
 
@@ -110,14 +111,14 @@ def preprocess_for_moscot(
         Preprocessed AnnData with PCA in obsm and neighbors computed.
     """
     if "X_pca" not in adata.obsm:
-        print("  Computing PCA...")
+        logger.info("Computing PCA...")
         sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
         sc.pp.highly_variable_genes(adata, n_top_genes=2000)
         sc.pp.pca(adata, n_comps=n_pcs, use_highly_variable=True)
 
     if "neighbors" not in adata.uns:
-        print("  Computing neighbor graph...")
+        logger.info("Computing neighbor graph...")
         sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs)
 
     return adata
@@ -145,20 +146,20 @@ def compute_transport_maps(
         moscot TemporalProblem with solved transport maps.
     """
     if cache_path is not None and cache_path.exists():
-        print(f"  Loading cached transport maps from {cache_path.name}...")
+        logger.info("Loading cached transport maps from %s...", cache_path.name)
         with open(str(cache_path), "rb") as f:
             return pickle.load(f)
 
     import moscot as mt
 
-    print("  Setting up moscot TemporalProblem...")
+    logger.info("Setting up moscot TemporalProblem...")
     problem = mt.problems.TemporalProblem(adata)
     problem = problem.prepare(
         time_key=time_key,
         joint_attr={"attr": "obsm", "key": "X_pca"},
     )
 
-    print("  Solving optimal transport...")
+    logger.info("Solving optimal transport...")
     problem = problem.solve(
         epsilon=epsilon,
         tau_a=tau_a,
@@ -166,7 +167,7 @@ def compute_transport_maps(
     )
 
     if cache_path is not None:
-        print(f"  Caching transport maps to {cache_path.name}...")
+        logger.info("Caching transport maps to %s...", cache_path.name)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(str(cache_path), "wb") as f:
             pickle.dump(problem, f)
@@ -191,7 +192,7 @@ def build_cellrank_kernel(
     """
     import cellrank as cr
 
-    print("  Building CellRank 2 RealTimeKernel...")
+    logger.info("Building CellRank 2 RealTimeKernel...")
 
     # Ensure time_key is categorical for CellRank
     if not pd.api.types.is_categorical_dtype(adata.obs.get("day")):
@@ -204,7 +205,7 @@ def build_cellrank_kernel(
         threshold="auto",
     )
 
-    print("  Transition matrix computed.")
+    logger.info("Transition matrix computed.")
     return rtk
 
 
@@ -225,15 +226,15 @@ def compute_fate_probabilities(
     """
     import cellrank as cr
 
-    print(f"  Computing fate probabilities (n_macrostates={n_macrostates})...")
+    logger.info("Computing fate probabilities (n_macrostates=%d)...", n_macrostates)
     estimator = cr.estimators.GPCCA(kernel)
     estimator.compute_macrostates(n_states=n_macrostates)
     estimator.set_terminal_states()
     estimator.compute_fate_probabilities()
 
     fate_probs = estimator.fate_probabilities
-    print(f"  Fate probabilities: {fate_probs.shape}")
-    print(f"  Terminal states: {list(estimator.terminal_states.cat.categories)}")
+    logger.info("Fate probabilities: %s", fate_probs.shape)
+    logger.info("Terminal states: %s", list(estimator.terminal_states.cat.categories))
 
     return estimator, fate_probs
 
@@ -271,36 +272,68 @@ def project_query_forward(
 
     from sklearn.neighbors import NearestNeighbors
 
-    print(f"\n  Projecting {query_adata.n_obs:,} query cells "
-          f"from Day {query_timepoint} to {target_timepoints}...")
+    logger.info("Projecting %s query cells from Day %d to %s...",
+                f"{query_adata.n_obs:,}", query_timepoint, target_timepoints)
 
     # Find nearest atlas cells at the source timepoint closest to query
     # Use the atlas timepoint closest to but <= query_timepoint
     atlas_timepoints = sorted(atlas_adata.obs["day"].unique())
     source_tp = max([t for t in atlas_timepoints if t <= query_timepoint],
                     default=atlas_timepoints[0])
-    print(f"  Using atlas Day {source_tp} as source for transport")
+    logger.info("Using atlas Day %s as source for transport", source_tp)
 
     # Get source atlas cells
     source_mask = atlas_adata.obs["day"] == source_tp
     source_pca = atlas_adata[source_mask].obsm["X_pca"]
     source_indices = np.where(source_mask)[0]
 
-    # Get query PCA embeddings
-    if "X_pca" not in query_adata.obsm and "X_scpoli" in query_adata.obsm:
-        query_embedding = query_adata.obsm["X_scpoli"]
-    elif "X_pca" in query_adata.obsm:
+    # Project query cells into atlas PCA space
+    if "X_pca" in query_adata.obsm:
         query_embedding = query_adata.obsm["X_pca"]
+        # Match dimensionality if needed
+        min_dim = min(source_pca.shape[1], query_embedding.shape[1])
+        source_pca = source_pca[:, :min_dim]
+        query_embedding = query_embedding[:, :min_dim]
     else:
-        raise ValueError("Query needs X_pca or X_scpoli in obsm")
+        # Re-embed query through atlas PCA loadings
+        logger.info("Projecting query cells into atlas PCA space...")
+        if "PCs" in atlas_adata.varm:
+            pca_loadings = atlas_adata.varm["PCs"]
+            hvg_mask = atlas_adata.var.get("highly_variable", pd.Series(True, index=atlas_adata.var_names))
+            hvg_genes = atlas_adata.var_names[hvg_mask]
+            shared_genes = query_adata.var_names.intersection(hvg_genes)
+            logger.info("Shared HVGs for PCA projection: %d / %d", len(shared_genes), len(hvg_genes))
+            if len(shared_genes) < 100:
+                logger.warning("Low gene overlap (%d) — projection quality may be poor", len(shared_genes))
 
-    # Match dimensionality
-    min_dim = min(source_pca.shape[1], query_embedding.shape[1])
-    source_pca = source_pca[:, :min_dim]
-    query_embedding = query_embedding[:, :min_dim]
+            # Get query expression for shared genes, normalize
+            query_subset = query_adata[:, shared_genes].copy()
+            sc.pp.normalize_total(query_subset, target_sum=1e4)
+            sc.pp.log1p(query_subset)
+
+            # Project through atlas PCA loadings
+            gene_idx = [list(hvg_genes).index(g) for g in shared_genes]
+            query_expr = query_subset.X.toarray() if hasattr(query_subset.X, "toarray") else np.asarray(query_subset.X)
+            query_embedding = query_expr @ pca_loadings[gene_idx, :]
+
+            # Match dimensions
+            min_dim = min(source_pca.shape[1], query_embedding.shape[1])
+            source_pca = source_pca[:, :min_dim]
+            query_embedding = query_embedding[:, :min_dim]
+        else:
+            # Fallback: compute joint PCA
+            logger.warning("No PCA loadings in atlas — computing joint PCA")
+            combined = ad.concat([atlas_adata[source_mask], query_adata], join="inner")
+            sc.pp.normalize_total(combined, target_sum=1e4)
+            sc.pp.log1p(combined)
+            sc.pp.highly_variable_genes(combined, n_top_genes=2000)
+            sc.pp.pca(combined, n_comps=30)
+            n_atlas = int(source_mask.sum())
+            source_pca = combined.obsm["X_pca"][:n_atlas]
+            query_embedding = combined.obsm["X_pca"][n_atlas:]
 
     # Find nearest atlas neighbors for each query cell
-    print("  Finding nearest atlas neighbors for query cells...")
+    logger.info("Finding nearest atlas neighbors for query cells...")
     nn = NearestNeighbors(n_neighbors=10, metric="euclidean", n_jobs=-1)
     nn.fit(source_pca)
     distances, neighbor_idx = nn.kneighbors(query_embedding)
@@ -319,12 +352,12 @@ def project_query_forward(
                            if source_tp <= t <= target_tp]
 
         if len(intermediate_tps) < 2:
-            print(f"  WARNING: No transport path from Day {source_tp} "
-                  f"to Day {target_tp}, skipping")
+            logger.warning("No transport path from Day %s to Day %s, skipping",
+                          source_tp, target_tp)
             continue
 
-        print(f"  Projecting to Day {target_tp} "
-              f"(chain: {' -> '.join(map(str, intermediate_tps))})")
+        logger.info("Projecting to Day %s (chain: %s)",
+                    target_tp, " -> ".join(map(str, intermediate_tps)))
 
         # Get target timepoint atlas cells and their labels
         target_mask = atlas_adata.obs["day"] == target_tp
@@ -340,7 +373,7 @@ def project_query_forward(
                 break
 
         if target_label_col is None:
-            print(f"  WARNING: No cell type label column found at Day {target_tp}")
+            logger.warning("No cell type label column found at Day %s", target_tp)
             continue
 
         target_labels = target_obs[target_label_col]

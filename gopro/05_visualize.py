@@ -12,15 +12,12 @@ Output:
 
 from pathlib import Path
 
-PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
-DATA_DIR = PROJECT_DIR / "data"
+from gopro.config import DATA_DIR
 
 
 if __name__ == "__main__":
-    import sys
     import argparse
 
-    sys.path.insert(0, str(PROJECT_DIR))
     from gopro.visualize_report import generate_report
 
     parser = argparse.ArgumentParser(

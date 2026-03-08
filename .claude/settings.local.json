@@ -3,7 +3,24 @@
     "allow": [
       "Bash(git pull:*)",
       "Bash(git rebase:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "mcp__claude_ai_PubMed__search_articles",
+      "WebSearch",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:www.frontiersin.org)",
+      "WebFetch(domain:www.intechopen.com)",
+      "WebFetch(domain:link.springer.com)",
+      "WebFetch(domain:www.biorxiv.org)",
+      "WebFetch(domain:www.cell.com)",
+      "WebFetch(domain:www.sciencedirect.com)",
+      "WebFetch(domain:prelights.biologists.com)",
+      "WebFetch(domain:www.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:pubmed.ncbi.nlm.nih.gov)",
+      "Bash(source:*)",
+      "Bash(python:*)"
     ]
   }
 }
