@@ -18,33 +18,32 @@ import numpy as np
 from scipy.io import mmread
 from pathlib import Path
 
-# Paths
-PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
-DATA_DIR = PROJECT_DIR / "data"
+from gopro.config import DATA_DIR, get_logger
+
+logger = get_logger(__name__)
+
 DATA_DIR.mkdir(exist_ok=True)
 
 
 def convert_geo_to_anndata(counts_path, metadata_path, genes_path, output_path, name):
     """Convert GEO MTX + CSV files to AnnData h5ad."""
-    print(f"\n{'='*60}")
-    print(f"Converting {name}")
-    print(f"{'='*60}")
+    logger.info("--- Converting %s ---", name)
 
     # Load count matrix (genes x cells in MTX format, need to transpose)
-    print(f"  Loading counts from {counts_path.name}...")
+    logger.info("Loading counts from %s...", counts_path.name)
     counts = mmread(str(counts_path)).T.tocsr()
-    print(f"  Matrix shape: {counts.shape} (cells x genes)")
+    logger.info("Matrix shape: %s (cells x genes)", counts.shape)
 
     # Load cell metadata
-    print(f"  Loading metadata from {metadata_path.name}...")
+    logger.info("Loading metadata from %s...", metadata_path.name)
     metadata = pd.read_csv(str(metadata_path), index_col=0)
-    print(f"  Metadata columns: {list(metadata.columns)}")
-    print(f"  Cells in metadata: {len(metadata)}")
+    logger.info("Metadata columns: %s", list(metadata.columns))
+    logger.info("Cells in metadata: %d", len(metadata))
 
     # Load gene info
-    print(f"  Loading gene info from {genes_path.name}...")
+    logger.info("Loading gene info from %s...", genes_path.name)
     genes = pd.read_csv(str(genes_path), index_col=0)
-    print(f"  Genes: {len(genes)}")
+    logger.info("Genes: %d", len(genes))
 
     # Verify dimensions match
     assert counts.shape[0] == len(metadata), \
@@ -62,19 +61,17 @@ def convert_geo_to_anndata(counts_path, metadata_path, genes_path, output_path, 
     # Store raw counts in layers
     adata.layers["counts"] = adata.X.copy()
 
-    print(f"  AnnData created: {adata.shape}")
-    print(f"  Saving to {output_path}...")
+    logger.info("AnnData created: %s", adata.shape)
+    logger.info("Saving to %s...", output_path)
     adata.write(str(output_path), compression="gzip")
-    print(f"  Done. File size: {output_path.stat().st_size / 1e9:.2f} GB")
+    logger.info("Done. File size: %.2f GB", output_path.stat().st_size / 1e9)
 
     return adata
 
 
 def verify_references():
     """Check that reference files exist."""
-    print("\n" + "="*60)
-    print("Verifying reference files")
-    print("="*60)
+    logger.info("--- Verifying reference files ---")
 
     files = {
         "HNOCA minimal": DATA_DIR / "hnoca_minimal_for_mapping.h5ad",
@@ -90,7 +87,7 @@ def verify_references():
         exists = path.exists()
         size = f"({path.stat().st_size / 1e9:.2f} GB)" if exists else ""
         status = "OK" if exists else "MISSING"
-        print(f"  [{status}] {name}: {path.name} {size}")
+        logger.info("  [%s] %s: %s %s", status, name, path.name, size)
         if not exists:
             all_ok = False
 
@@ -101,9 +98,9 @@ if __name__ == "__main__":
     # 1. Verify references exist
     refs_ok = verify_references()
     if not refs_ok:
-        print("\n  WARNING: Some reference files are missing!")
-        print("  Run: bash download_zenodo.sh")
-        print("  to download the HNOCA and Braun fetal brain references.\n")
+        logger.warning("Some reference files are missing!")
+        logger.warning("Run: bash download_zenodo.sh")
+        logger.warning("to download the HNOCA and Braun fetal brain references.")
 
     # 2. Convert Amin/Kelley primary screen (46 conditions, Day 72-74)
     convert_geo_to_anndata(
@@ -126,28 +123,24 @@ if __name__ == "__main__":
     # 4. Convert hCbO cerebellar organoid validation (1 protocol, high-fidelity anchor)
     hcbo_rds = DATA_DIR / "GSE233574_hCbO_processed_SeuratObject.rds"
     if hcbo_rds.exists():
-        print(f"\n  NOTE: hCbO Seurat object found ({hcbo_rds.stat().st_size / 1e9:.2f} GB)")
-        print("  This is an RDS file — needs R/sceasy conversion.")
-        print("  To convert in R:")
-        print('    sceasy::convertFormat(readRDS("GSE233574_hCbO_processed_SeuratObject.rds.gz"),')
-        print('      from="seurat", to="anndata", outFile="data/amin_kelley_hcbo.h5ad")')
+        logger.info("hCbO Seurat object found (%.2f GB)", hcbo_rds.stat().st_size / 1e9)
+        logger.info("This is an RDS file — needs R/sceasy conversion.")
+        logger.info('  sceasy::convertFormat(readRDS("GSE233574_hCbO_processed_SeuratObject.rds.gz"),')
+        logger.info('    from="seurat", to="anndata", outFile="data/amin_kelley_hcbo.h5ad")')
     else:
-        print("  hCbO Seurat object not found (optional)")
+        logger.info("hCbO Seurat object not found (optional)")
 
     # 5. Convert hMPO medial pallium organoid validation (1 protocol, high-fidelity anchor)
     hmpo_rds = DATA_DIR / "GSE233574_hMPO_processed_SeuratObject.rds"
     if hmpo_rds.exists():
-        print(f"\n  NOTE: hMPO Seurat object found ({hmpo_rds.stat().st_size / 1e9:.2f} GB)")
-        print("  This is an RDS file — needs R/sceasy conversion.")
-        print("  To convert in R:")
-        print('    sceasy::convertFormat(readRDS("GSE233574_hMPO_processed_SeuratObject.rds.gz"),')
-        print('      from="seurat", to="anndata", outFile="data/amin_kelley_hmpo.h5ad")')
+        logger.info("hMPO Seurat object found (%.2f GB)", hmpo_rds.stat().st_size / 1e9)
+        logger.info("This is an RDS file — needs R/sceasy conversion.")
+        logger.info('  sceasy::convertFormat(readRDS("GSE233574_hMPO_processed_SeuratObject.rds.gz"),')
+        logger.info('    from="seurat", to="anndata", outFile="data/amin_kelley_hmpo.h5ad")')
     else:
-        print("  hMPO Seurat object not found (optional)")
+        logger.info("hMPO Seurat object not found (optional)")
 
-    print("\n" + "="*60)
-    print("SUMMARY")
-    print("="*60)
-    print("Converted datasets saved to: data/")
+    logger.info("--- SUMMARY ---")
+    logger.info("Converted datasets saved to: data/")
     for f in sorted(DATA_DIR.glob("*.h5ad")):
-        print(f"  {f.name}: {f.stat().st_size / 1e9:.2f} GB")
+        logger.info("  %s: %.2f GB", f.name, f.stat().st_size / 1e9)

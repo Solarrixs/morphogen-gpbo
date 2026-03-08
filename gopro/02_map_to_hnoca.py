@@ -33,16 +33,13 @@ from typing import Optional
 
 warnings.filterwarnings("ignore")
 
-# Paths
-PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
-DATA_DIR = PROJECT_DIR / "data"
-MODEL_DIR = DATA_DIR / "neural_organoid_atlas/supplemental_files/scpoli_model_params"
+from gopro.config import (
+    DATA_DIR, MODEL_DIR,
+    ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3,
+    get_logger,
+)
 
-# Annotation columns in the HNOCA reference
-ANNOT_LEVEL_1 = "annot_level_1"       # 13 broad types: Neuron, NPC, etc.
-ANNOT_LEVEL_2 = "annot_level_2"       # 17 types: Dorsal Telencephalic Neuron, etc.
-ANNOT_REGION = "annot_region_rev2"    # 10 brain regions
-ANNOT_LEVEL_3 = "annot_level_3_rev2"  # 29 detailed types
+logger = get_logger(__name__)
 
 
 def filter_quality_cells(adata: sc.AnnData) -> sc.AnnData:
@@ -57,8 +54,8 @@ def filter_quality_cells(adata: sc.AnnData) -> sc.AnnData:
     if "quality" in adata.obs.columns:
         n_before = adata.n_obs
         adata = adata[adata.obs["quality"] == "keep"].copy()
-        print(f"  Quality filter: {n_before} → {adata.n_obs} cells "
-              f"({n_before - adata.n_obs} removed)")
+        logger.info("Quality filter: %d -> %d cells (%d removed)",
+                    n_before, adata.n_obs, n_before - adata.n_obs)
     return adata
 
 
@@ -83,11 +80,11 @@ def prepare_query_for_scpoli(
     Returns:
         Prepared query AnnData ready for scPoli.
     """
-    print("  Preparing query for scPoli mapping...")
+    logger.info("Preparing query for scPoli mapping...")
 
     # Map query var_names to gene symbols (ref uses gene symbols, query uses Ensembl IDs)
     if "gene_name_unique" in query.var.columns:
-        print("  Query uses Ensembl IDs — mapping to gene symbols...")
+        logger.info("Query uses Ensembl IDs — mapping to gene symbols...")
         query.var_names = query.var["gene_name_unique"].values
         query.var_names_make_unique()
     elif "gene_symbol" in query.var.columns:
@@ -96,7 +93,7 @@ def prepare_query_for_scpoli(
 
     # Align query to reference var_names (scPoli expects exact same genes)
     shared_genes = query.var_names.intersection(ref.var_names)
-    print(f"  Shared genes with reference: {len(shared_genes)} / {ref.n_vars}")
+    logger.info("Shared genes with reference: %d / %d", len(shared_genes), ref.n_vars)
 
     # Efficient reindexing: build a permutation matrix to map query genes → ref genes
     # Start with query counts
@@ -140,8 +137,8 @@ def prepare_query_for_scpoli(
     for col in ref.var.columns:
         query_aligned.var[col] = ref.var[col].values
 
-    print(f"  Reindexed query: {query_aligned.shape} ({len(shared_genes)} genes filled, "
-          f"{len(not_found)} zero-filled)")
+    logger.info("Reindexed query: %s (%d genes filled, %d zero-filled)",
+                query_aligned.shape, len(shared_genes), len(not_found))
 
     query = query_aligned
 
@@ -150,7 +147,7 @@ def prepare_query_for_scpoli(
         query.obs["batch"] = query.obs[batch_column].astype(str)
     else:
         query.obs["batch"] = "query"
-    print(f"  Batch column: {query.obs['batch'].nunique()} unique batches")
+    logger.info("Batch column: %d unique batches", query.obs['batch'].nunique())
 
     # scPoli model expects these specific column names (from original HNOCA)
     # Map: annot_level_1 → snapseed_pca_rss_level_1, etc.
@@ -194,7 +191,7 @@ def map_to_hnoca_scpoli(
     from scarches.models.scpoli import scPoli
 
     # Prepare reference: set X to counts
-    print("  Setting reference X to counts layer...")
+    logger.info("Setting reference X to counts layer...")
     if sparse.issparse(ref.layers["counts"]):
         ref.X = ref.layers["counts"].toarray().copy()
     else:
@@ -212,12 +209,12 @@ def map_to_hnoca_scpoli(
             ref.obs[new_col] = ref.obs[old_col].values
 
     # Load pre-trained scPoli model
-    print(f"  Loading pre-trained scPoli model from {model_dir}...")
+    logger.info("Loading pre-trained scPoli model from %s...", model_dir)
     scpoli_model = scPoli.load(str(model_dir), ref, map_location="cpu")
-    print("  Model loaded successfully.")
+    logger.info("Model loaded successfully.")
 
     # Load query data into the model (architecture surgery)
-    print("  Preparing query data for scPoli...")
+    logger.info("Preparing query data for scPoli...")
     # Ensure query X is dense
     if sparse.issparse(query.X):
         query.X = query.X.toarray().copy()
@@ -229,22 +226,22 @@ def map_to_hnoca_scpoli(
     )
 
     # Train on query data (partial retrain — only new batch embedding)
-    print(f"  Training scPoli on query data ({n_epochs} epochs)...")
+    logger.info("Training scPoli on query data (%d epochs)...", n_epochs)
     scpoli_query.train(
         n_epochs=n_epochs,
         pretraining_epochs=n_epochs,
         eta=10,
         unlabeled_prototype_training=False,
     )
-    print("  Training complete.")
+    logger.info("Training complete.")
 
     # Get latent representations
-    print("  Computing latent representations...")
+    logger.info("Computing latent representations...")
     query_latent = scpoli_query.get_latent(query, mean=True)
     ref_latent = scpoli_model.get_latent(ref, mean=True)
 
-    print(f"  Query latent: {query_latent.shape}")
-    print(f"  Reference latent: {ref_latent.shape}")
+    logger.info("Query latent: %s", query_latent.shape)
+    logger.info("Reference latent: %s", ref_latent.shape)
 
     return query_latent, ref_latent
 
@@ -278,11 +275,11 @@ def transfer_labels_knn(
 
     for label_col in label_columns:
         if label_col not in ref_obs.columns:
-            print(f"  WARNING: {label_col} not in reference, skipping")
+            logger.warning("%s not in reference, skipping", label_col)
             continue
 
         labels = ref_obs[label_col].values
-        print(f"  Transferring {label_col} ({len(np.unique(labels))} classes)...")
+        logger.info("Transferring %s (%d classes)...", label_col, len(np.unique(labels)))
 
         knn = KNeighborsClassifier(n_neighbors=k, weights="distance", n_jobs=-1)
         knn.fit(ref_latent, labels)
@@ -314,7 +311,7 @@ def compute_cell_type_fractions(
     Returns:
         DataFrame: rows=conditions, columns=cell types, values=fractions (sum to 1).
     """
-    print(f"  Computing cell type fractions per {condition_key}...")
+    logger.info("Computing cell type fractions per %s...", condition_key)
 
     df = obs.copy()
     if quality_filter and "quality" in df.columns:
@@ -325,7 +322,7 @@ def compute_cell_type_fractions(
         .value_counts(normalize=True)
         .unstack(fill_value=0)
     )
-    print(f"  Result: {fractions.shape[0]} conditions × {fractions.shape[1]} cell types")
+    logger.info("Result: %d conditions x %d cell types", fractions.shape[0], fractions.shape[1])
 
     # Verify fractions sum to 1
     row_sums = fractions.sum(axis=1)
@@ -345,21 +342,21 @@ if __name__ == "__main__":
 
     for path, name in [(ref_path, "HNOCA reference"), (query_path, "Amin/Kelley data")]:
         if not path.exists():
-            print(f"ERROR: {name} not found at {path}")
-            exit(1)
+            logger.error("%s not found at %s", name, path)
+            raise SystemExit(1)
 
     if not MODEL_DIR.exists():
-        print(f"ERROR: scPoli model not found at {MODEL_DIR}")
-        exit(1)
+        logger.error("scPoli model not found at %s", MODEL_DIR)
+        raise SystemExit(1)
 
     # Load data
-    print("Loading HNOCA minimal reference...")
+    logger.info("Loading HNOCA minimal reference...")
     ref = sc.read_h5ad(str(ref_path))
-    print(f"  Reference: {ref.shape}")
+    logger.info("Reference: %s", ref.shape)
 
-    print("Loading Amin/Kelley data...")
+    logger.info("Loading Amin/Kelley data...")
     query = sc.read_h5ad(str(query_path))
-    print(f"  Query: {query.shape}")
+    logger.info("Query: %s", query.shape)
 
     # Filter to quality cells
     query = filter_quality_cells(query)
@@ -378,7 +375,7 @@ if __name__ == "__main__":
     query.obsm["X_scpoli"] = query_latent
 
     # Transfer labels
-    print("\nTransferring cell type labels...")
+    logger.info("Transferring cell type labels...")
     label_cols = [ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3]
     transferred = transfer_labels_knn(
         ref_latent, query_latent,
@@ -406,31 +403,29 @@ if __name__ == "__main__":
     )
 
     # Save outputs
-    print("\nSaving outputs...")
+    logger.info("Saving outputs...")
 
     fractions.to_csv(str(DATA_DIR / "gp_training_labels_amin_kelley.csv"))
-    print(f"  Cell type fractions → data/gp_training_labels_amin_kelley.csv")
+    logger.info("Cell type fractions -> data/gp_training_labels_amin_kelley.csv")
 
     region_fractions.to_csv(str(DATA_DIR / "gp_training_regions_amin_kelley.csv"))
-    print(f"  Region fractions → data/gp_training_regions_amin_kelley.csv")
+    logger.info("Region fractions -> data/gp_training_regions_amin_kelley.csv")
 
     output_path = DATA_DIR / "amin_kelley_mapped.h5ad"
     query.write(str(output_path), compression="gzip")
-    print(f"  Mapped data → {output_path}")
+    logger.info("Mapped data -> %s", output_path)
 
     elapsed = time.time() - start
-    print(f"\nDone in {elapsed / 60:.1f} minutes.")
+    logger.info("Done in %.1f minutes.", elapsed / 60)
 
     # Summary
-    print("\n" + "=" * 60)
-    print("MAPPING SUMMARY")
-    print("=" * 60)
-    print(f"  Cells mapped: {query.n_obs}")
-    print(f"  Conditions: {query.obs['condition'].nunique()}")
+    logger.info("--- MAPPING SUMMARY ---")
+    logger.info("Cells mapped: %d", query.n_obs)
+    logger.info("Conditions: %d", query.obs['condition'].nunique())
     for label_col in label_cols:
         pred_col = f"predicted_{label_col}"
         if pred_col in query.obs.columns:
-            print(f"  {label_col}: {query.obs[pred_col].nunique()} types")
+            logger.info("%s: %d types", label_col, query.obs[pred_col].nunique())
             top3 = query.obs[pred_col].value_counts().head(3)
             for t, c in top3.items():
-                print(f"    {t}: {c} cells ({c/query.n_obs*100:.1f}%)")
+                logger.info("  %s: %d cells (%.1f%%)", t, c, c/query.n_obs*100)

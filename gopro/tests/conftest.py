@@ -26,30 +26,7 @@ def _import_pipeline_module(name: str):
         name, str(GOPRO_DIR / f"{name}.py")
     )
     module = importlib.util.module_from_spec(spec)
-    # Ensure DATA_DIR creation doesn't fail during test imports
-    # by creating a temporary data dir if the hardcoded one is inaccessible
-    _project_dir = Path("/Users/maxxyung/Projects/morphogen-gpbo")
-    if not _project_dir.exists():
-        import tempfile
-        _tmpdir = Path(tempfile.mkdtemp(prefix="morphogen_gpbo_"))
-        (_tmpdir / "data").mkdir(exist_ok=True)
-        # Monkey-patch the path before module exec
-        _original_mkdir = Path.mkdir
-        def _safe_mkdir(self, *args, **kwargs):
-            try:
-                _original_mkdir(self, *args, **kwargs)
-            except (FileNotFoundError, PermissionError):
-                pass
-        Path.mkdir = _safe_mkdir
-        try:
-            spec.loader.exec_module(module)
-        finally:
-            Path.mkdir = _original_mkdir
-        # Point DATA_DIR to a valid temp path for tests
-        if hasattr(module, 'DATA_DIR'):
-            module.DATA_DIR = _tmpdir / "data"
-    else:
-        spec.loader.exec_module(module)
+    spec.loader.exec_module(module)
     return module
 
 

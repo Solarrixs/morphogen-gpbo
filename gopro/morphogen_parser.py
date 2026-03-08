@@ -20,32 +20,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from gopro.config import MORPHOGEN_COLUMNS, get_logger
 
-# ==============================================================================
-# Morphogen columns: extended to include FGF4, ActivinA, Dorsomorphin
-# ==============================================================================
-MORPHOGEN_COLUMNS: list[str] = [
-    "CHIR99021_uM",       # WNT agonist
-    "BMP4_ng_mL",         # BMP signaling
-    "BMP7_ng_mL",         # BMP signaling
-    "SHH_ng_mL",          # Sonic hedgehog
-    "SAG_nM",             # Smoothened agonist (SHH pathway)
-    "RA_nM",              # Retinoic acid
-    "FGF8_ng_mL",         # Fibroblast growth factor 8
-    "FGF2_ng_mL",         # Fibroblast growth factor 2
-    "FGF4_ng_mL",         # Fibroblast growth factor 4
-    "IWP2_uM",            # WNT inhibitor
-    "XAV939_uM",          # WNT inhibitor (tankyrase)
-    "SB431542_uM",        # TGF-beta inhibitor
-    "LDN193189_nM",       # BMP inhibitor
-    "DAPT_uM",            # Notch inhibitor
-    "EGF_ng_mL",          # Epidermal growth factor
-    "ActivinA_ng_mL",     # TGF-beta / Activin signaling
-    "Dorsomorphin_uM",    # BMP inhibitor (dorsomorphin)
-    "purmorphamine_uM",   # SHH agonist
-    "cyclopamine_uM",     # SHH antagonist
-    "log_harvest_day",    # Time dimension
-]
+logger = get_logger(__name__)
 
 # ==============================================================================
 # Default concentrations (from Amin & Kelley 2024)
@@ -419,17 +396,14 @@ if __name__ == "__main__":
 
     df = build_morphogen_matrix(ALL_CONDITIONS)
 
-    print(f"Morphogen matrix: {df.shape[0]} conditions x {df.shape[1]} columns")
-    print(f"Columns: {list(df.columns)}")
-    print()
+    logger.info("Morphogen matrix: %d conditions x %d columns", df.shape[0], df.shape[1])
+    logger.info("Columns: %s", list(df.columns))
 
     # Show non-zero entries per condition for readability
     for cond in ALL_CONDITIONS:
         row = df.loc[cond]
         nonzero = row[row > 0]
         parts = [f"{col}={val:.2f}" for col, val in nonzero.items()]
-        print(f"  {cond:30s} -> {', '.join(parts)}")
+        logger.info("  %s -> %s", cond, ', '.join(parts))
 
-    print()
-    print("Full matrix:")
-    print(df.to_string())
+    logger.info("Full matrix:\n%s", df.to_string())

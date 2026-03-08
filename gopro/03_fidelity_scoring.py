@@ -34,17 +34,13 @@ from scipy.spatial.distance import cosine as cosine_distance
 
 warnings.filterwarnings("ignore")
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
-DATA_DIR = PROJECT_DIR / "data"
+from gopro.config import (
+    DATA_DIR,
+    ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3,
+    get_logger,
+)
 
-# HNOCA annotation column names (must match step 02 output)
-ANNOT_LEVEL_1 = "annot_level_1"
-ANNOT_LEVEL_2 = "annot_level_2"
-ANNOT_REGION = "annot_region_rev2"
-ANNOT_LEVEL_3 = "annot_level_3_rev2"
+logger = get_logger(__name__)
 
 # Cell classes considered off-target for brain organoids.
 # These are HNOCA level-1 labels that do not correspond to neural lineage.
@@ -103,12 +99,12 @@ def extract_braun_region_profiles(
         DataFrame with rows=SummarizedRegion, columns=CellClass, values=fractions.
     """
     if cache_path is not None and cache_path.exists():
-        print(f"  Loading cached Braun profiles from {cache_path.name}")
+        logger.info("Loading cached Braun profiles from %s", cache_path.name)
         return pd.read_csv(str(cache_path), index_col=0)
 
-    print("  Loading Braun fetal brain reference (backed mode)...")
+    logger.info("Loading Braun fetal brain reference (backed mode)...")
     braun = ad.read_h5ad(str(braun_path), backed="r")
-    print(f"  Braun reference: {braun.shape[0]:,} cells x {braun.shape[1]:,} genes")
+    logger.info("Braun reference: %s cells x %s genes", f"{braun.shape[0]:,}", f"{braun.shape[1]:,}")
 
     # Extract only the metadata we need (avoids loading expression data)
     obs_df = braun.obs[["SummarizedRegion", "CellClass", "IsNeural"]].copy()
@@ -116,7 +112,7 @@ def extract_braun_region_profiles(
 
     # Filter to non-doublet neural cells for cleaner profiles
     obs_df = obs_df[obs_df["IsNeural"] == True]  # noqa: E712
-    print(f"  Neural cells: {len(obs_df):,}")
+    logger.info("Neural cells: %s", f"{len(obs_df):,}")
 
     # Compute cell class fractions per region
     profiles = (
@@ -126,17 +122,17 @@ def extract_braun_region_profiles(
         .unstack(fill_value=0.0)
     )
 
-    print(f"  Extracted profiles: {profiles.shape[0]} regions x {profiles.shape[1]} cell classes")
+    logger.info("Extracted profiles: %d regions x %d cell classes", profiles.shape[0], profiles.shape[1])
     for region in profiles.index:
         n_cells = (obs_df["SummarizedRegion"] == region).sum()
         top_class = profiles.loc[region].idxmax()
         top_frac = profiles.loc[region].max()
-        print(f"    {region}: {n_cells:,} cells, top={top_class} ({top_frac:.1%})")
+        logger.info("  %s: %s cells, top=%s (%.1f%%)", region, f"{n_cells:,}", top_class, top_frac * 100)
 
     # Cache for future runs
     if cache_path is not None:
         profiles.to_csv(str(cache_path))
-        print(f"  Cached profiles to {cache_path.name}")
+        logger.info("Cached profiles to %s", cache_path.name)
 
     return profiles
 
@@ -158,10 +154,10 @@ def extract_braun_celltype_profiles(
         DataFrame with rows=SummarizedRegion, columns=CellType, values=fractions.
     """
     if cache_path is not None and cache_path.exists():
-        print(f"  Loading cached Braun CellType profiles from {cache_path.name}")
+        logger.info("Loading cached Braun CellType profiles from %s", cache_path.name)
         return pd.read_csv(str(cache_path), index_col=0)
 
-    print("  Loading Braun fetal brain reference for CellType profiles (backed mode)...")
+    logger.info("Loading Braun fetal brain reference for CellType profiles (backed mode)...")
     braun = ad.read_h5ad(str(braun_path), backed="r")
 
     obs_df = braun.obs[["SummarizedRegion", "CellType", "IsNeural"]].copy()
@@ -180,7 +176,7 @@ def extract_braun_celltype_profiles(
 
     if cache_path is not None:
         profiles.to_csv(str(cache_path))
-        print(f"  Cached CellType profiles to {cache_path.name}")
+        logger.info("Cached CellType profiles to %s", cache_path.name)
 
     return profiles
 
@@ -463,7 +459,7 @@ def score_all_conditions(
     pred_region = f"predicted_{ANNOT_REGION}"
 
     conditions = obs[condition_key].unique()
-    print(f"  Scoring {len(conditions)} conditions...")
+    logger.info("Scoring %d conditions...", len(conditions))
 
     results: list[dict] = []
 
@@ -647,16 +643,14 @@ def main() -> None:
         (mapped_path, "Mapped query data", "Run step 02 first: python 02_map_to_hnoca.py"),
     ]:
         if not path.exists():
-            print(f"ERROR: {name} not found at {path}")
-            print(hint)
-            exit(1)
+            logger.error("%s not found at %s", name, path)
+            logger.error("%s", hint)
+            raise SystemExit(1)
 
     # -----------------------------------------------------------------------
     # Step 1: Extract Braun fetal brain reference profiles
     # -----------------------------------------------------------------------
-    print("=" * 60)
-    print("STEP 1: Extract Braun fetal brain reference profiles")
-    print("=" * 60)
+    logger.info("--- STEP 1: Extract Braun fetal brain reference profiles ---")
 
     braun_profiles = extract_braun_region_profiles(
         braun_path,
@@ -672,13 +666,11 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 2: Load mapped query data
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("STEP 2: Load mapped query data")
-    print("=" * 60)
+    logger.info("--- STEP 2: Load mapped query data ---")
 
-    print("  Loading mapped query data...")
+    logger.info("Loading mapped query data...")
     query = sc.read_h5ad(str(mapped_path))
-    print(f"  Query: {query.n_obs:,} cells x {query.n_vars:,} genes")
+    logger.info("Query: %s cells x %s genes", f"{query.n_obs:,}", f"{query.n_vars:,}")
 
     # Verify expected columns exist
     pred_level1 = f"predicted_{ANNOT_LEVEL_1}"
@@ -688,10 +680,10 @@ def main() -> None:
     required_cols = [pred_level1, pred_level2, pred_region]
     missing = [c for c in required_cols if c not in query.obs.columns]
     if missing:
-        print(f"ERROR: Missing predicted label columns: {missing}")
-        print("These should have been added by step 02 (map_to_hnoca.py).")
-        print(f"Available obs columns: {list(query.obs.columns)}")
-        exit(1)
+        logger.error("Missing predicted label columns: %s", missing)
+        logger.error("These should have been added by step 02 (map_to_hnoca.py).")
+        logger.error("Available obs columns: %s", list(query.obs.columns))
+        raise SystemExit(1)
 
     # Detect condition column
     condition_key = "condition"
@@ -702,22 +694,20 @@ def main() -> None:
                 condition_key = alt
                 break
         else:
-            print(f"ERROR: No condition column found. Available: {list(query.obs.columns)}")
-            exit(1)
-    print(f"  Using condition column: '{condition_key}' "
-          f"({query.obs[condition_key].nunique()} unique conditions)")
+            logger.error("No condition column found. Available: %s", list(query.obs.columns))
+            raise SystemExit(1)
+    logger.info("Using condition column: '%s' (%d unique conditions)",
+                condition_key, query.obs[condition_key].nunique())
 
     # -----------------------------------------------------------------------
     # Step 3: Build label alignment map
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("STEP 3: Align HNOCA labels to Braun CellClass space")
-    print("=" * 60)
+    logger.info("--- STEP 3: Align HNOCA labels to Braun CellClass space ---")
 
     label_map = build_hnoca_to_braun_label_map()
-    print("  HNOCA → Braun label mapping:")
+    logger.info("HNOCA -> Braun label mapping:")
     for hnoca, braun in sorted(label_map.items()):
-        print(f"    {hnoca:20s} → {braun}")
+        logger.info("  %s -> %s", hnoca, braun)
 
     # Re-key per-condition level-1 compositions into Braun space for RSS
     # This is done inside score_all_conditions via compute_rss
@@ -725,9 +715,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 4: Score all conditions
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("STEP 4: Compute fidelity scores")
-    print("=" * 60)
+    logger.info("--- STEP 4: Compute fidelity scores ---")
 
     report = score_all_conditions(
         query_adata=query,
@@ -738,68 +726,58 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 5: Assign cell-level fidelity scores
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("STEP 5: Assign cell-level fidelity scores")
-    print("=" * 60)
+    logger.info("--- STEP 5: Assign cell-level fidelity scores ---")
 
     query = assign_cell_level_fidelity(query, report, condition_key=condition_key)
-    print(f"  Added fidelity columns to {query.n_obs:,} cells")
+    logger.info("Added fidelity columns to %s cells", f"{query.n_obs:,}")
 
     # -----------------------------------------------------------------------
     # Step 6: Save outputs
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("STEP 6: Save outputs")
-    print("=" * 60)
+    logger.info("--- STEP 6: Save outputs ---")
 
     # Save fidelity report
     report_path = DATA_DIR / "fidelity_report.csv"
     report.to_csv(str(report_path))
-    print(f"  Fidelity report → {report_path}")
+    logger.info("Fidelity report -> %s", report_path)
 
     # Save annotated AnnData
     output_path = DATA_DIR / "amin_kelley_fidelity.h5ad"
     query.write(str(output_path), compression="gzip")
-    print(f"  Annotated data  → {output_path}")
+    logger.info("Annotated data -> %s", output_path)
 
     # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     elapsed = time.time() - start
-    print("\n" + "=" * 60)
-    print("FIDELITY SCORING SUMMARY")
-    print("=" * 60)
-    print(f"  Cells scored:     {query.n_obs:,}")
-    print(f"  Conditions:       {len(report)}")
-    print(f"  Time elapsed:     {elapsed:.1f}s")
-    print()
+    logger.info("--- FIDELITY SCORING SUMMARY ---")
+    logger.info("Cells scored: %s", f"{query.n_obs:,}")
+    logger.info("Conditions: %d", len(report))
+    logger.info("Time elapsed: %.1fs", elapsed)
 
     # Top and bottom conditions
-    print("  Top 5 conditions by composite fidelity:")
+    logger.info("Top 5 conditions by composite fidelity:")
     for cond, row in report.head(5).iterrows():
-        print(f"    {cond:30s}  fidelity={row['composite_fidelity']:.3f}  "
-              f"rss={row['rss_score']:.3f}  region={row['dominant_region']}  "
-              f"off_target={row['off_target_fraction']:.1%}")
+        logger.info("  %s  fidelity=%.3f  rss=%.3f  region=%s  off_target=%.1f%%",
+                     cond, row['composite_fidelity'], row['rss_score'],
+                     row['dominant_region'], row['off_target_fraction'] * 100)
 
-    print()
-    print("  Bottom 5 conditions by composite fidelity:")
+    logger.info("Bottom 5 conditions by composite fidelity:")
     for cond, row in report.tail(5).iterrows():
-        print(f"    {cond:30s}  fidelity={row['composite_fidelity']:.3f}  "
-              f"rss={row['rss_score']:.3f}  region={row['dominant_region']}  "
-              f"off_target={row['off_target_fraction']:.1%}")
+        logger.info("  %s  fidelity=%.3f  rss=%.3f  region=%s  off_target=%.1f%%",
+                     cond, row['composite_fidelity'], row['rss_score'],
+                     row['dominant_region'], row['off_target_fraction'] * 100)
 
-    print()
-    print("  Score distributions:")
+    logger.info("Score distributions:")
     for metric in ["composite_fidelity", "rss_score", "on_target_fraction", "off_target_fraction"]:
         vals = report[metric].dropna()
-        print(f"    {metric:25s}  mean={vals.mean():.3f}  "
-              f"std={vals.std():.3f}  min={vals.min():.3f}  max={vals.max():.3f}")
+        logger.info("  %s  mean=%.3f  std=%.3f  min=%.3f  max=%.3f",
+                     metric, vals.mean(), vals.std(), vals.min(), vals.max())
 
-    print()
-    print("  Region distribution across conditions:")
+    logger.info("Region distribution across conditions:")
     region_counts = report["dominant_region"].value_counts()
     for region, count in region_counts.items():
-        print(f"    {region:30s}  {count} conditions ({count/len(report)*100:.0f}%)")
+        logger.info("  %s  %d conditions (%.0f%%)", region, count, count/len(report)*100)
 
 
 if __name__ == "__main__":

@@ -421,21 +421,32 @@ class TestVisualizationReport:
         text = generate_summary_text(sample_fidelity, diag, 6)
         assert "CHIR" in text
 
-    def test_build_morphogen_umap_figure(self):
-        from gopro.visualize_report import build_morphogen_umap_figure
+    def test_build_morphogen_pca_figure(self):
+        from gopro.visualize_report import build_morphogen_pca_figure
         coords = pd.DataFrame(
-            {"UMAP1": [1, 2, 3], "UMAP2": [4, 5, 6]},
+            {"PC1": [1, 2, 3], "PC2": [4, 5, 6]},
             index=["A", "B", "C"],
         )
         fidelity = pd.Series([0.5, 0.7, 0.9], index=["A", "B", "C"])
-        fig = build_morphogen_umap_figure(coords, fidelity)
+        fig = build_morphogen_pca_figure(coords, fidelity)
         assert isinstance(fig, go.Figure)
 
-    def test_compute_morphogen_umap_shape(self, sample_morphogens):
-        from gopro.visualize_report import compute_morphogen_umap
-        coords = compute_morphogen_umap(sample_morphogens)
-        assert coords.shape == (10, 2)
-        assert list(coords.columns) == ["UMAP1", "UMAP2"]
+    def test_compute_morphogen_pca_shape(self, sample_morphogens):
+        from gopro.visualize_report import compute_morphogen_pca_with_recommendations
+        recs = pd.DataFrame(
+            np.random.rand(3, sample_morphogens.shape[1]),
+            columns=sample_morphogens.columns,
+            index=["R1", "R2", "R3"],
+        )
+        train_df, rec_df, loadings, var_pct, active_cols = (
+            compute_morphogen_pca_with_recommendations(
+                sample_morphogens, recs, list(sample_morphogens.columns)
+            )
+        )
+        assert train_df.shape == (10, 2)
+        assert rec_df.shape == (3, 2)
+        assert list(train_df.columns) == ["PC1", "PC2"]
+        assert var_pct > 0
 
     def test_build_plate_map_figure(self, sample_recs):
         from gopro.visualize_report import build_plate_map_figure
@@ -496,3 +507,77 @@ class TestMorphogenColumns:
         for col in step04.MORPHOGEN_COLUMNS:
             assert isinstance(col, str)
             assert len(col) > 0
+
+
+class TestConfig:
+    """Tests for centralized config module."""
+
+    def test_config_project_dir_fallback(self):
+        """PROJECT_DIR resolves without env var."""
+        from gopro.config import PROJECT_DIR
+        assert isinstance(PROJECT_DIR, Path)
+        assert PROJECT_DIR.exists()
+
+    def test_config_project_dir_env_override(self, monkeypatch, tmp_path):
+        """GPBO_PROJECT_DIR env var overrides PROJECT_DIR."""
+        monkeypatch.setenv("GPBO_PROJECT_DIR", str(tmp_path))
+        # Need to reimport to pick up the env var
+        import importlib
+        import gopro.config
+        importlib.reload(gopro.config)
+        assert gopro.config.PROJECT_DIR == tmp_path
+        # Restore
+        monkeypatch.delenv("GPBO_PROJECT_DIR")
+        importlib.reload(gopro.config)
+
+    def test_config_data_dir_env_override(self, monkeypatch, tmp_path):
+        """GPBO_DATA_DIR env var overrides DATA_DIR."""
+        data_dir = tmp_path / "custom_data"
+        monkeypatch.setenv("GPBO_DATA_DIR", str(data_dir))
+        import importlib
+        import gopro.config
+        importlib.reload(gopro.config)
+        assert gopro.config.DATA_DIR == data_dir
+        monkeypatch.delenv("GPBO_DATA_DIR")
+        importlib.reload(gopro.config)
+
+    def test_morphogen_columns_length(self):
+        """MORPHOGEN_COLUMNS has exactly 20 entries."""
+        from gopro.config import MORPHOGEN_COLUMNS
+        assert len(MORPHOGEN_COLUMNS) == 20
+
+    def test_morphogen_columns_canonical_order(self):
+        """Indices 16-18 are Dorsomorphin, purmorphamine, cyclopamine."""
+        from gopro.config import MORPHOGEN_COLUMNS
+        assert MORPHOGEN_COLUMNS[16] == "Dorsomorphin_uM"
+        assert MORPHOGEN_COLUMNS[17] == "purmorphamine_uM"
+        assert MORPHOGEN_COLUMNS[18] == "cyclopamine_uM"
+
+    def test_morphogen_columns_unique(self):
+        """No duplicate entries in MORPHOGEN_COLUMNS."""
+        from gopro.config import MORPHOGEN_COLUMNS
+        assert len(MORPHOGEN_COLUMNS) == len(set(MORPHOGEN_COLUMNS))
+
+    def test_annot_level_values(self):
+        """All 4 ANNOT constants have expected values."""
+        from gopro.config import ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3
+        assert ANNOT_LEVEL_1 == "annot_level_1"
+        assert ANNOT_LEVEL_2 == "annot_level_2"
+        assert ANNOT_REGION == "annot_region_rev2"
+        assert ANNOT_LEVEL_3 == "annot_level_3_rev2"
+
+    def test_get_logger_returns_logger(self):
+        """get_logger returns a logging.Logger instance."""
+        import logging
+        from gopro.config import get_logger
+        log = get_logger("test_module")
+        assert isinstance(log, logging.Logger)
+        assert log.name == "test_module"
+
+    def test_get_logger_respects_env_level(self, monkeypatch):
+        """GPBO_LOG_LEVEL env var controls logger level."""
+        import logging
+        monkeypatch.setenv("GPBO_LOG_LEVEL", "DEBUG")
+        from gopro.config import get_logger
+        log = get_logger("test_debug_level")
+        assert log.level == logging.DEBUG
