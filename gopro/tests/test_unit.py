@@ -421,21 +421,32 @@ class TestVisualizationReport:
         text = generate_summary_text(sample_fidelity, diag, 6)
         assert "CHIR" in text
 
-    def test_build_morphogen_umap_figure(self):
-        from gopro.visualize_report import build_morphogen_umap_figure
+    def test_build_morphogen_pca_figure(self):
+        from gopro.visualize_report import build_morphogen_pca_figure
         coords = pd.DataFrame(
-            {"UMAP1": [1, 2, 3], "UMAP2": [4, 5, 6]},
+            {"PC1": [1, 2, 3], "PC2": [4, 5, 6]},
             index=["A", "B", "C"],
         )
         fidelity = pd.Series([0.5, 0.7, 0.9], index=["A", "B", "C"])
-        fig = build_morphogen_umap_figure(coords, fidelity)
+        fig = build_morphogen_pca_figure(coords, fidelity)
         assert isinstance(fig, go.Figure)
 
-    def test_compute_morphogen_umap_shape(self, sample_morphogens):
-        from gopro.visualize_report import compute_morphogen_umap
-        coords = compute_morphogen_umap(sample_morphogens)
-        assert coords.shape == (10, 2)
-        assert list(coords.columns) == ["UMAP1", "UMAP2"]
+    def test_compute_morphogen_pca_shape(self, sample_morphogens):
+        from gopro.visualize_report import compute_morphogen_pca_with_recommendations
+        recs = pd.DataFrame(
+            np.random.rand(3, sample_morphogens.shape[1]),
+            columns=sample_morphogens.columns,
+            index=["R1", "R2", "R3"],
+        )
+        train_df, rec_df, loadings, var_pct, active_cols = (
+            compute_morphogen_pca_with_recommendations(
+                sample_morphogens, recs, list(sample_morphogens.columns)
+            )
+        )
+        assert train_df.shape == (10, 2)
+        assert rec_df.shape == (3, 2)
+        assert list(train_df.columns) == ["PC1", "PC2"]
+        assert var_pct > 0
 
     def test_build_plate_map_figure(self, sample_recs):
         from gopro.visualize_report import build_plate_map_figure

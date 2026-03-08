@@ -150,83 +150,77 @@ def generate_summary_text(
 
 
 # ---------------------------------------------------------------------------
-# Panel A: Morphogen-space UMAP
+# Panel A: Morphogen-space PCA (PCA is more appropriate than UMAP for N<100)
 # ---------------------------------------------------------------------------
 
-def compute_morphogen_umap(morphogen_df: pd.DataFrame) -> pd.DataFrame:
-    """Compute 2D UMAP of morphogen concentration vectors.
-
-    Args:
-        morphogen_df: DataFrame of shape (N, D) with morphogen concentrations.
-
-    Returns:
-        DataFrame with columns ['UMAP1', 'UMAP2'], indexed like input.
-    """
-    from sklearn.preprocessing import StandardScaler
-    from umap import UMAP
-
-    X = StandardScaler().fit_transform(morphogen_df.values)
-    n = len(X)
-    n_neighbors = min(15, n - 1)
-    coords = UMAP(n_neighbors=n_neighbors, random_state=42).fit_transform(X)
-    return pd.DataFrame(
-        coords, columns=["UMAP1", "UMAP2"], index=morphogen_df.index
-    )
-
-
-def compute_morphogen_umap_with_recommendations(
+def compute_morphogen_pca_with_recommendations(
     morphogen_df: pd.DataFrame,
     recs_df: pd.DataFrame,
     morphogen_cols: list[str],
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Compute UMAP on training data and transform recommendations into same space.
+) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, float]:
+    """Compute PCA on training data and project recommendations into same space.
+
+    Drops zero-variance columns before fitting. Returns PC coordinates plus
+    the PCA loadings and variance explained for axis annotation.
 
     Args:
         morphogen_df: Training morphogen matrix.
         recs_df: Recommendations DataFrame with morphogen columns.
-        morphogen_cols: Columns shared between both DataFrames.
+        morphogen_cols: Columns to use from both DataFrames.
 
     Returns:
-        Tuple of (training_coords, recommendation_coords) DataFrames.
+        Tuple of (training_coords, rec_coords, loadings, variance_explained_pct).
+        loadings has shape (n_components, n_features) with feature names in morphogen_cols.
     """
+    from sklearn.decomposition import PCA
     from sklearn.preprocessing import StandardScaler
-    from umap import UMAP
+
+    # Drop zero-variance columns (e.g., SHH=0, XAV939=0, constant log_harvest_day)
+    train_vals = morphogen_df[morphogen_cols].values
+    col_var = train_vals.var(axis=0)
+    active_mask = col_var > 1e-10
+    active_cols = [c for c, m in zip(morphogen_cols, active_mask) if m]
 
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(morphogen_df[morphogen_cols].values)
-    X_rec = scaler.transform(recs_df[morphogen_cols].values)
+    X_train = scaler.fit_transform(morphogen_df[active_cols].values)
+    X_rec = scaler.transform(recs_df[active_cols].values)
 
-    n = len(X_train)
-    n_neighbors = min(15, n - 1)
-    reducer = UMAP(n_neighbors=n_neighbors, random_state=42)
-    train_coords = reducer.fit_transform(X_train)
-    rec_coords = reducer.transform(X_rec)
+    pca = PCA(n_components=2, random_state=42)
+    train_coords = pca.fit_transform(X_train)
+    rec_coords = pca.transform(X_rec)
+
+    var_explained = pca.explained_variance_ratio_.sum() * 100
 
     train_df = pd.DataFrame(
-        train_coords, columns=["UMAP1", "UMAP2"], index=morphogen_df.index
+        train_coords, columns=["PC1", "PC2"], index=morphogen_df.index
     )
     rec_df = pd.DataFrame(
-        rec_coords, columns=["UMAP1", "UMAP2"], index=recs_df.index
+        rec_coords, columns=["PC1", "PC2"], index=recs_df.index
     )
-    return train_df, rec_df
+    return train_df, rec_df, pca.components_, var_explained, active_cols
 
 
-def build_morphogen_umap_figure(
+def build_morphogen_pca_figure(
     coords: pd.DataFrame,
     fidelity_scores: pd.Series,
     rec_coords: pd.DataFrame | None = None,
+    loadings: np.ndarray | None = None,
+    active_cols: list[str] | None = None,
+    var_explained: float = 0.0,
 ) -> go.Figure:
-    """Build morphogen-space UMAP scatter plot.
+    """Build morphogen-space PCA scatter plot with optional loading arrows.
 
     Args:
-        coords: Training condition UMAP coordinates.
+        coords: Training condition PCA coordinates (PC1, PC2).
         fidelity_scores: Series of composite fidelity per condition.
-        rec_coords: Optional recommendation UMAP coordinates (shown as stars).
+        rec_coords: Optional recommendation PCA coordinates (shown as stars).
+        loadings: PCA loadings array of shape (2, n_features).
+        active_cols: Feature names corresponding to loadings columns.
+        var_explained: Total variance explained by PC1+PC2 (percentage).
 
     Returns:
         Plotly Figure.
     """
-    # Align fidelity scores to coords index
     common = coords.index.intersection(fidelity_scores.index)
     coords_aligned = coords.loc[common]
     scores_aligned = fidelity_scores.loc[common]
@@ -234,9 +228,9 @@ def build_morphogen_umap_figure(
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
-        x=coords_aligned["UMAP1"],
-        y=coords_aligned["UMAP2"],
-        mode="markers",
+        x=coords_aligned["PC1"],
+        y=coords_aligned["PC2"],
+        mode="markers+text",
         marker=dict(
             size=10,
             color=scores_aligned.values,
@@ -245,14 +239,16 @@ def build_morphogen_umap_figure(
             showscale=True,
         ),
         text=coords_aligned.index,
+        textposition="top center",
+        textfont=dict(size=7),
         hovertemplate="<b>%{text}</b><br>Fidelity: %{marker.color:.3f}<extra></extra>",
         name="Training",
     ))
 
     if rec_coords is not None and len(rec_coords) > 0:
         fig.add_trace(go.Scatter(
-            x=rec_coords["UMAP1"],
-            y=rec_coords["UMAP2"],
+            x=rec_coords["PC1"],
+            y=rec_coords["PC2"],
             mode="markers",
             marker=dict(
                 size=14,
@@ -265,10 +261,37 @@ def build_morphogen_umap_figure(
             name="Recommended",
         ))
 
+    # Add top loading arrows as a biplot overlay
+    if loadings is not None and active_cols is not None:
+        importance = np.sqrt(loadings[0] ** 2 + loadings[1] ** 2)
+        top_k = min(5, len(active_cols))
+        top_idx = importance.argsort()[-top_k:][::-1]
+        # Scale arrows to ~30% of plot range
+        scale = max(
+            coords_aligned["PC1"].abs().max(),
+            coords_aligned["PC2"].abs().max(),
+        ) * 0.6
+        for idx in top_idx:
+            dx = loadings[0, idx] * scale
+            dy = loadings[1, idx] * scale
+            fig.add_annotation(
+                x=dx, y=dy, ax=0, ay=0,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True,
+                arrowhead=2, arrowsize=1.5, arrowwidth=1.5,
+                arrowcolor="rgba(100,100,100,0.7)",
+            )
+            fig.add_annotation(
+                x=dx * 1.12, y=dy * 1.12,
+                text=active_cols[idx].replace("_", " "),
+                showarrow=False,
+                font=dict(size=9, color="gray"),
+            )
+
     fig.update_layout(
-        title="Morphogen Space (UMAP)",
-        xaxis_title="UMAP 1",
-        yaxis_title="UMAP 2",
+        title=f"Morphogen Space (PCA, {var_explained:.0f}% variance explained)",
+        xaxis_title="PC 1",
+        yaxis_title="PC 2",
         template=PLOTLY_TEMPLATE,
         showlegend=True,
     )
@@ -490,20 +513,47 @@ def build_importance_figure(
     Returns:
         Plotly Figure.
     """
+    # Non-morphogen columns to exclude from importance chart
+    _EXCLUDE_COLS = {"fidelity", "log_harvest_day"}
+
     if lengthscales:
-        importance = {k: 1.0 / v for k, v in lengthscales.items() if v > 0}
+        importance = {
+            k: 1.0 / v
+            for k, v in lengthscales.items()
+            if v > 0 and k not in _EXCLUDE_COLS
+        }
         sorted_items = sorted(importance.items(), key=lambda x: x[1], reverse=True)
         names = [x[0] for x in sorted_items]
         values = [x[1] for x in sorted_items]
-        title = "Morphogen Importance (1/lengthscale)"
+        title = "Morphogen Importance (1/lengthscale, min across output tasks)"
     elif morphogen_df is not None:
-        variance = morphogen_df.var()
-        if variance.max() > 0:
-            variance = variance / variance.max()
-        sorted_var = variance.sort_values(ascending=False)
-        names = list(sorted_var.index)
-        values = list(sorted_var.values)
-        title = "Morphogen Variance (normalized, lengthscales unavailable)"
+        # Use coefficient of variation (std/mean) to measure diversity per morphogen,
+        # which is scale-invariant (nM vs uM doesn't matter).
+        # Drop zero-variance and all-zero columns.
+        nonzero_cols = morphogen_df.columns[morphogen_df.var() > 1e-10]
+        if len(nonzero_cols) == 0:
+            return _placeholder_figure("All morphogen columns have zero variance")
+        # For each morphogen: fraction of conditions that use it (non-zero),
+        # weighted by the coefficient of variation among users
+        usage = {}
+        for col in nonzero_cols:
+            vals = morphogen_df[col]
+            n_used = (vals.abs() > 1e-6).sum()
+            if n_used >= 2:
+                # CV among conditions that actually use this morphogen
+                used_vals = vals[vals.abs() > 1e-6]
+                cv = used_vals.std() / used_vals.mean() if used_vals.mean() > 0 else 0
+                # Combine usage fraction and CV into an importance proxy
+                usage[col] = (n_used / len(vals)) * (1 + cv)
+            else:
+                usage[col] = n_used / len(vals)
+        importance = pd.Series(usage)
+        if importance.max() > 0:
+            importance = importance / importance.max()
+        sorted_imp = importance.sort_values(ascending=False)
+        names = list(sorted_imp.index)
+        values = list(sorted_imp.values)
+        title = "Morphogen Exploration Diversity (lengthscales unavailable)"
     else:
         return _placeholder_figure("No morphogen importance data available")
 
@@ -682,13 +732,14 @@ def _placeholder_figure(message: str) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 def assemble_html_report(
-    sections: dict[str, go.Figure | str],
+    sections: dict[str, tuple[str, go.Figure | str]],
     output_path: Path,
 ) -> Path:
     """Assemble final HTML report from sections.
 
     Args:
-        sections: Ordered dict of section_name -> Figure or HTML string.
+        sections: Ordered dict of section_name -> (description, Figure_or_HTML).
+            description is a short explanation shown below the heading.
         output_path: Where to write the HTML file.
 
     Returns:
@@ -714,6 +765,7 @@ def assemble_html_report(
   }
   h1 { border-bottom: 2px solid #333; padding-bottom: 10px; }
   h2 { color: #555; margin-top: 40px; }
+  .description { color: #666; font-size: 0.95em; margin: 4px 0 12px 0; line-height: 1.5; }
   .summary { background: #f8f9fa; padding: 15px 20px; border-radius: 6px;
              border-left: 4px solid steelblue; margin: 20px 0; font-size: 1.05em; }
   .section { margin-bottom: 40px; }
@@ -724,9 +776,11 @@ def assemble_html_report(
 <h1>GP-BO Visualization Report</h1>
 """)
 
-    for name, content in sections.items():
+    for name, (description, content) in sections.items():
         html_parts.append(f'<div class="section">')
         html_parts.append(f'<h2>{name}</h2>')
+        if description:
+            html_parts.append(f'<p class="description">{description}</p>')
         if isinstance(content, str):
             html_parts.append(f'<div class="summary">{content}</div>')
         elif isinstance(content, go.Figure):
@@ -784,11 +838,15 @@ def generate_report(
     regions_path = data_dir / "gp_training_regions_amin_kelley.csv"
     regions_df = load_cell_type_fractions(regions_path) if regions_path.exists() else None
 
-    sections: dict[str, go.Figure | str] = {}
+    # Sections: dict of name -> (description, content)
+    sections: dict[str, tuple[str, go.Figure | str]] = {}
 
     # 1. Summary text
     summary = generate_summary_text(fidelity_df, diagnostics, len(recs))
-    sections["Summary"] = summary
+    sections["Summary"] = (
+        "",
+        summary,
+    )
 
     # 2. Convergence trend — cumulative best up to each round
     best_per_round = {}
@@ -803,9 +861,14 @@ def generate_report(
         # Single-round fallback: all data belongs to latest round
         for r in rounds:
             best_per_round[r] = fidelity_df["composite_fidelity"].max()
-    sections["Convergence"] = build_convergence_figure(best_per_round)
+    sections["Convergence"] = (
+        "Best composite fidelity score achieved across optimization rounds. "
+        "Each point shows the highest fidelity seen up to that round. "
+        "With only round 1 data, this shows a single point; the trend emerges as more rounds are run.",
+        build_convergence_figure(best_per_round),
+    )
 
-    # 3. Morphogen-space UMAP — use all 20 training dimensions,
+    # 3. Morphogen-space PCA — use all 20 training dimensions,
     #    zero-pad recommendations for missing columns
     try:
         all_morph_cols = list(morphogen_df.columns)
@@ -815,61 +878,123 @@ def generate_report(
             shared_cols = [c for c in all_morph_cols if c in recs.columns]
             recs_full[shared_cols] = recs[shared_cols]
 
-            train_coords, rec_coords = compute_morphogen_umap_with_recommendations(
-                morphogen_df, recs_full, all_morph_cols
+            train_coords, rec_coords, loadings, var_pct, active_cols = (
+                compute_morphogen_pca_with_recommendations(
+                    morphogen_df, recs_full, all_morph_cols
+                )
             )
-            sections["Morphogen Space UMAP"] = build_morphogen_umap_figure(
-                train_coords, fidelity_df["composite_fidelity"], rec_coords
+            sections["Morphogen Space"] = (
+                "PCA projection of the 20-dimensional morphogen concentration space "
+                "(zero-variance columns excluded). Each dot is a tested condition, colored by "
+                "composite fidelity. Red stars are GP-recommended next experiments. "
+                "Gray arrows show the top 5 morphogen loadings driving separation along PC1/PC2. "
+                "Note: GP bounds extend beyond the training data range, so recommendations "
+                "may appear outside the training cluster — this is expected exploration behavior.",
+                build_morphogen_pca_figure(
+                    train_coords, fidelity_df["composite_fidelity"], rec_coords,
+                    loadings=loadings, active_cols=active_cols,
+                    var_explained=var_pct,
+                ),
             )
         else:
-            sections["Morphogen Space UMAP"] = _placeholder_figure(
-                "Insufficient data for morphogen UMAP"
+            sections["Morphogen Space"] = (
+                "", _placeholder_figure("Insufficient data for morphogen PCA"),
             )
     except Exception as e:
-        sections["Morphogen Space UMAP"] = _placeholder_figure(f"UMAP error: {e}")
+        sections["Morphogen Space"] = (
+            "", _placeholder_figure(f"PCA error: {e}"),
+        )
 
     # 4. Cell-space UMAP
     h5ad_path = data_dir / "amin_kelley_mapped.h5ad"
+    cell_umap_desc = (
+        "UMAP of individual cells from the scRNA-seq data, colored by predicted cell type "
+        "(transferred from the HNOCA reference atlas via scPoli/KNN). "
+        "Computed from the 30-dimensional scPoli latent space."
+    )
     if h5ad_path.exists():
         try:
             result = extract_cell_umap_from_h5ad(h5ad_path)
             if result is not None:
                 coords, cell_types, conditions = result
-                sections["Cell Space UMAP"] = build_cell_umap_figure(
-                    coords, cell_types, conditions
+                sections["Cell Space UMAP"] = (
+                    cell_umap_desc,
+                    build_cell_umap_figure(coords, cell_types, conditions),
                 )
             else:
-                sections["Cell Space UMAP"] = _placeholder_figure(
-                    "No UMAP coordinates in h5ad file"
+                sections["Cell Space UMAP"] = (
+                    cell_umap_desc,
+                    _placeholder_figure("No UMAP coordinates in h5ad file"),
                 )
         except Exception as e:
-            sections["Cell Space UMAP"] = _placeholder_figure(f"h5ad error: {e}")
+            sections["Cell Space UMAP"] = (
+                cell_umap_desc,
+                _placeholder_figure(f"h5ad error: {e}"),
+            )
     else:
-        sections["Cell Space UMAP"] = _placeholder_figure(
-            "amin_kelley_mapped.h5ad not found"
+        sections["Cell Space UMAP"] = (
+            cell_umap_desc,
+            _placeholder_figure("amin_kelley_mapped.h5ad not found"),
         )
 
     # 5. Plate map
-    sections["Plate Map"] = build_plate_map_figure(recs)
+    sections["Plate Map"] = (
+        "24-well plate layout for the next recommended experiment. "
+        "Hover over each well to see the exact morphogen concentrations. "
+        "Color indicates predicted fidelity or acquisition function value.",
+        build_plate_map_figure(recs),
+    )
 
     # 6. Morphogen importance
     lengthscales = diagnostics.get("lengthscales")
-    sections["Morphogen Importance"] = build_importance_figure(
-        lengthscales=lengthscales, morphogen_df=morphogen_df
+    if lengthscales:
+        imp_desc = (
+            "Morphogen importance derived from the GP ARD kernel (1/lengthscale). "
+            "A shorter lengthscale means the GP output changes more rapidly along that "
+            "dimension — i.e., that morphogen has more influence on cell type composition."
+        )
+    else:
+        imp_desc = (
+            "Morphogen exploration diversity (GP lengthscales unavailable). "
+            "Shows how broadly each morphogen was varied across conditions, "
+            "combining usage frequency and concentration variation. "
+            "Not a measure of biological importance — re-run step 04 to get GP-learned importance."
+        )
+    sections["Morphogen Importance"] = (
+        imp_desc,
+        build_importance_figure(lengthscales=lengthscales, morphogen_df=morphogen_df),
     )
 
     # 7. Leaderboard
-    sections["Leaderboard"] = build_leaderboard_figure(fidelity_df)
+    sections["Leaderboard"] = (
+        "Top conditions ranked by composite fidelity. Composite fidelity combines: "
+        "<b>on_target_fraction</b> (fraction of cells assigned to the dominant brain region), "
+        "<b>off_target_fraction</b> (fraction in undesired regions — lower is better), and "
+        "<b>rss_score</b> (cosine similarity of cell-class composition vs. Braun fetal brain reference).",
+        build_leaderboard_figure(fidelity_df),
+    )
 
     # 8. Cell type composition
     sort_order = fidelity_df.sort_values("composite_fidelity", ascending=False).index.tolist()
     if labels_df is not None:
-        sections["Cell Type Composition (Level 2)"] = build_composition_figure(
-            labels_df, sort_order=sort_order, title="Cell Type Composition (Level 2)"
+        sections["Cell Type Composition (Level 2)"] = (
+            "Stacked bar chart showing the fraction of each cell type per condition, "
+            "from HNOCA level-2 annotations (e.g., Dorsal Telencephalic Neuron, Ventral Telencephalic NPC). "
+            "Conditions are sorted left-to-right by decreasing composite fidelity.",
+            build_composition_figure(
+                labels_df, sort_order=sort_order, title="Cell Type Composition (Level 2)"
+            ),
         )
     if regions_df is not None:
-        sections["Brain Region Composition"] = build_composition_figure(
-            regions_df, sort_order=sort_order, title="Brain Region Composition"
+        sections["Brain Region Composition"] = (
+            "Brain region assignment per condition, based on HNOCA region annotations. "
+            "Many conditions with minimal morphogen input (e.g., LDN, IWP2, DAPT, FGF4, FGF8) show "
+            "~95-100% dorsal telencephalon — this is biologically expected as the default neural "
+            "differentiation trajectory trends cortical. Conditions with CHIR+SAG or RA drive "
+            "non-telencephalic fates (midbrain, cerebellum, hypothalamus).",
+            build_composition_figure(
+                regions_df, sort_order=sort_order, title="Brain Region Composition"
+            ),
         )
 
     # Assemble HTML

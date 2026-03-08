@@ -344,8 +344,8 @@ class TestVisualizationIntegration:
         """Test HTML assembly with dummy figures."""
         from gopro.visualize_report import assemble_html_report, _placeholder_figure
         sections = {
-            "Test Summary": "This is a test summary.",
-            "Test Chart": _placeholder_figure("test placeholder"),
+            "Test Summary": ("Summary description", "This is a test summary."),
+            "Test Chart": ("Chart description", _placeholder_figure("test placeholder")),
         }
         out = assemble_html_report(sections, tmp_path / "test.html")
         assert out.exists()
