@@ -17,8 +17,11 @@ import sys
 from pathlib import Path
 from urllib.parse import urljoin
 
+from gopro.config import PROJECT_DIR, DATA_DIR, get_logger
+
+logger = get_logger(__name__)
+
 ZENODO_API = "https://zenodo.org/api"
-PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
 
 # Known records we need
 KNOWN_RECORDS = {
@@ -60,18 +63,18 @@ def list_files(record_id):
     """List all files in a Zenodo record with sizes and checksums."""
     data = get_record(record_id)
 
-    print(f"\nRecord {record_id}: {data['metadata']['title']}")
-    print(f"  DOI: {data['doi']}")
-    print(f"  Published: {data['metadata']['publication_date']}")
-    print(f"  License: {data['metadata'].get('license', {}).get('id', 'unknown')}")
-    print(f"  Files:")
+    logger.info("Record %s: %s", record_id, data['metadata']['title'])
+    logger.info("  DOI: %s", data['doi'])
+    logger.info("  Published: %s", data['metadata']['publication_date'])
+    logger.info("  License: %s", data['metadata'].get('license', {}).get('id', 'unknown'))
+    logger.info("  Files:")
 
     files = []
     for f in data.get("files", []):
         size_gb = f["size"] / 1e9
         checksum = f["checksum"].replace("md5:", "")
         download_url = f["links"]["self"]
-        print(f"    {f['key']:50s}  {size_gb:6.2f} GB  md5:{checksum}")
+        logger.info("    %s  %6.2f GB  md5:%s", f['key'], size_gb, checksum)
         files.append({
             "filename": f["key"],
             "size": f["size"],
@@ -101,16 +104,16 @@ def download_file(url, output_path, expected_md5=None):
 
     # Check if already downloaded
     if output_path.exists() and expected_md5:
-        print(f"  File exists: {output_path.name}")
+        logger.info("  File exists: %s", output_path.name)
         actual_md5 = md5_file(output_path)
         if actual_md5 == expected_md5:
-            print(f"  Checksum OK — skipping")
+            logger.info("  Checksum OK — skipping")
             return True
         else:
-            print(f"  Checksum mismatch — re-downloading")
+            logger.warning("  Checksum mismatch — re-downloading")
 
     # Stream download with progress
-    print(f"  Downloading {output_path.name}...")
+    logger.info("  Downloading %s...", output_path.name)
     headers = {}
     mode = "wb"
     downloaded = 0
@@ -120,13 +123,13 @@ def download_file(url, output_path, expected_md5=None):
         downloaded = output_path.stat().st_size
         headers["Range"] = f"bytes={downloaded}-"
         mode = "ab"
-        print(f"  Resuming from {downloaded / 1e9:.2f} GB")
+        logger.info("  Resuming from %.2f GB", downloaded / 1e9)
 
     resp = requests.get(url, headers=headers, stream=True)
 
     if resp.status_code == 416:
         # Range not satisfiable — file is complete
-        print(f"  File already fully downloaded")
+        logger.info("  File already fully downloaded")
     elif resp.status_code in (200, 206):
         total = int(resp.headers.get("content-length", 0)) + downloaded
         with open(output_path, mode) as f:
@@ -137,22 +140,20 @@ def download_file(url, output_path, expected_md5=None):
                     pct = downloaded / total * 100
                     bar = "█" * int(pct // 2) + "░" * (50 - int(pct // 2))
                     print(f"\r  [{bar}] {pct:5.1f}%  {downloaded/1e9:.2f}/{total/1e9:.2f} GB", end="", flush=True)
-        print()
+        print()  # newline after progress bar
     else:
-        print(f"  ERROR: HTTP {resp.status_code}")
+        logger.error("HTTP %d", resp.status_code)
         return False
 
     # Verify checksum
     if expected_md5:
-        print(f"  Verifying checksum...")
+        logger.info("  Verifying checksum...")
         actual_md5 = md5_file(output_path)
         if actual_md5 == expected_md5:
-            print(f"  ✓ MD5 OK")
+            logger.info("  MD5 OK")
             return True
         else:
-            print(f"  ✗ MD5 MISMATCH")
-            print(f"    Expected: {expected_md5}")
-            print(f"    Got:      {actual_md5}")
+            logger.error("MD5 MISMATCH: expected %s, got %s", expected_md5, actual_md5)
             return False
 
     return True
@@ -160,20 +161,18 @@ def download_file(url, output_path, expected_md5=None):
 
 def download_known_records():
     """Download all files from known Zenodo records."""
-    print("=" * 60)
-    print("DOWNLOADING KNOWN RECORDS")
-    print("=" * 60)
+    logger.info("--- DOWNLOADING KNOWN RECORDS ---")
 
     for record_id, info in KNOWN_RECORDS.items():
-        print(f"\n--- {info['description']} ---")
+        logger.info("--- %s ---", info['description'])
 
         # Get actual download URLs from API
         record_data = get_record(record_id)
         api_files = {f["key"]: f for f in record_data.get("files", [])}
 
         for filename, file_info in info["files"].items():
-            print(f"\n  {file_info['description']}")
-            output_path = PROJECT_DIR / "data" / filename
+            logger.info("  %s", file_info['description'])
+            output_path = DATA_DIR / filename
 
             if filename in api_files:
                 url = api_files[filename]["links"]["self"]
@@ -192,9 +191,7 @@ def search_zenodo(query, max_results=20):
       search_zenodo("brain organoid scRNA-seq morphogen")
       search_zenodo('metadata.title:"neural organoid" AND metadata.resource_type.type:"dataset"')
     """
-    print("=" * 60)
-    print(f"SEARCHING ZENODO: {query}")
-    print("=" * 60)
+    logger.info("--- SEARCHING ZENODO: %s ---", query)
 
     params = {
         "q": query,
@@ -208,7 +205,7 @@ def search_zenodo(query, max_results=20):
     data = resp.json()
 
     total = data["hits"]["total"]
-    print(f"\nFound {total} results (showing top {min(max_results, total)})\n")
+    logger.info("Found %d results (showing top %d)", total, min(max_results, total))
 
     for i, hit in enumerate(data["hits"]["hits"], 1):
         meta = hit["metadata"]
@@ -225,15 +222,14 @@ def search_zenodo(query, max_results=20):
         # File types
         extensions = set(Path(f["key"]).suffix for f in files if "key" in f)
 
-        print(f"  [{i}] {title}")
-        print(f"      DOI: {doi}")
-        print(f"      Date: {date}")
-        print(f"      Files: {n_files} ({total_size:.2f} GB total)")
-        print(f"      Types: {', '.join(extensions) if extensions else 'unknown'}")
-        print(f"      Record ID: {hit['id']}")
+        logger.info("  [%d] %s", i, title)
+        logger.info("      DOI: %s", doi)
+        logger.info("      Date: %s", date)
+        logger.info("      Files: %d (%.2f GB total)", n_files, total_size)
+        logger.info("      Types: %s", ', '.join(extensions) if extensions else 'unknown')
+        logger.info("      Record ID: %s", hit['id'])
         if description:
-            print(f"      Desc: {description}...")
-        print()
+            logger.info("      Desc: %s...", description)
 
     return data["hits"]["hits"]
 
@@ -245,14 +241,13 @@ if __name__ == "__main__":
         results = search_zenodo(query)
 
         # Also try more specific queries
-        print("\n" + "=" * 60)
         additional_queries = [
             "neural organoid single-cell differentiation protocol",
             "morphogen screen organoid h5ad",
             "brain organoid atlas scRNA-seq 2024 2025",
         ]
         for q in additional_queries:
-            print(f"\n--- Additional search: {q} ---")
+            logger.info("--- Additional search: %s ---", q)
             search_zenodo(q, max_results=5)
 
     elif len(sys.argv) > 1 and sys.argv[1] == "--list":
@@ -264,12 +259,10 @@ if __name__ == "__main__":
         # Default: download known records
         download_known_records()
 
-        print("\n" + "=" * 60)
-        print("SUMMARY")
-        print("=" * 60)
+        logger.info("--- SUMMARY ---")
         for filename in ["hnoca_minimal_for_mapping.h5ad", "braun-et-al_minimal_for_mapping.h5ad"]:
-            path = PROJECT_DIR / "data" / filename
+            path = DATA_DIR / filename
             if path.exists():
-                print(f"  ✓ {filename}: {path.stat().st_size / 1e9:.2f} GB")
+                logger.info("  OK %s: %.2f GB", filename, path.stat().st_size / 1e9)
             else:
-                print(f"  ✗ {filename}: MISSING")
+                logger.warning("  MISSING %s", filename)

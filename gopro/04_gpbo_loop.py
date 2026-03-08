@@ -26,40 +26,14 @@ import torch
 from pathlib import Path
 from typing import Optional
 
-PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
-DATA_DIR = PROJECT_DIR / "data"
+from gopro.config import DATA_DIR, MORPHOGEN_COLUMNS, get_logger
+
+logger = get_logger(__name__)
 
 # BoTorch requires float64, which MPS doesn't support. Use CPU for GP fitting.
 # MPS can be used for neural network components (CellFlow, scPoli) separately.
 DEVICE = torch.device("cpu")
 DTYPE = torch.double
-
-# ==============================================================================
-# Morphogen encoding: union of all morphogens across datasets
-# Missing morphogens = 0 ("not added to culture")
-# ==============================================================================
-MORPHOGEN_COLUMNS = [
-    "CHIR99021_uM",       # WNT agonist
-    "BMP4_ng_mL",         # BMP signaling
-    "BMP7_ng_mL",         # BMP signaling
-    "SHH_ng_mL",          # Sonic hedgehog
-    "SAG_nM",             # Smoothened agonist (SHH pathway)
-    "RA_nM",              # Retinoic acid
-    "FGF8_ng_mL",         # Fibroblast growth factor
-    "FGF2_ng_mL",         # Fibroblast growth factor
-    "FGF4_ng_mL",         # Fibroblast growth factor
-    "IWP2_uM",            # WNT inhibitor
-    "XAV939_uM",          # WNT inhibitor (tankyrase)
-    "SB431542_uM",        # TGF-beta inhibitor
-    "LDN193189_nM",       # BMP inhibitor
-    "DAPT_uM",            # Notch inhibitor
-    "EGF_ng_mL",          # Epidermal growth factor
-    "ActivinA_ng_mL",     # TGF-beta / Activin
-    "purmorphamine_uM",   # SHH agonist
-    "cyclopamine_uM",     # SHH antagonist
-    "Dorsomorphin_uM",    # BMP inhibitor (small molecule)
-    "log_harvest_day",    # Time dimension
-]
 
 # Realistic morphogen bounds per dimension (for acquisition function search)
 MORPHOGEN_BOUNDS = {
@@ -166,15 +140,15 @@ def build_training_set(
     # Align indices
     common = Y.index.intersection(X.index)
     if len(common) < len(Y):
-        print(f"  WARNING: {len(Y) - len(common)} conditions in Y not found in X")
+        logger.warning("%d conditions in Y not found in X", len(Y) - len(common))
     X = X.loc[common]
     Y = Y.loc[common]
 
     # Add fidelity column
     X["fidelity"] = fidelity
 
-    print(f"  X (morphogens): {X.shape}")
-    print(f"  Y (cell type fractions): {Y.shape}")
+    logger.info("X (morphogens): %s", X.shape)
+    logger.info("Y (cell type fractions): %s", Y.shape)
 
     return X, Y
 
@@ -215,15 +189,15 @@ def fit_gp_botorch(
     Y_values = Y_selected.values
 
     if use_ilr and Y_values.shape[1] > 1:
-        print("  Applying ILR transform to compositional Y data...")
+        logger.info("Applying ILR transform to compositional Y data...")
         Y_values = ilr_transform(Y_values)
-        print(f"  ILR-transformed Y shape: {Y_values.shape}")
+        logger.info("ILR-transformed Y shape: %s", Y_values.shape)
 
     train_Y = torch.tensor(Y_values, dtype=DTYPE, device=DEVICE)
 
     # Fit GP
-    print(f"\n  Fitting BoTorch GP...")
-    print(f"  X: {train_X.shape}, Y: {train_Y.shape}")
+    logger.info("Fitting BoTorch GP...")
+    logger.info("X: %s, Y: %s", train_X.shape, train_Y.shape)
 
     # Check if we have fidelity column
     has_fidelity = "fidelity" in X.columns
@@ -231,7 +205,7 @@ def fit_gp_botorch(
 
     if has_fidelity and X["fidelity"].nunique() > 1:
         from botorch.models import SingleTaskMultiFidelityGP
-        print("  Using multi-fidelity GP (fidelity column detected)")
+        logger.info("Using multi-fidelity GP (fidelity column detected)")
         model = SingleTaskMultiFidelityGP(
             train_X,
             train_Y,
@@ -240,7 +214,7 @@ def fit_gp_botorch(
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
     else:
-        print("  Using single-task GP (single fidelity level)")
+        logger.info("Using single-task GP (single fidelity level)")
         model = SingleTaskGP(
             train_X,
             train_Y,
@@ -253,7 +227,7 @@ def fit_gp_botorch(
     fit_gpytorch_mll(mll)
 
     # Report kernel parameters
-    print("\n  GP Kernel Parameters:")
+    logger.info("GP Kernel Parameters:")
     lengthscales = None
     try:
         if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
@@ -271,11 +245,11 @@ def fit_gp_botorch(
         importance = 1.0 / lengthscales
         morph_importance = pd.Series(importance[:len(X.columns)], index=X.columns)
         morph_importance = morph_importance.sort_values(ascending=False)
-        print("  Morphogen importance (1/lengthscale):")
+        logger.info("Morphogen importance (1/lengthscale):")
         for morph, imp in morph_importance.head(8).items():
-            print(f"    {morph}: {imp:.4f}")
+            logger.info("  %s: %.4f", morph, imp)
     else:
-        print("  (lengthscales not directly accessible for this model type)")
+        logger.info("(lengthscales not directly accessible for this model type)")
 
     return model, train_X, train_Y, cell_type_cols
 
@@ -363,7 +337,7 @@ def recommend_next_experiments(
             )
 
     # Optimize acquisition function
-    print(f"\n  Optimizing acquisition function for {n_recommendations} candidates...")
+    logger.info("Optimizing acquisition function for %d candidates...", n_recommendations)
     candidates, acq_values = optimize_acqf(
         acq_function=acqf,
         bounds=bounds_tensor,
@@ -419,13 +393,13 @@ def merge_multi_fidelity_data(
 
     for fractions_csv, morphogen_csv, fidelity in data_sources:
         if not fractions_csv.exists() or not morphogen_csv.exists():
-            print(f"  Skipping {fractions_csv.name} (not found)")
+            logger.info("Skipping %s (not found)", fractions_csv.name)
             continue
 
         X, Y = build_training_set(fractions_csv, morphogen_csv, fidelity=fidelity)
         all_X.append(X)
         all_Y.append(Y)
-        print(f"  Loaded {len(X)} points at fidelity={fidelity}")
+        logger.info("Loaded %d points at fidelity=%s", len(X), fidelity)
 
     if not all_X:
         raise ValueError("No valid data sources found")
@@ -463,14 +437,14 @@ def merge_multi_fidelity_data(
     row_sums = merged_Y.sum(axis=1)
     merged_Y = merged_Y.div(row_sums.replace(0, 1), axis=0)
 
-    print(f"\n  Merged training set:")
-    print(f"    X: {merged_X.shape}")
-    print(f"    Y: {merged_Y.shape}")
+    logger.info("Merged training set:")
+    logger.info("  X: %s", merged_X.shape)
+    logger.info("  Y: %s", merged_Y.shape)
 
     fidelity_counts = merged_X["fidelity"].value_counts().sort_index(ascending=False)
     for fid, count in fidelity_counts.items():
         label = {1.0: "real", 0.5: "CellRank2", 0.0: "CellFlow"}.get(fid, f"fid={fid}")
-        print(f"    {label}: {count} points")
+        logger.info("  %s: %d points", label, count)
 
     return merged_X, merged_Y
 
@@ -500,12 +474,10 @@ def run_gpbo_loop(
     Returns:
         DataFrame of recommended next experiments.
     """
-    print("=" * 60)
-    print(f"GP-BO ROUND {round_num}")
-    print("=" * 60)
+    logger.info("--- GP-BO ROUND %d ---", round_num)
 
     # Build training set (potentially multi-fidelity)
-    print("\nBuilding training set...")
+    logger.info("Building training set...")
 
     if virtual_sources:
         # Multi-fidelity: combine real + virtual data
@@ -532,7 +504,7 @@ def run_gpbo_loop(
     # Save outputs
     output_path = DATA_DIR / f"gp_recommendations_round{round_num}.csv"
     recommendations.to_csv(str(output_path))
-    print(f"\n  Plate map saved to {output_path}")
+    logger.info("Plate map saved to %s", output_path)
 
     # Save model diagnostics
     diagnostics = {
@@ -564,7 +536,7 @@ def run_gpbo_loop(
     diag_df = pd.DataFrame([diagnostics])
     diag_path = DATA_DIR / f"gp_diagnostics_round{round_num}.csv"
     diag_df.to_csv(str(diag_path), index=False)
-    print(f"  Diagnostics saved to {diag_path}")
+    logger.info("Diagnostics saved to %s", diag_path)
 
     return recommendations
 
@@ -601,7 +573,7 @@ if __name__ == "__main__":
     morphogen_path = Path(args.morphogens) if args.morphogens else DATA_DIR / "morphogen_matrix_amin_kelley.csv"
 
     if not fractions_path.exists() or not morphogen_path.exists():
-        print("Training data not found. Running with synthetic data for demo...")
+        logger.info("Training data not found. Running with synthetic data for demo...")
 
         np.random.seed(42)
         n_conditions = 46
@@ -627,7 +599,7 @@ if __name__ == "__main__":
         DATA_DIR.mkdir(exist_ok=True)
         Y_demo.to_csv(str(fractions_path))
         X_demo.to_csv(str(morphogen_path))
-        print(f"  Synthetic data saved.")
+        logger.info("Synthetic data saved.")
 
     # Build virtual sources list
     virtual_sources = []
@@ -637,14 +609,14 @@ if __name__ == "__main__":
     cr2_morph = Path(args.cellrank2_morphogens) if args.cellrank2_morphogens else DATA_DIR / "cellrank2_virtual_morphogens.csv"
     if cr2_frac.exists() and cr2_morph.exists():
         virtual_sources.append((cr2_frac, cr2_morph, 0.5))
-        print(f"  Including CellRank2 virtual data (fidelity=0.5)")
+        logger.info("Including CellRank2 virtual data (fidelity=0.5)")
 
     # Check for CellFlow virtual data
     cf_frac = Path(args.cellflow_fractions) if args.cellflow_fractions else DATA_DIR / "cellflow_virtual_fractions.csv"
     cf_morph = Path(args.cellflow_morphogens) if args.cellflow_morphogens else DATA_DIR / "cellflow_virtual_morphogens.csv"
     if cf_frac.exists() and cf_morph.exists():
         virtual_sources.append((cf_frac, cf_morph, 0.0))
-        print(f"  Including CellFlow virtual data (fidelity=0.0)")
+        logger.info("Including CellFlow virtual data (fidelity=0.0)")
 
     # Run GP-BO loop
     recs = run_gpbo_loop(
@@ -657,11 +629,9 @@ if __name__ == "__main__":
         virtual_sources=virtual_sources if virtual_sources else None,
     )
 
-    print("\n" + "=" * 60)
-    print("NEXT EXPERIMENT RECOMMENDATIONS")
-    print("=" * 60)
+    logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
     morph_cols = [c for c in MORPHOGEN_COLUMNS if c in recs.columns]
     nonzero_cols = [c for c in morph_cols if recs[c].abs().sum() > 0.01]
     pred_cols = [c for c in recs.columns if "predicted" in c or "acquisition" in c]
-    print(recs[nonzero_cols + pred_cols].to_string())
-    print("\n  Give this plate map to the wet lab team!")
+    logger.info("\n%s", recs[nonzero_cols + pred_cols].to_string())
+    logger.info("Give this plate map to the wet lab team!")

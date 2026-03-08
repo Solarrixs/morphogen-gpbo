@@ -138,14 +138,9 @@ class TestCellFlowConstants:
 
     def test_morphogen_identities_complete(self):
         """All morphogens (except log_harvest_day) have identity mappings."""
-        from importlib import util
-        step04_spec = util.spec_from_file_location(
-            "step04", str(GOPRO_DIR / "04_gpbo_loop.py")
-        )
-        step04_mod = util.module_from_spec(step04_spec)
-        step04_spec.loader.exec_module(step04_mod)
+        from gopro.config import MORPHOGEN_COLUMNS
 
-        for col in step04_mod.MORPHOGEN_COLUMNS:
+        for col in MORPHOGEN_COLUMNS:
             if col == "log_harvest_day":
                 continue
             assert col in step06.MORPHOGEN_IDENTITIES, (

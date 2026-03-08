@@ -357,7 +357,7 @@ class TestVisualizationIntegration:
 class TestRealDataExists:
     """Tests that real data files are accessible (smoke tests)."""
 
-    DATA_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo/data")
+    from gopro.config import DATA_DIR
 
     def test_amin_kelley_converted(self):
         path = self.DATA_DIR / "amin_kelley_2024.h5ad"
