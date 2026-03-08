@@ -9,15 +9,17 @@ GP-BO (Gaussian Process Bayesian Optimization) pipeline for brain organoid morph
 ```
 morphogen-gpbo/
 ├── gopro/                    # Pipeline code (Python)
+│   ├── __init__.py
 │   ├── 00_zenodo_download.py           # Download HNOCA + Braun references from Zenodo
-│   ├── 00b_download_patterning_screen.py # Download patterning screen from Zenodo
 │   ├── 01_load_and_convert_data.py     # Convert GEO MTX → AnnData h5ad
 │   ├── 02_map_to_hnoca.py             # scArches/scPoli mapping + KNN label transfer
 │   ├── 03_fidelity_scoring.py          # Two-tier fidelity scoring vs Braun fetal brain
 │   ├── 04_gpbo_loop.py                 # BoTorch GP-BO with ILR transform, plate map output
 │   ├── morphogen_parser.py             # Parse condition names → 20D concentration vectors
 │   ├── requirements.txt
+│   ├── README.md
 │   └── tests/                          # pytest test suite (65 tests)
+│       ├── conftest.py                 # Shared fixtures
 │       ├── test_unit.py                # 35 unit tests
 │       ├── test_integration.py         # 18 integration tests
 │       └── test_properties.py          # 12 property-based tests (Hypothesis)
@@ -36,7 +38,6 @@ Run sequentially from `gopro/`:
 
 ```bash
 python 00_zenodo_download.py            # Download reference atlases to data/
-python 00b_download_patterning_screen.py # Download patterning screen to data/
 python 01_load_and_convert_data.py       # Convert GEO MTX → AnnData h5ad
 python 02_map_to_hnoca.py               # scArches/scPoli mapping + KNN label transfer
 python 03_fidelity_scoring.py            # Two-tier fidelity scoring vs Braun fetal brain
