@@ -307,7 +307,21 @@ def extract_cell_umap_from_h5ad(
                 break
 
     if umap_key is None:
-        return None
+        # Compute UMAP from scPoli latent space if available
+        latent_key = None
+        for key in adata.obsm:
+            if "scpoli" in key.lower():
+                latent_key = key
+                break
+        if latent_key is None:
+            return None
+
+        import scanpy as sc
+        # Load into memory for UMAP computation
+        adata = adata.to_memory()
+        sc.pp.neighbors(adata, use_rep=latent_key, n_neighbors=15)
+        sc.tl.umap(adata, random_state=42)
+        umap_key = "X_umap"
 
     coords = adata.obsm[umap_key][:]
 
@@ -347,16 +361,24 @@ def build_cell_umap_figure(
     Returns:
         Plotly Figure.
     """
+    import plotly.express as px
+
     fig = go.Figure()
 
     unique_types = sorted(cell_types.unique())
-    for ct in unique_types:
+    # Use a large qualitative palette to avoid color repetition with 14+ cell types
+    palette = (
+        px.colors.qualitative.Dark24
+        if len(unique_types) > 10
+        else px.colors.qualitative.Plotly
+    )
+    for i, ct in enumerate(unique_types):
         mask = cell_types == ct
         fig.add_trace(go.Scattergl(
             x=coords[mask, 0],
             y=coords[mask, 1],
             mode="markers",
-            marker=dict(size=2, opacity=0.5),
+            marker=dict(size=2, opacity=0.5, color=palette[i % len(palette)]),
             name=ct,
             text=conditions[mask],
             hovertemplate="<b>%{text}</b><br>%{fullData.name}<extra></extra>",
@@ -768,18 +790,33 @@ def generate_report(
     summary = generate_summary_text(fidelity_df, diagnostics, len(recs))
     sections["Summary"] = summary
 
-    # 2. Convergence trend
+    # 2. Convergence trend — cumulative best up to each round
     best_per_round = {}
-    for r in rounds:
-        best_per_round[r] = fidelity_df["composite_fidelity"].max()
+    if "round" in fidelity_df.columns:
+        cumulative_best = -np.inf
+        for r in rounds:
+            round_mask = fidelity_df["round"] <= r
+            if round_mask.any():
+                cumulative_best = fidelity_df.loc[round_mask, "composite_fidelity"].max()
+            best_per_round[r] = cumulative_best
+    else:
+        # Single-round fallback: all data belongs to latest round
+        for r in rounds:
+            best_per_round[r] = fidelity_df["composite_fidelity"].max()
     sections["Convergence"] = build_convergence_figure(best_per_round)
 
-    # 3. Morphogen-space UMAP
+    # 3. Morphogen-space UMAP — use all 20 training dimensions,
+    #    zero-pad recommendations for missing columns
     try:
-        shared_cols = [c for c in morphogen_df.columns if c in recs.columns]
-        if shared_cols and len(morphogen_df) > 2:
+        all_morph_cols = list(morphogen_df.columns)
+        if all_morph_cols and len(morphogen_df) > 2:
+            # Build a rec frame with all 20 morphogen cols, zero for missing ones
+            recs_full = pd.DataFrame(0.0, index=recs.index, columns=all_morph_cols)
+            shared_cols = [c for c in all_morph_cols if c in recs.columns]
+            recs_full[shared_cols] = recs[shared_cols]
+
             train_coords, rec_coords = compute_morphogen_umap_with_recommendations(
-                morphogen_df, recs, shared_cols
+                morphogen_df, recs_full, all_morph_cols
             )
             sections["Morphogen Space UMAP"] = build_morphogen_umap_figure(
                 train_coords, fidelity_df["composite_fidelity"], rec_coords

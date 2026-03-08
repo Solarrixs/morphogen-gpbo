@@ -17,3 +17,11 @@ neural_organoid_atlas/
 # IDE
 .idea/
 .vscode/
+
+# Ralph pipeline temp files
+.ralph-*.tmp
+.ralph-logs/
+
+# Claude Code
+.claude/worktrees/
+.hypothesis/

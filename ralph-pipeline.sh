@@ -381,7 +381,7 @@ run_claude() {
   fi
 
   # Pipe prompt via stdin to avoid shell argument length limits
-  # Run claude in background, show a spinner with elapsed time + file size
+  # Run claude in background, show a spinner with elapsed time + activity indicators
   local exit_code=0
   echo "$prompt" | claude -p \
     --model "$MODEL" \
@@ -391,13 +391,39 @@ run_claude() {
     > "$output_file" 2>&1 &
   local claude_pid=$!
 
-  # Spinner loop — shows elapsed time and output size while claude runs
+  # Snapshot git state to detect changes
+  local git_hash_start
+  git_hash_start=$(git rev-parse HEAD 2>/dev/null || echo "none")
+  local last_git_hash="$git_hash_start"
+
+  # Spinner loop — shows elapsed time, CPU activity, and git changes
   local spin_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
   local spin_i=0
   while kill -0 "$claude_pid" 2>/dev/null; do
     local elapsed=$(( $(date +%s) - start_time ))
     local mins=$((elapsed / 60))
     local secs=$((elapsed % 60))
+
+    # Check if claude process is using CPU (proves it's not hung)
+    local cpu_pct
+    cpu_pct=$(ps -p "$claude_pid" -o %cpu= 2>/dev/null | tr -d ' ' || echo "0")
+
+    # Check for git activity (new commits = progress)
+    local current_hash
+    current_hash=$(git rev-parse HEAD 2>/dev/null || echo "none")
+    local git_status=""
+    if [[ "$current_hash" != "$last_git_hash" ]]; then
+      local commit_msg
+      commit_msg=$(git log --oneline -1 --format="%s" 2>/dev/null || echo "")
+      git_status=" | ${GREEN}NEW COMMIT: ${commit_msg}${NC}"
+      last_git_hash="$current_hash"
+    fi
+
+    # Check for modified files (work in progress)
+    local changed_files
+    changed_files=$(git diff --name-only 2>/dev/null | wc -l | tr -d ' ')
+
+    # Check output file size
     local file_size="0B"
     if [[ -f "$output_file" ]]; then
       local bytes
@@ -406,21 +432,43 @@ run_claude() {
         file_size="$(( bytes / 1048576 ))MB"
       elif [[ $bytes -gt 1024 ]]; then
         file_size="$(( bytes / 1024 ))KB"
-      else
+      elif [[ $bytes -gt 0 ]]; then
         file_size="${bytes}B"
       fi
     fi
+
     local sc="${spin_chars:spin_i%${#spin_chars}:1}"
-    printf "\r  ${CYAN}%s${NC} ${phase_name} running... ${BOLD}%dm%02ds${NC} | output: ${GREEN}%s${NC}  " "$sc" "$mins" "$secs" "$file_size"
+    local activity=""
+    if (( $(echo "$cpu_pct > 5" | bc 2>/dev/null || echo 0) )); then
+      activity="${GREEN}active${NC}"
+    else
+      activity="${YELLOW}waiting${NC}"
+    fi
+
+    printf "\r  ${CYAN}%s${NC} ${phase_name} ${BOLD}%dm%02ds${NC} | cpu: %s%% (%b) | files changed: %s | out: %s%b  " \
+      "$sc" "$mins" "$secs" "$cpu_pct" "$activity" "$changed_files" "$file_size" "$git_status"
     spin_i=$((spin_i + 1))
-    sleep 1
+
+    # Clear git_status after showing it once
+    git_status=""
+    sleep 2
   done
 
   # Grab exit code from the background process
   wait "$claude_pid" || exit_code=$?
 
   # Clear the spinner line
-  printf "\r%80s\r" ""
+  printf "\r%120s\r" ""
+
+  # Show summary of git changes during this phase
+  local current_hash
+  current_hash=$(git rev-parse HEAD 2>/dev/null || echo "none")
+  if [[ "$current_hash" != "$git_hash_start" ]]; then
+    local commit_count
+    commit_count=$(git rev-list --count "${git_hash_start}..${current_hash}" 2>/dev/null || echo "0")
+    echo -e "  ${GREEN}Git: ${commit_count} new commit(s) during ${phase_name}${NC}"
+    git log --oneline "${git_hash_start}..${current_hash}" 2>/dev/null | sed 's/^/    /'
+  fi
 
   end_time=$(date +%s)
   duration=$((end_time - start_time))
