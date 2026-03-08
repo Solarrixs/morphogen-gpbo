@@ -1,174 +1,372 @@
 """
-Step 2: Map morphogen screen data onto HNOCA reference via scArches.
+Step 2: Map morphogen screen data onto HNOCA reference via scArches/scPoli.
+
+Based on the reference implementation in:
+  data/neural_organoid_atlas/Fig4_Amin_mapping/03_NOMS_to_HNOCA_mapping.ipynb
 
 This script:
   1. Loads the pre-trained scPoli model + HNOCA minimal reference
-  2. Preprocesses query data (QC, normalization)
+  2. Prepares query data (subset to ref HVGs, set X to counts, add batch column)
   3. Projects query cells onto HNOCA latent space (architecture surgery)
-  4. Transfers cell type labels from HNOCA → query
+  4. Transfers cell type labels via weighted KNN in latent space
   5. Computes cell type fractions per morphogen condition (= GP training labels)
 
 Inputs:
   - data/amin_kelley_2024.h5ad (from step 01)
-  - hnoca_minimal_for_mapping.h5ad (from Zenodo 15004817)
-  - scpoli_model_params/ (from GitHub)
+  - data/hnoca_minimal_for_mapping.h5ad (HNOCA reference with scPoli latent)
+  - data/neural_organoid_atlas/supplemental_files/scpoli_model_params/
 
 Outputs:
-  - data/amin_kelley_mapped.h5ad (with cell type annotations)
-  - data/gp_training_data.csv (X=morphogens, Y=cell type fractions)
+  - data/amin_kelley_mapped.h5ad (with cell type annotations in obs)
+  - data/gp_training_labels_amin_kelley.csv (cell type fractions per condition)
 """
 
+from __future__ import annotations
+
+import warnings
 import scanpy as sc
 import pandas as pd
 import numpy as np
+from scipy import sparse
 from pathlib import Path
+from typing import Optional
+
+warnings.filterwarnings("ignore")
 
 # Paths
 PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
 DATA_DIR = PROJECT_DIR / "data"
-MODEL_DIR = PROJECT_DIR / "neural_organoid_atlas/supplemental_files/scpoli_model_params"
+MODEL_DIR = DATA_DIR / "neural_organoid_atlas/supplemental_files/scpoli_model_params"
+
+# Annotation columns in the HNOCA reference
+ANNOT_LEVEL_1 = "annot_level_1"       # 13 broad types: Neuron, NPC, etc.
+ANNOT_LEVEL_2 = "annot_level_2"       # 17 types: Dorsal Telencephalic Neuron, etc.
+ANNOT_REGION = "annot_region_rev2"    # 10 brain regions
+ANNOT_LEVEL_3 = "annot_level_3_rev2"  # 29 detailed types
 
 
-def preprocess_query(adata):
-    """Standard scRNA-seq preprocessing for query data."""
-    print("  Preprocessing query data...")
+def filter_quality_cells(adata: sc.AnnData) -> sc.AnnData:
+    """Filter to 'keep' quality cells based on Amin/Kelley QC annotations.
 
-    # QC metrics
-    adata.var["mt"] = adata.var_names.str.startswith("MT-")
-    sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
+    Args:
+        adata: AnnData with 'quality' column in obs.
 
-    # Filter cells
-    n_before = adata.n_obs
-    sc.pp.filter_cells(adata, min_genes=200)
-    sc.pp.filter_cells(adata, max_genes=8000)
-    adata = adata[adata.obs.pct_counts_mt < 20].copy()
-    print(f"  Filtered: {n_before} → {adata.n_obs} cells ({n_before - adata.n_obs} removed)")
-
-    # Normalize
-    sc.pp.normalize_total(adata, target_sum=1e4)
-    sc.pp.log1p(adata)
-
-    # HVGs
-    sc.pp.highly_variable_genes(adata, n_top_genes=2000, batch_key=None)
-
-    # PCA + neighbors
-    sc.pp.pca(adata, n_comps=50)
-    sc.pp.neighbors(adata, n_pcs=30)
-
+    Returns:
+        Filtered AnnData with only 'keep' quality cells.
+    """
+    if "quality" in adata.obs.columns:
+        n_before = adata.n_obs
+        adata = adata[adata.obs["quality"] == "keep"].copy()
+        print(f"  Quality filter: {n_before} → {adata.n_obs} cells "
+              f"({n_before - adata.n_obs} removed)")
     return adata
 
 
-def map_to_hnoca(query_adata, ref_adata_path, model_dir):
+def prepare_query_for_scpoli(
+    query: sc.AnnData,
+    ref: sc.AnnData,
+    batch_column: str = "sample",
+) -> sc.AnnData:
+    """Prepare query AnnData for scPoli mapping.
+
+    Following the reference implementation:
+    1. Subset to shared genes (intersection with reference HVGs)
+    2. Set X to raw counts
+    3. Add batch column
+    4. Add placeholder annotation labels
+
+    Args:
+        query: Query AnnData (from step 01).
+        ref: Reference AnnData (HNOCA minimal).
+        batch_column: Column in query.obs to use as batch identifier.
+
+    Returns:
+        Prepared query AnnData ready for scPoli.
     """
-    Map query data onto HNOCA using scArches/scPoli.
+    print("  Preparing query for scPoli mapping...")
 
-    This performs "architecture surgery":
-    - Loads the pre-trained scPoli model (trained on 1.77M HNOCA cells)
-    - Freezes most weights (preserves cell biology knowledge)
-    - Adds a small new layer for the query batch
-    - Trains only that layer (~100 epochs, minutes)
-    - Result: query cells in the same latent space as HNOCA
+    # Subset to reference var names (shared HVGs)
+    shared_genes = query.var_names.intersection(ref.var_names)
+    print(f"  Shared genes with reference: {len(shared_genes)} / {ref.n_vars}")
+    query = query[:, shared_genes].copy()
+
+    # Set X to raw counts (scPoli expects counts)
+    if "counts" in query.layers:
+        query.X = query.layers["counts"][:, query.var_names.isin(shared_genes)].copy()
+        # Actually the subsetting already happened, so just use the layer
+        query.X = query.layers["counts"].copy()
+    print(f"  X set to raw counts, shape: {query.X.shape}")
+
+    # Set batch column
+    if batch_column in query.obs.columns:
+        query.obs["batch"] = query.obs[batch_column].astype(str)
+    else:
+        query.obs["batch"] = "query"
+    print(f"  Batch column: {query.obs['batch'].nunique()} unique batches")
+
+    # Add placeholder annotation labels (required by scPoli)
+    for col in [ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_LEVEL_3]:
+        if col in ref.obs.columns and col not in query.obs.columns:
+            query.obs[col] = "unknown"
+
+    # Clear obsm/varm that might cause issues
+    query.obsm = {}
+    query.varm = {}
+
+    return query
+
+
+def map_to_hnoca_scpoli(
+    query: sc.AnnData,
+    ref: sc.AnnData,
+    model_dir: Path,
+    n_epochs: int = 500,
+    batch_size: int = 1024,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map query cells onto HNOCA latent space using scPoli architecture surgery.
+
+    Following the reference implementation in:
+      Fig4_Amin_mapping/03_NOMS_to_HNOCA_mapping.ipynb
+
+    Args:
+        query: Prepared query AnnData.
+        ref: Reference AnnData (HNOCA minimal).
+        model_dir: Path to scPoli model parameters.
+        n_epochs: Number of training epochs for query mapping.
+        batch_size: Training batch size.
+
+    Returns:
+        Tuple of (query_latent, ref_latent) numpy arrays.
     """
-    try:
-        import scvi
-        from hnoca.map import AtlasMapper
-    except ImportError:
-        print("\n  ERROR: Required packages not installed. Run:")
-        print("    pip install hnoca scvi-tools scarches")
-        return None, None
+    from scarches.models.scpoli import scPoli
 
-    # Load reference
-    print("  Loading HNOCA minimal reference...")
-    ref_adata = sc.read_h5ad(str(ref_adata_path))
-    print(f"  Reference: {ref_adata.shape}")
+    # Prepare reference: set X to counts
+    print("  Setting reference X to counts layer...")
+    if sparse.issparse(ref.layers["counts"]):
+        ref.X = ref.layers["counts"].toarray().copy()
+    else:
+        ref.X = ref.layers["counts"].copy()
 
-    # Load pre-trained model
+    # Load pre-trained scPoli model
     print(f"  Loading pre-trained scPoli model from {model_dir}...")
-    ref_model = scvi.model.SCANVI.load(str(model_dir), adata=ref_adata)
+    scpoli_model = scPoli.load(str(model_dir), ref)
+    print("  Model loaded successfully.")
 
-    # Create mapper
-    mapper = AtlasMapper(ref_model)
+    # Load query data into the model (architecture surgery)
+    print("  Preparing query data for scPoli...")
+    # Ensure query X is dense
+    if sparse.issparse(query.X):
+        query.X = query.X.toarray().copy()
 
-    # Architecture surgery: map query onto reference
-    print("  Running architecture surgery (partial retrain)...")
-    mapper.map_query(
-        query_adata,
-        retrain="partial",
-        max_epochs=100,
-        batch_size=1024,
+    scpoli_query = scPoli.load_query_data(
+        adata=query,
+        reference_model=scpoli_model,
+        labeled_indices=[],
     )
 
-    # Transfer labels
-    print("  Computing weighted KNN...")
-    mapper.compute_wknn(k=100)
+    # Train on query data (partial retrain — only new batch embedding)
+    print(f"  Training scPoli on query data ({n_epochs} epochs)...")
+    scpoli_query.train(
+        n_epochs=n_epochs,
+        pretraining_epochs=n_epochs,
+        eta=10,
+        unlabeled_prototype_training=False,
+    )
+    print("  Training complete.")
 
-    print("  Transferring cell type labels...")
-    celltype_labels = mapper.transfer_labels(label_key="cell_type")
+    # Get latent representations
+    print("  Computing latent representations...")
+    query_latent = scpoli_query.get_latent(query, mean=True)
+    ref_latent = scpoli_model.get_latent(ref, mean=True)
 
-    # Compute presence scores (how well represented each cell type is)
-    presence_scores = mapper.get_presence_scores(split_by="batch")
+    print(f"  Query latent: {query_latent.shape}")
+    print(f"  Reference latent: {ref_latent.shape}")
 
-    return celltype_labels, presence_scores
+    return query_latent, ref_latent
 
 
-def compute_gp_training_data(adata, condition_key="condition"):
+def transfer_labels_knn(
+    ref_latent: np.ndarray,
+    query_latent: np.ndarray,
+    ref_obs: pd.DataFrame,
+    query_obs: pd.DataFrame,
+    label_columns: list[str],
+    k: int = 50,
+) -> pd.DataFrame:
+    """Transfer cell type labels from reference to query via KNN in latent space.
+
+    Uses sklearn KNeighborsClassifier (CPU) instead of cuml (GPU).
+
+    Args:
+        ref_latent: Reference latent space embeddings.
+        query_latent: Query latent space embeddings.
+        ref_obs: Reference cell metadata.
+        query_obs: Query cell metadata.
+        label_columns: List of label columns to transfer.
+        k: Number of neighbors.
+
+    Returns:
+        DataFrame with transferred labels and confidence scores.
     """
-    Compute cell type fractions per condition = GP training labels (Y).
+    from sklearn.neighbors import KNeighborsClassifier
 
-    Returns DataFrame: rows=conditions, columns=cell types, values=fractions
+    results = pd.DataFrame(index=query_obs.index)
+
+    for label_col in label_columns:
+        if label_col not in ref_obs.columns:
+            print(f"  WARNING: {label_col} not in reference, skipping")
+            continue
+
+        labels = ref_obs[label_col].values
+        print(f"  Transferring {label_col} ({len(np.unique(labels))} classes)...")
+
+        knn = KNeighborsClassifier(n_neighbors=k, weights="distance", n_jobs=-1)
+        knn.fit(ref_latent, labels)
+
+        predicted = knn.predict(query_latent)
+        probas = knn.predict_proba(query_latent)
+        confidence = probas.max(axis=1)
+
+        results[f"predicted_{label_col}"] = predicted
+        results[f"{label_col}_confidence"] = confidence
+
+    return results
+
+
+def compute_cell_type_fractions(
+    obs: pd.DataFrame,
+    condition_key: str = "condition",
+    label_key: str = "predicted_annot_level_2",
+    quality_filter: bool = True,
+) -> pd.DataFrame:
+    """Compute cell type fractions per condition (= GP training labels Y).
+
+    Args:
+        obs: Cell metadata with condition and predicted cell type columns.
+        condition_key: Column identifying experimental conditions.
+        label_key: Column with predicted cell type labels.
+        quality_filter: Whether to filter to 'keep' quality cells.
+
+    Returns:
+        DataFrame: rows=conditions, columns=cell types, values=fractions (sum to 1).
     """
-    print("  Computing cell type fractions per condition...")
+    print(f"  Computing cell type fractions per {condition_key}...")
+
+    df = obs.copy()
+    if quality_filter and "quality" in df.columns:
+        df = df[df["quality"] == "keep"]
+
     fractions = (
-        adata.obs
-        .groupby(condition_key)["predicted_cell_type"]
+        df.groupby(condition_key)[label_key]
         .value_counts(normalize=True)
         .unstack(fill_value=0)
     )
     print(f"  Result: {fractions.shape[0]} conditions × {fractions.shape[1]} cell types")
+
+    # Verify fractions sum to 1
+    row_sums = fractions.sum(axis=1)
+    assert np.allclose(row_sums, 1.0, atol=1e-6), \
+        f"Fractions don't sum to 1: {row_sums[~np.isclose(row_sums, 1.0)]}"
+
     return fractions
 
 
 if __name__ == "__main__":
+    import time
+    start = time.time()
+
     # Check prerequisites
     ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
-    if not ref_path.exists():
-        print("ERROR: hnoca_minimal_for_mapping.h5ad not found!")
-        print("Run: bash download_zenodo.sh")
+    query_path = DATA_DIR / "amin_kelley_2024.h5ad"
+
+    for path, name in [(ref_path, "HNOCA reference"), (query_path, "Amin/Kelley data")]:
+        if not path.exists():
+            print(f"ERROR: {name} not found at {path}")
+            exit(1)
+
+    if not MODEL_DIR.exists():
+        print(f"ERROR: scPoli model not found at {MODEL_DIR}")
         exit(1)
 
-    # Load converted Amin/Kelley data
+    # Load data
+    print("Loading HNOCA minimal reference...")
+    ref = sc.read_h5ad(str(ref_path))
+    print(f"  Reference: {ref.shape}")
+
     print("Loading Amin/Kelley data...")
-    query = sc.read_h5ad(str(DATA_DIR / "amin_kelley_2024.h5ad"))
-    print(f"  Loaded: {query.shape}")
+    query = sc.read_h5ad(str(query_path))
+    print(f"  Query: {query.shape}")
 
-    # Print condition info
-    if "condition" in query.obs.columns:
-        cond_key = "condition"
-    else:
-        # Try to find the condition column
-        print(f"  Available metadata columns: {list(query.obs.columns)}")
-        print("  You may need to set the condition_key manually.")
-        cond_key = None
+    # Filter to quality cells
+    query = filter_quality_cells(query)
 
-    # Preprocess
-    query = preprocess_query(query)
+    # Prepare query
+    query = prepare_query_for_scpoli(query, ref, batch_column="sample")
 
-    # Map to HNOCA
-    labels, scores = map_to_hnoca(query, ref_path, MODEL_DIR)
+    # Map to HNOCA via scPoli
+    query_latent, ref_latent = map_to_hnoca_scpoli(
+        query, ref, MODEL_DIR,
+        n_epochs=500,
+        batch_size=1024,
+    )
 
-    if labels is not None:
-        query.obs["predicted_cell_type"] = labels
+    # Store latent in query
+    query.obsm["X_scpoli"] = query_latent
 
-        # Compute GP training labels
-        if cond_key:
-            fractions = compute_gp_training_data(query, condition_key=cond_key)
-            fractions.to_csv(str(DATA_DIR / "gp_training_labels_amin_kelley.csv"))
-            print(f"\n  Saved GP training labels to data/gp_training_labels_amin_kelley.csv")
+    # Transfer labels
+    print("\nTransferring cell type labels...")
+    label_cols = [ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3]
+    transferred = transfer_labels_knn(
+        ref_latent, query_latent,
+        ref.obs, query.obs,
+        label_columns=label_cols,
+        k=50,
+    )
 
-        # Save annotated data
-        output_path = DATA_DIR / "amin_kelley_mapped.h5ad"
-        query.write(str(output_path), compression="gzip")
-        print(f"  Saved mapped data to {output_path}")
-    else:
-        print("\n  Mapping skipped — install hnoca + scvi-tools first.")
-        print("  The data conversion (step 01) still works without these.")
+    # Add transferred labels to query
+    for col in transferred.columns:
+        query.obs[col] = transferred[col].values
+
+    # Compute cell type fractions for GP training
+    fractions = compute_cell_type_fractions(
+        query.obs,
+        condition_key="condition",
+        label_key=f"predicted_{ANNOT_LEVEL_2}",
+    )
+
+    # Also compute region fractions
+    region_fractions = compute_cell_type_fractions(
+        query.obs,
+        condition_key="condition",
+        label_key=f"predicted_{ANNOT_REGION}",
+    )
+
+    # Save outputs
+    print("\nSaving outputs...")
+
+    fractions.to_csv(str(DATA_DIR / "gp_training_labels_amin_kelley.csv"))
+    print(f"  Cell type fractions → data/gp_training_labels_amin_kelley.csv")
+
+    region_fractions.to_csv(str(DATA_DIR / "gp_training_regions_amin_kelley.csv"))
+    print(f"  Region fractions → data/gp_training_regions_amin_kelley.csv")
+
+    output_path = DATA_DIR / "amin_kelley_mapped.h5ad"
+    query.write(str(output_path), compression="gzip")
+    print(f"  Mapped data → {output_path}")
+
+    elapsed = time.time() - start
+    print(f"\nDone in {elapsed / 60:.1f} minutes.")
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("MAPPING SUMMARY")
+    print("=" * 60)
+    print(f"  Cells mapped: {query.n_obs}")
+    print(f"  Conditions: {query.obs['condition'].nunique()}")
+    for label_col in label_cols:
+        pred_col = f"predicted_{label_col}"
+        if pred_col in query.obs.columns:
+            print(f"  {label_col}: {query.obs[pred_col].nunique()} types")
+            top3 = query.obs[pred_col].value_counts().head(3)
+            for t, c in top3.items():
+                print(f"    {t}: {c} cells ({c/query.n_obs*100:.1f}%)")
