@@ -20,6 +20,7 @@ def _load(name):
 
 step01 = _load("01_load_and_convert_data")
 step02 = _load("02_map_to_hnoca")
+step03 = _load("03_fidelity_scoring")
 step04 = _load("04_gpbo_loop")
 
 
@@ -207,6 +208,102 @@ class TestStep01ConvertGeoToAnndata:
     def test_verify_references(self):
         result = step01.verify_references()
         assert isinstance(result, bool)
+
+
+class TestFidelityScoring:
+    """Tests for step 03 fidelity scoring functions."""
+
+    def test_cosine_similarity_identical(self):
+        a = np.array([0.5, 0.3, 0.2])
+        assert step03.cosine_similarity(a, a) == pytest.approx(1.0)
+
+    def test_cosine_similarity_orthogonal(self):
+        a = np.array([1.0, 0.0])
+        b = np.array([0.0, 1.0])
+        assert step03.cosine_similarity(a, b) == pytest.approx(0.0)
+
+    def test_cosine_similarity_zero_vector(self):
+        a = np.array([0.5, 0.3])
+        b = np.array([0.0, 0.0])
+        assert step03.cosine_similarity(a, b) == 0.0
+
+    def test_shannon_entropy_uniform(self):
+        p = np.array([0.25, 0.25, 0.25, 0.25])
+        assert step03.shannon_entropy(p) == pytest.approx(2.0)
+
+    def test_shannon_entropy_deterministic(self):
+        p = np.array([1.0, 0.0, 0.0])
+        assert step03.shannon_entropy(p) == pytest.approx(0.0)
+
+    def test_normalized_entropy_bounds(self):
+        p = np.array([0.5, 0.3, 0.2])
+        h = step03.normalized_entropy(p)
+        assert 0.0 <= h <= 1.0
+
+    def test_normalized_entropy_uniform_is_one(self):
+        p = np.array([0.25, 0.25, 0.25, 0.25])
+        assert step03.normalized_entropy(p) == pytest.approx(1.0)
+
+    def test_compute_rss(self):
+        condition_vec = pd.Series({"Neuron": 0.6, "Radial glia": 0.3, "Oligo": 0.1})
+        ref_profiles = pd.DataFrame({
+            "Neuron": [0.5, 0.1],
+            "Radial glia": [0.3, 0.8],
+            "Oligo": [0.2, 0.1],
+        }, index=["Cortex", "Thalamus"])
+        region, score = step03.compute_rss(condition_vec, ref_profiles)
+        assert region == "Cortex"  # closer to Cortex
+        assert 0.0 <= score <= 1.0
+
+    def test_compute_off_target_fraction(self):
+        obs = pd.DataFrame({
+            "predicted_annot_level_1": ["Neuron", "NPC", "PSC", "MC", "Neuron"],
+        })
+        frac = step03.compute_off_target_fraction(obs)
+        assert frac == pytest.approx(0.4)  # 2/5
+
+    def test_compute_on_target_fraction(self):
+        obs = pd.DataFrame({
+            "predicted_annot_region_rev2": ["Cortex", "Cortex", "Cortex", "Thalamus"],
+        })
+        region, frac = step03.compute_on_target_fraction(obs)
+        assert region == "Cortex"
+        assert frac == pytest.approx(0.75)
+
+    def test_composite_fidelity_bounds(self):
+        score = step03.compute_composite_fidelity(
+            rss_score=0.8, on_target_frac=0.6,
+            off_target_frac=0.1, norm_entropy=0.5,
+        )
+        assert 0.0 <= score <= 1.0
+
+    def test_composite_fidelity_perfect(self):
+        score = step03.compute_composite_fidelity(
+            rss_score=1.0, on_target_frac=1.0,
+            off_target_frac=0.0, norm_entropy=0.55,
+        )
+        assert score > 0.9
+
+    def test_composite_fidelity_handles_nan(self):
+        score = step03.compute_composite_fidelity(
+            rss_score=np.nan, on_target_frac=np.nan,
+            off_target_frac=np.nan, norm_entropy=np.nan,
+        )
+        assert np.isfinite(score)
+
+    def test_hnoca_to_braun_label_map(self):
+        label_map = step03.build_hnoca_to_braun_label_map()
+        assert "Neuron" in label_map
+        assert label_map["Neuron"] == "Neuron"
+        assert "PSC" in label_map
+
+    def test_align_composition_to_braun(self):
+        fracs = pd.Series({"Neuron": 0.5, "NPC": 0.3, "IP": 0.2})
+        label_map = step03.build_hnoca_to_braun_label_map()
+        aligned = step03.align_composition_to_braun(fracs, label_map)
+        assert aligned.sum() == pytest.approx(1.0)
+        # NPC and IP both map to Radial glia and Neuronal IPC
+        assert "Neuron" in aligned.index
 
 
 class TestMorphogenColumns:

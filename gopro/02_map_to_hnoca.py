@@ -85,17 +85,65 @@ def prepare_query_for_scpoli(
     """
     print("  Preparing query for scPoli mapping...")
 
-    # Subset to reference var names (shared HVGs)
+    # Map query var_names to gene symbols (ref uses gene symbols, query uses Ensembl IDs)
+    if "gene_name_unique" in query.var.columns:
+        print("  Query uses Ensembl IDs — mapping to gene symbols...")
+        query.var_names = query.var["gene_name_unique"].values
+        query.var_names_make_unique()
+    elif "gene_symbol" in query.var.columns:
+        query.var_names = query.var["gene_symbol"].values
+        query.var_names_make_unique()
+
+    # Align query to reference var_names (scPoli expects exact same genes)
     shared_genes = query.var_names.intersection(ref.var_names)
     print(f"  Shared genes with reference: {len(shared_genes)} / {ref.n_vars}")
-    query = query[:, shared_genes].copy()
 
-    # Set X to raw counts (scPoli expects counts)
+    # Efficient reindexing: build a permutation matrix to map query genes → ref genes
+    # Start with query counts
     if "counts" in query.layers:
-        query.X = query.layers["counts"][:, query.var_names.isin(shared_genes)].copy()
-        # Actually the subsetting already happened, so just use the layer
-        query.X = query.layers["counts"].copy()
-    print(f"  X set to raw counts, shape: {query.X.shape}")
+        if sparse.issparse(query.layers["counts"]):
+            X_counts = query.layers["counts"].copy()
+        else:
+            X_counts = sparse.csr_matrix(query.layers["counts"])
+    else:
+        X_counts = query.X.copy() if sparse.issparse(query.X) else sparse.csr_matrix(query.X)
+
+    # Build mapping: for each ref gene, find its column index in query (or -1)
+    query_gene_to_idx = {g: i for i, g in enumerate(query.var_names)}
+    ref_gene_indices = []  # indices into query columns
+    ref_gene_mask = []     # which ref genes are found in query
+    for g in ref.var_names:
+        if g in query_gene_to_idx:
+            ref_gene_indices.append(query_gene_to_idx[g])
+            ref_gene_mask.append(True)
+        else:
+            ref_gene_indices.append(0)  # placeholder
+            ref_gene_mask.append(False)
+
+    # Build reindexed matrix efficiently
+    X_reindexed = X_counts[:, ref_gene_indices].copy()
+    # Zero out columns for genes not found in query
+    not_found = np.where(~np.array(ref_gene_mask))[0]
+    if len(not_found) > 0:
+        X_reindexed = X_reindexed.tolil()
+        X_reindexed[:, not_found] = 0
+        X_reindexed = X_reindexed.tocsr()
+
+    # Create new AnnData with ref var_names
+    import anndata
+    query_aligned = anndata.AnnData(
+        X=X_reindexed,
+        obs=query.obs.copy(),
+    )
+    query_aligned.var_names = ref.var_names.copy()
+    # Copy ref var metadata
+    for col in ref.var.columns:
+        query_aligned.var[col] = ref.var[col].values
+
+    print(f"  Reindexed query: {query_aligned.shape} ({len(shared_genes)} genes filled, "
+          f"{len(not_found)} zero-filled)")
+
+    query = query_aligned
 
     # Set batch column
     if batch_column in query.obs.columns:
@@ -104,10 +152,15 @@ def prepare_query_for_scpoli(
         query.obs["batch"] = "query"
     print(f"  Batch column: {query.obs['batch'].nunique()} unique batches")
 
-    # Add placeholder annotation labels (required by scPoli)
-    for col in [ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_LEVEL_3]:
-        if col in ref.obs.columns and col not in query.obs.columns:
-            query.obs[col] = "unknown"
+    # scPoli model expects these specific column names (from original HNOCA)
+    # Map: annot_level_1 → snapseed_pca_rss_level_1, etc.
+    SCPOLI_LABEL_COLS = [
+        "snapseed_pca_rss_level_1",
+        "snapseed_pca_rss_level_12",
+        "snapseed_pca_rss_level_123",
+    ]
+    for col in SCPOLI_LABEL_COLS:
+        query.obs[col] = "unknown"
 
     # Clear obsm/varm that might cause issues
     query.obsm = {}
@@ -147,9 +200,20 @@ def map_to_hnoca_scpoli(
     else:
         ref.X = ref.layers["counts"].copy()
 
+    # scPoli model expects old HNOCA column names
+    # Map: annot_level_1 → snapseed_pca_rss_level_1, etc.
+    col_map = {
+        "annot_level_1": "snapseed_pca_rss_level_1",
+        "annot_level_2": "snapseed_pca_rss_level_12",
+        "annot_level_3_rev2": "snapseed_pca_rss_level_123",
+    }
+    for old_col, new_col in col_map.items():
+        if old_col in ref.obs.columns and new_col not in ref.obs.columns:
+            ref.obs[new_col] = ref.obs[old_col].values
+
     # Load pre-trained scPoli model
     print(f"  Loading pre-trained scPoli model from {model_dir}...")
-    scpoli_model = scPoli.load(str(model_dir), ref)
+    scpoli_model = scPoli.load(str(model_dir), ref, map_location="cpu")
     print("  Model loaded successfully.")
 
     # Load query data into the model (architecture surgery)

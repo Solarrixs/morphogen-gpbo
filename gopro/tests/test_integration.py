@@ -19,6 +19,7 @@ def _load(name):
 
 step01 = _load("01_load_and_convert_data")
 step02 = _load("02_map_to_hnoca")
+step03 = _load("03_fidelity_scoring")
 step04 = _load("04_gpbo_loop")
 morphogen_parser = _load("morphogen_parser")
 
@@ -199,6 +200,68 @@ class TestCellTypeFractionsIntegration:
         # Check all values in [0, 1]
         assert (fracs >= 0).all().all()
         assert (fracs <= 1).all().all()
+
+
+class TestFidelityScoringIntegration:
+    """Test fidelity scoring pipeline with synthetic data."""
+
+    def test_score_all_conditions(self):
+        """Test full condition scoring with synthetic mapped data."""
+        import scanpy as sc
+
+        np.random.seed(42)
+        n_cells = 300
+        conditions = ["BMP4 CHIR", "SAG250", "CHIR3"]
+        level1_types = ["Neuron", "NPC", "IP", "PSC", "MC"]
+        level2_types = ["Dorsal Telencephalic Neuron", "NPC", "Glioblast", "IP", "OPC"]
+        regions = ["Dorsal telencephalon", "Ventral telencephalon", "Thalamus"]
+
+        obs = pd.DataFrame({
+            "condition": np.random.choice(conditions, size=n_cells),
+            "predicted_annot_level_1": np.random.choice(level1_types, size=n_cells),
+            "predicted_annot_level_2": np.random.choice(level2_types, size=n_cells),
+            "predicted_annot_region_rev2": np.random.choice(regions, size=n_cells),
+        })
+
+        adata = sc.AnnData(X=np.zeros((n_cells, 10)), obs=obs)
+
+        # Create synthetic Braun profiles
+        braun_profiles = pd.DataFrame({
+            "Neuron": [0.4, 0.3, 0.5],
+            "Radial glia": [0.3, 0.4, 0.2],
+            "Neuronal IPC": [0.2, 0.2, 0.2],
+            "Oligo": [0.1, 0.1, 0.1],
+        }, index=["Dorsal telencephalon", "Ventral telencephalon", "Thalamus"])
+
+        report = step03.score_all_conditions(adata, braun_profiles, "condition")
+
+        assert len(report) == 3
+        assert "composite_fidelity" in report.columns
+        assert "rss_score" in report.columns
+        assert (report["composite_fidelity"] >= 0).all()
+        assert (report["composite_fidelity"] <= 1).all()
+
+    def test_assign_cell_level_fidelity(self):
+        """Test cell-level fidelity assignment."""
+        import scanpy as sc
+
+        obs = pd.DataFrame({
+            "condition": ["A", "A", "B", "B"],
+            "predicted_annot_level_1": ["Neuron", "PSC", "NPC", "Neuron"],
+        })
+        adata = sc.AnnData(X=np.zeros((4, 2)), obs=obs)
+
+        report = pd.DataFrame({
+            "composite_fidelity": [0.8, 0.5],
+            "rss_score": [0.9, 0.6],
+            "on_target_fraction": [0.7, 0.4],
+        }, index=["A", "B"])
+
+        result = step03.assign_cell_level_fidelity(adata, report, "condition")
+        assert "fidelity_score" in result.obs.columns
+        assert "is_off_target" in result.obs.columns
+        assert result.obs.loc[result.obs["condition"] == "A", "fidelity_score"].iloc[0] == 0.8
+        assert result.obs["is_off_target"].iloc[1] == True  # PSC is off-target
 
 
 class TestRealDataExists:

@@ -13,10 +13,14 @@ scvi-tools
 scarches
 hnoca
 
-# GP-BO (production - uncomment when ready)
-# botorch
-# gpytorch
-# torch
+# GP-BO
+botorch
+gpytorch
+torch
+
+# Testing
+pytest
+hypothesis
 
 # Visualization
 matplotlib

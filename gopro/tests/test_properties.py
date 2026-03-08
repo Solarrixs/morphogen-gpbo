@@ -18,6 +18,7 @@ def _load(name):
 
 
 step02 = _load("02_map_to_hnoca")
+step03 = _load("03_fidelity_scoring")
 step04 = _load("04_gpbo_loop")
 
 
@@ -104,3 +105,33 @@ class TestCellTypeFractionProperties:
         })
         fracs = step02.compute_cell_type_fractions(obs, "condition", "label")
         assert (fracs <= 1).all().all()
+
+
+class TestFidelityScoringProperties:
+    """Property tests for fidelity scoring invariants."""
+
+    @given(
+        st.floats(min_value=0.0, max_value=1.0),
+        st.floats(min_value=0.0, max_value=1.0),
+        st.floats(min_value=0.0, max_value=1.0),
+        st.floats(min_value=0.0, max_value=1.0),
+    )
+    @settings(max_examples=50, deadline=5000)
+    def test_composite_fidelity_in_range(self, rss, on_target, off_target, entropy):
+        score = step03.compute_composite_fidelity(rss, on_target, off_target, entropy)
+        assert 0.0 <= score <= 1.0
+
+    @given(st.integers(min_value=2, max_value=10))
+    @settings(max_examples=20, deadline=5000)
+    def test_normalized_entropy_in_range(self, n):
+        p = np.random.dirichlet(np.ones(n))
+        h = step03.normalized_entropy(p)
+        assert 0.0 <= h <= 1.0
+
+    @given(st.integers(min_value=2, max_value=10))
+    @settings(max_examples=20, deadline=5000)
+    def test_cosine_similarity_self_is_one(self, n):
+        a = np.random.rand(n)
+        a = a / a.sum()  # normalize
+        sim = step03.cosine_similarity(a, a)
+        assert sim == pytest.approx(1.0, abs=1e-6)
