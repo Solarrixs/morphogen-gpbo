@@ -254,14 +254,28 @@ def fit_gp_botorch(
 
     # Report kernel parameters
     print("\n  GP Kernel Parameters:")
-    if hasattr(model.covar_module, 'base_kernel'):
-        lengthscales = model.covar_module.base_kernel.lengthscale.detach().cpu().numpy().flatten()
+    lengthscales = None
+    try:
+        if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
+            ls = model.covar_module.base_kernel.lengthscale
+            if ls is not None:
+                lengthscales = ls.detach().cpu().numpy().flatten()
+        elif hasattr(model.covar_module, 'lengthscale'):
+            ls = model.covar_module.lengthscale
+            if ls is not None:
+                lengthscales = ls.detach().cpu().numpy().flatten()
+    except (AttributeError, RuntimeError):
+        pass
+
+    if lengthscales is not None:
         importance = 1.0 / lengthscales
         morph_importance = pd.Series(importance[:len(X.columns)], index=X.columns)
         morph_importance = morph_importance.sort_values(ascending=False)
         print("  Morphogen importance (1/lengthscale):")
         for morph, imp in morph_importance.head(8).items():
             print(f"    {morph}: {imp:.4f}")
+    else:
+        print("  (lengthscales not directly accessible for this model type)")
 
     return model, train_X, train_Y, cell_type_cols
 
@@ -385,6 +399,82 @@ def recommend_next_experiments(
     return recommendations
 
 
+def merge_multi_fidelity_data(
+    data_sources: list[tuple[Path, Path, float]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Merge training data from multiple fidelity sources.
+
+    Combines real, CellRank 2 virtual, and CellFlow virtual data into
+    a single multi-fidelity training set.
+
+    Args:
+        data_sources: List of (fractions_csv, morphogen_csv, fidelity) tuples.
+            Each tuple provides a data source at a given fidelity level.
+
+    Returns:
+        Tuple of merged (X, Y) DataFrames with consistent column alignment.
+    """
+    all_X = []
+    all_Y = []
+
+    for fractions_csv, morphogen_csv, fidelity in data_sources:
+        if not fractions_csv.exists() or not morphogen_csv.exists():
+            print(f"  Skipping {fractions_csv.name} (not found)")
+            continue
+
+        X, Y = build_training_set(fractions_csv, morphogen_csv, fidelity=fidelity)
+        all_X.append(X)
+        all_Y.append(Y)
+        print(f"  Loaded {len(X)} points at fidelity={fidelity}")
+
+    if not all_X:
+        raise ValueError("No valid data sources found")
+
+    # Align Y columns (different sources may have different cell types)
+    all_ct_cols = set()
+    for Y in all_Y:
+        all_ct_cols.update(Y.columns)
+    all_ct_cols = sorted(all_ct_cols)
+
+    aligned_Y = []
+    for Y in all_Y:
+        for col in all_ct_cols:
+            if col not in Y.columns:
+                Y[col] = 0.0
+        aligned_Y.append(Y[all_ct_cols])
+
+    # Align X columns
+    all_morph_cols = set()
+    for X in all_X:
+        all_morph_cols.update(X.columns)
+    all_morph_cols = sorted(all_morph_cols)
+
+    aligned_X = []
+    for X in all_X:
+        for col in all_morph_cols:
+            if col not in X.columns:
+                X[col] = 0.0
+        aligned_X.append(X[all_morph_cols])
+
+    merged_X = pd.concat(aligned_X, axis=0)
+    merged_Y = pd.concat(aligned_Y, axis=0)
+
+    # Re-normalize Y rows to sum to 1 (after column alignment)
+    row_sums = merged_Y.sum(axis=1)
+    merged_Y = merged_Y.div(row_sums.replace(0, 1), axis=0)
+
+    print(f"\n  Merged training set:")
+    print(f"    X: {merged_X.shape}")
+    print(f"    Y: {merged_Y.shape}")
+
+    fidelity_counts = merged_X["fidelity"].value_counts().sort_index(ascending=False)
+    for fid, count in fidelity_counts.items():
+        label = {1.0: "real", 0.5: "CellRank2", 0.0: "CellFlow"}.get(fid, f"fid={fid}")
+        print(f"    {label}: {count} points")
+
+    return merged_X, merged_Y
+
+
 def run_gpbo_loop(
     fractions_csv: Path,
     morphogen_csv: Path,
@@ -392,6 +482,7 @@ def run_gpbo_loop(
     n_recommendations: int = 24,
     round_num: int = 1,
     use_ilr: bool = True,
+    virtual_sources: Optional[list[tuple[Path, Path, float]]] = None,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -402,6 +493,9 @@ def run_gpbo_loop(
         n_recommendations: Number of experiments to recommend.
         round_num: Current optimization round number.
         use_ilr: Whether to apply ILR transform.
+        virtual_sources: Optional list of (fractions_csv, morphogen_csv, fidelity)
+            tuples for multi-fidelity data. Real data is always included at
+            fidelity=1.0. Virtual sources add CellRank2 (0.5) or CellFlow (0.0).
 
     Returns:
         DataFrame of recommended next experiments.
@@ -410,9 +504,15 @@ def run_gpbo_loop(
     print(f"GP-BO ROUND {round_num}")
     print("=" * 60)
 
-    # Build training set
+    # Build training set (potentially multi-fidelity)
     print("\nBuilding training set...")
-    X, Y = build_training_set(fractions_csv, morphogen_csv)
+
+    if virtual_sources:
+        # Multi-fidelity: combine real + virtual data
+        all_sources = [(fractions_csv, morphogen_csv, 1.0)] + virtual_sources
+        X, Y = merge_multi_fidelity_data(all_sources)
+    else:
+        X, Y = build_training_set(fractions_csv, morphogen_csv)
 
     # Fit GP
     model, train_X, train_Y, cell_type_cols = fit_gp_botorch(
@@ -442,11 +542,24 @@ def run_gpbo_loop(
         "n_cell_types": Y.shape[1],
         "target_cell_types": str(target_cell_types or "all"),
     }
-    if hasattr(model.covar_module, 'base_kernel'):
-        ls = model.covar_module.base_kernel.lengthscale.detach().cpu().numpy().flatten()
-        for i, col in enumerate(X.columns):
-            if i < len(ls):
-                diagnostics[f"lengthscale_{col}"] = ls[i]
+
+    if virtual_sources:
+        diagnostics["n_real_points"] = int((X["fidelity"] == 1.0).sum())
+        diagnostics["n_virtual_points"] = int((X["fidelity"] < 1.0).sum())
+        diagnostics["fidelity_levels"] = str(sorted(X["fidelity"].unique().tolist()))
+
+    try:
+        ls = None
+        if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
+            _ls = model.covar_module.base_kernel.lengthscale
+            if _ls is not None:
+                ls = _ls.detach().cpu().numpy().flatten()
+        if ls is not None:
+            for i, col in enumerate(X.columns):
+                if i < len(ls):
+                    diagnostics[f"lengthscale_{col}"] = ls[i]
+    except (AttributeError, RuntimeError):
+        pass
 
     diag_df = pd.DataFrame([diagnostics])
     diag_path = DATA_DIR / f"gp_diagnostics_round{round_num}.csv"
@@ -474,6 +587,14 @@ if __name__ == "__main__":
                         help="Disable ILR transform")
     parser.add_argument("--multi-objective", action="store_true",
                         help="Use multi-objective acquisition (qLogNEHVI)")
+    parser.add_argument("--cellrank2-fractions", type=str, default=None,
+                        help="Path to CellRank2 virtual fractions CSV (fidelity=0.5)")
+    parser.add_argument("--cellrank2-morphogens", type=str, default=None,
+                        help="Path to CellRank2 virtual morphogens CSV")
+    parser.add_argument("--cellflow-fractions", type=str, default=None,
+                        help="Path to CellFlow virtual fractions CSV (fidelity=0.0)")
+    parser.add_argument("--cellflow-morphogens", type=str, default=None,
+                        help="Path to CellFlow virtual morphogens CSV")
     args = parser.parse_args()
 
     fractions_path = Path(args.fractions) if args.fractions else DATA_DIR / "gp_training_labels_amin_kelley.csv"
@@ -508,6 +629,23 @@ if __name__ == "__main__":
         X_demo.to_csv(str(morphogen_path))
         print(f"  Synthetic data saved.")
 
+    # Build virtual sources list
+    virtual_sources = []
+
+    # Check for CellRank2 virtual data
+    cr2_frac = Path(args.cellrank2_fractions) if args.cellrank2_fractions else DATA_DIR / "cellrank2_virtual_fractions.csv"
+    cr2_morph = Path(args.cellrank2_morphogens) if args.cellrank2_morphogens else DATA_DIR / "cellrank2_virtual_morphogens.csv"
+    if cr2_frac.exists() and cr2_morph.exists():
+        virtual_sources.append((cr2_frac, cr2_morph, 0.5))
+        print(f"  Including CellRank2 virtual data (fidelity=0.5)")
+
+    # Check for CellFlow virtual data
+    cf_frac = Path(args.cellflow_fractions) if args.cellflow_fractions else DATA_DIR / "cellflow_virtual_fractions.csv"
+    cf_morph = Path(args.cellflow_morphogens) if args.cellflow_morphogens else DATA_DIR / "cellflow_virtual_morphogens.csv"
+    if cf_frac.exists() and cf_morph.exists():
+        virtual_sources.append((cf_frac, cf_morph, 0.0))
+        print(f"  Including CellFlow virtual data (fidelity=0.0)")
+
     # Run GP-BO loop
     recs = run_gpbo_loop(
         fractions_csv=fractions_path,
@@ -516,6 +654,7 @@ if __name__ == "__main__":
         n_recommendations=args.n_recommendations,
         round_num=args.round,
         use_ilr=not args.no_ilr,
+        virtual_sources=virtual_sources if virtual_sources else None,
     )
 
     print("\n" + "=" * 60)

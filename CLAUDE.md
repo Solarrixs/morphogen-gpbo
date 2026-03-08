@@ -15,14 +15,17 @@ morphogen-gpbo/
 │   ├── 02_map_to_hnoca.py             # scArches/scPoli mapping + KNN label transfer
 │   ├── 03_fidelity_scoring.py          # Two-tier fidelity scoring vs Braun fetal brain
 │   ├── 04_gpbo_loop.py                 # BoTorch GP-BO with ILR transform, plate map output
+│   ├── 05_cellrank2_virtual.py         # CellRank 2 temporal projection via moscot
+│   ├── 06_cellflow_virtual.py          # CellFlow virtual protocol screening
 │   ├── morphogen_parser.py             # Parse condition names → 20D concentration vectors
 │   ├── requirements.txt
 │   ├── README.md
-│   └── tests/                          # pytest test suite (65 tests)
+│   └── tests/                          # pytest test suite (100+ tests)
 │       ├── conftest.py                 # Shared fixtures
 │       ├── test_unit.py                # 35 unit tests
 │       ├── test_integration.py         # 18 integration tests
-│       └── test_properties.py          # 12 property-based tests (Hypothesis)
+│       ├── test_properties.py          # 12 property-based tests (Hypothesis)
+│       └── test_phase4_5.py            # Phase 4-5 tests (CellRank2 + CellFlow)
 ├── data/                     # All large data files (gitignored, see data/README.md)
 │   ├── *.h5ad                          # Reference atlases + pipeline outputs
 │   ├── GSE233574_*                     # GEO morphogen screen raw data
@@ -42,6 +45,8 @@ python 01_load_and_convert_data.py       # Convert GEO MTX → AnnData h5ad
 python 02_map_to_hnoca.py               # scArches/scPoli mapping + KNN label transfer
 python 03_fidelity_scoring.py            # Two-tier fidelity scoring vs Braun fetal brain
 python 04_gpbo_loop.py                   # Fit GP, acquisition function, output plate map
+python 05_cellrank2_virtual.py           # CellRank 2 temporal projection → virtual data (fidelity=0.5)
+python 06_cellflow_virtual.py            # CellFlow virtual protocol screening (fidelity=0.0)
 ```
 
 ## Data
@@ -74,6 +79,9 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 - **GP fitting**: BoTorch `SingleTaskGP` / `SingleTaskMultiFidelityGP` with Matérn 5/2 + ARD kernel
 - **ILR transform**: Isometric log-ratio via Helmert basis for compositional Y data
 - **Multi-objective acquisition**: `qLogNoisyExpectedHypervolumeImprovement` or scalarized `qLogExpectedImprovement`
+- **CellRank 2 virtual data** (step 05): moscot OT maps on Azbukina temporal atlas → forward-project query cells → medium-fidelity (0.5) training points
+- **CellFlow virtual screening** (step 06): Protocol encoding (RDKit + ESM2) → generative model → low-fidelity (0.0) training points
+- **Multi-fidelity GP integration**: `merge_multi_fidelity_data()` in step 04 combines real (1.0) + CellRank2 (0.5) + CellFlow (0.0) data
 
 ## Conventions
 

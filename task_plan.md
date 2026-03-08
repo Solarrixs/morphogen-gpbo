@@ -36,8 +36,31 @@ Build production-quality end-to-end GP-BO pipeline for brain organoid morphogen 
 - [x] Multi-fidelity GP support (SingleTaskMultiFidelityGP when fidelity varies)
 - [x] Commit: see below
 
-## Phase 4: CellRank 2 (if time) [NOT STARTED]
-## Phase 5: CellFlow (if time) [NOT STARTED]
+## Phase 4: CellRank 2 Virtual Data Generation [COMPLETE]
+- [x] `05_cellrank2_virtual.py` — full pipeline script
+- [x] Load and preprocess Azbukina temporal atlas (Days 7-120)
+- [x] Compute moscot optimal transport maps between timepoints
+- [x] Build CellRank 2 RealTimeKernel from transport maps
+- [x] GPCCA fate probability computation
+- [x] Forward-project query cells to Day 30/60/90
+- [x] Build virtual morphogen matrix (inherit concentrations, update harvest day)
+- [x] Transport quality validation (cost + convergence checks)
+- [x] Cache transport maps to pickle
+- [x] Unit + integration tests
+
+## Phase 5: CellFlow Virtual Screening [COMPLETE]
+- [x] `06_cellflow_virtual.py` — full pipeline script
+- [x] Protocol encoding (RDKit SMILES, pathway annotations, timing)
+- [x] Virtual screen grid generation with max_combinations limit
+- [x] CellFlow model prediction (with fallback baseline predictor)
+- [x] Heuristic baseline predictor using morphogen-to-fate mappings
+- [x] Prediction confidence estimation (distance to training data)
+- [x] Multi-fidelity GP integration in `04_gpbo_loop.py`
+  - [x] `merge_multi_fidelity_data()` — column-aligned multi-source merging
+  - [x] CLI flags for `--cellrank2-*` and `--cellflow-*` data paths
+  - [x] Auto-detect virtual data files in data/ directory
+- [x] Updated `requirements.txt` (cellrank, moscot)
+- [x] 40+ new tests in `test_phase4_5.py`
 
 ## Blocking Items
 - None — Phases 1-3 complete
