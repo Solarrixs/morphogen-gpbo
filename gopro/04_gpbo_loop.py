@@ -457,13 +457,31 @@ def run_gpbo_loop(
 
 
 if __name__ == "__main__":
-    fractions_path = DATA_DIR / "gp_training_labels_amin_kelley.csv"
-    morphogen_path = DATA_DIR / "morphogen_matrix_amin_kelley.csv"
+    import argparse
+
+    parser = argparse.ArgumentParser(description="GP-BO loop for morphogen optimization")
+    parser.add_argument("--fractions", type=str, default=None,
+                        help="Path to cell type fractions CSV")
+    parser.add_argument("--morphogens", type=str, default=None,
+                        help="Path to morphogen concentration matrix CSV")
+    parser.add_argument("--target-cell-types", nargs="+", default=None,
+                        help="Cell types to optimize for (default: all)")
+    parser.add_argument("--n-recommendations", type=int, default=24,
+                        help="Number of experiments to recommend (default: 24)")
+    parser.add_argument("--round", type=int, default=1,
+                        help="Optimization round number (default: 1)")
+    parser.add_argument("--no-ilr", action="store_true",
+                        help="Disable ILR transform")
+    parser.add_argument("--multi-objective", action="store_true",
+                        help="Use multi-objective acquisition (qLogNEHVI)")
+    args = parser.parse_args()
+
+    fractions_path = Path(args.fractions) if args.fractions else DATA_DIR / "gp_training_labels_amin_kelley.csv"
+    morphogen_path = Path(args.morphogens) if args.morphogens else DATA_DIR / "morphogen_matrix_amin_kelley.csv"
 
     if not fractions_path.exists() or not morphogen_path.exists():
         print("Training data not found. Running with synthetic data for demo...")
 
-        # Generate synthetic data
         np.random.seed(42)
         n_conditions = 46
         n_cell_types = 8
@@ -479,7 +497,6 @@ if __name__ == "__main__":
             columns=MORPHOGEN_COLUMNS,
             index=Y_demo.index,
         )
-        # Fill with random realistic values
         for col in MORPHOGEN_COLUMNS:
             lo, hi = MORPHOGEN_BOUNDS.get(col, (0, 1))
             X_demo[col] = np.random.uniform(lo, hi, size=n_conditions)
@@ -495,15 +512,15 @@ if __name__ == "__main__":
     recs = run_gpbo_loop(
         fractions_csv=fractions_path,
         morphogen_csv=morphogen_path,
-        target_cell_types=None,  # optimize for all cell types
-        n_recommendations=24,
-        round_num=1,
+        target_cell_types=args.target_cell_types,
+        n_recommendations=args.n_recommendations,
+        round_num=args.round,
+        use_ilr=not args.no_ilr,
     )
 
     print("\n" + "=" * 60)
     print("NEXT EXPERIMENT RECOMMENDATIONS")
     print("=" * 60)
-    # Show top morphogen columns with non-zero recommendations
     morph_cols = [c for c in MORPHOGEN_COLUMNS if c in recs.columns]
     nonzero_cols = [c for c in morph_cols if recs[c].abs().sum() > 0.01]
     pred_cols = [c for c in recs.columns if "predicted" in c or "acquisition" in c]
