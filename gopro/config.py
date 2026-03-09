@@ -49,6 +49,10 @@ MORPHOGEN_COLUMNS: list[str] = [
     "purmorphamine_uM",   # 17 - SHH agonist
     "cyclopamine_uM",     # 18 - SHH antagonist
     "log_harvest_day",    # 19 - Time dimension
+    "BDNF_uM",            # 20 - Brain-derived neurotrophic factor
+    "NT3_uM",             # 21 - Neurotrophin-3
+    "cAMP_uM",            # 22 - Dibutyryl-cAMP
+    "AscorbicAcid_uM",   # 23 - L-Ascorbic acid 2-phosphate
 ]
 
 # --- Molecular weights (kDa) for recombinant protein morphogens ---
@@ -62,6 +66,8 @@ PROTEIN_MW_KDA: dict[str, float] = {
     "FGF8":     22.5,   # FGF8b isoform
     "EGF":       6.2,
     "ActivinA": 26.0,   # Homodimer
+    "BDNF":     13.5,   # Mature monomer (recombinant human BDNF)
+    "NT3":      13.6,   # Mature monomer (neurotrophin-3)
 }
 
 

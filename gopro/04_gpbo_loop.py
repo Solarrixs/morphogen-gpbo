@@ -75,7 +75,7 @@ MORPHOGEN_BOUNDS = MORPHOGEN_BOUNDS_LITERATURE
 def _compute_active_bounds(
     X: pd.DataFrame,
     columns: list[str],
-    padding: float = 0.5,
+    padding: float = 0.05,
 ) -> tuple[dict[str, tuple[float, float]], list[str]]:
     """Compute bounds from training data, dropping zero-variance columns.
 
@@ -648,8 +648,10 @@ def run_gpbo_loop(
     else:
         X, Y = build_training_set(fractions_csv, morphogen_csv)
 
-    # Compute active bounds (drops zero-variance columns, adds padding)
-    active_bounds, active_cols = _compute_active_bounds(X, list(X.columns))
+    # Compute active bounds from REAL data only (not virtual), to prevent
+    # GP from exploring far outside the experimentally tested range
+    X_real = build_training_set(fractions_csv, morphogen_csv)[0]
+    active_bounds, active_cols = _compute_active_bounds(X_real, list(X.columns))
 
     # Filter X to active columns only
     X_active = X[active_cols]
@@ -796,8 +798,8 @@ if __name__ == "__main__":
         logger.info("Including CellRank2 virtual data (fidelity=0.5)")
 
     # Check for CellFlow virtual data
-    cf_frac = Path(args.cellflow_fractions) if args.cellflow_fractions else DATA_DIR / "cellflow_virtual_fractions.csv"
-    cf_morph = Path(args.cellflow_morphogens) if args.cellflow_morphogens else DATA_DIR / "cellflow_virtual_morphogens.csv"
+    cf_frac = Path(args.cellflow_fractions) if args.cellflow_fractions else DATA_DIR / "cellflow_virtual_fractions_200.csv"
+    cf_morph = Path(args.cellflow_morphogens) if args.cellflow_morphogens else DATA_DIR / "cellflow_virtual_morphogens_200.csv"
     if cf_frac.exists() and cf_morph.exists():
         virtual_sources.append((cf_frac, cf_morph, 0.0))
         logger.info("Including CellFlow virtual data (fidelity=0.0)")

@@ -51,6 +51,15 @@ _DEFAULTS: dict[str, float] = {
     "ActivinA_uM":     ng_mL_to_uM(50.0, PROTEIN_MW_KDA["ActivinA"]),  # 50 ng/mL
 }
 
+# Base media morphogens — constant across all conditions (from day 21 onwards)
+# These are not varied in the screen but are present in every well.
+_BASE_MEDIA: dict[str, float] = {
+    "BDNF_uM":          ng_mL_to_uM(20.0, PROTEIN_MW_KDA["BDNF"]),   # 20 ng/mL
+    "NT3_uM":           ng_mL_to_uM(20.0, PROTEIN_MW_KDA["NT3"]),    # 20 ng/mL
+    "cAMP_uM":          50.0,                                          # 50 µM (dibutyryl-cAMP)
+    "AscorbicAcid_uM": 200.0,                                         # 200 µM (L-ascorbic acid 2-phosphate)
+}
+
 # Harvest day for all Amin/Kelley conditions
 _HARVEST_DAY: int = 72
 _LOG_HARVEST_DAY: float = math.log(_HARVEST_DAY)
@@ -81,8 +90,11 @@ def _time_fraction(start: int, end: int) -> float:
 # ==============================================================================
 
 def _zeros() -> dict[str, float]:
-    """Return a zeroed-out morphogen vector."""
-    return {col: 0.0 for col in MORPHOGEN_COLUMNS}
+    """Return a morphogen vector with base media defaults set."""
+    vec = {col: 0.0 for col in MORPHOGEN_COLUMNS}
+    # Set base media morphogens (constant across all conditions)
+    vec.update(_BASE_MEDIA)
+    return vec
 
 
 def parse_condition_name(name: str) -> dict[str, float]:

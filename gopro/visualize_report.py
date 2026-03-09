@@ -204,6 +204,7 @@ def build_morphogen_pca_figure(
     coords: pd.DataFrame,
     fidelity_scores: pd.Series,
     rec_coords: pd.DataFrame | None = None,
+    rec_morphogens: pd.DataFrame | None = None,
     loadings: np.ndarray | None = None,
     active_cols: list[str] | None = None,
     var_explained: float = 0.0,
@@ -246,6 +247,24 @@ def build_morphogen_pca_figure(
     ))
 
     if rec_coords is not None and len(rec_coords) > 0:
+        # Build informative hover text showing key morphogen concentrations
+        rec_hover = []
+        for well in rec_coords.index:
+            parts = [f"<b>{well}</b> (recommended)"]
+            if rec_morphogens is not None and well in rec_morphogens.index:
+                row = rec_morphogens.loc[well]
+                # Show non-zero morphogens sorted by concentration
+                _skip = {"fidelity", "log_harvest_day", "acquisition_value"}
+                nonzero = [(col, row[col]) for col in rec_morphogens.columns
+                           if abs(row[col]) > 0.001
+                           and col not in _skip
+                           and not col.startswith("predicted_")]
+                nonzero.sort(key=lambda x: x[1], reverse=True)
+                for col_name, val in nonzero[:8]:  # top 8 morphogens
+                    label = col_name.replace("_uM", "").replace("_", " ")
+                    parts.append(f"{label}: {val:.1f} \u00b5M")
+            rec_hover.append("<br>".join(parts))
+
         fig.add_trace(go.Scatter(
             x=rec_coords["PC1"],
             y=rec_coords["PC2"],
@@ -256,8 +275,8 @@ def build_morphogen_pca_figure(
                 symbol="star",
                 line=dict(width=1, color="black"),
             ),
-            text=rec_coords.index,
-            hovertemplate="<b>%{text}</b> (recommended)<extra></extra>",
+            text=rec_hover,
+            hovertemplate="%{text}<extra></extra>",
             name="Recommended",
         ))
 
@@ -444,6 +463,13 @@ def build_plate_map_figure(
     hover = [[" " for _ in range(6)] for _ in range(4)]
     annotations = []
 
+    # Determine color values and normalize acquisition values to 0-1
+    use_acq = predicted_fidelity is None and "acquisition_value" in recommendations.columns
+    if use_acq:
+        acq_vals = recommendations["acquisition_value"].values
+        acq_min, acq_max = acq_vals.min(), acq_vals.max()
+        acq_range = acq_max - acq_min if acq_max > acq_min else 1.0
+
     for well in recommendations.index:
         m = re.match(r"([A-D])(\d+)", well)
         if not m:
@@ -453,18 +479,21 @@ def build_plate_map_figure(
 
         if predicted_fidelity is not None and well in predicted_fidelity.index:
             z[r, c] = predicted_fidelity[well]
-        elif "acquisition_value" in recommendations.columns:
-            z[r, c] = recommendations.loc[well, "acquisition_value"]
+        elif use_acq:
+            # Normalize to 0-1 for interpretability
+            raw = recommendations.loc[well, "acquisition_value"]
+            z[r, c] = (raw - acq_min) / acq_range
 
         # Build hover text with non-zero morphogens
         morph_cols = [col for col in recommendations.columns
-                      if not col.startswith("predicted_") and col != "acquisition_value"
-                      and col != "fidelity"]
+                      if not col.startswith("predicted_")
+                      and col not in ("acquisition_value", "fidelity", "log_harvest_day")]
         nonzero = []
         for mc in morph_cols:
             val = recommendations.loc[well, mc]
             if abs(val) > 0.001:
-                nonzero.append(f"{mc}: {val:.2f}")
+                label = mc.replace("_uM", "").replace("_", " ")
+                nonzero.append(f"{label}: {val:.1f} \u00b5M")
         hover[r][c] = f"<b>{well}</b><br>" + "<br>".join(nonzero) if nonzero else f"<b>{well}</b>"
 
         annotations.append(dict(
@@ -472,6 +501,7 @@ def build_plate_map_figure(
             font=dict(color="white", size=12),
         ))
 
+    colorbar_title = "Predicted Fidelity" if predicted_fidelity is not None else "Acquisition Score"
     fig = go.Figure(data=go.Heatmap(
         z=z,
         x=[str(c) for c in cols],
@@ -479,7 +509,7 @@ def build_plate_map_figure(
         colorscale=VIRIDIS,
         hovertext=hover,
         hovertemplate="%{hovertext}<extra></extra>",
-        colorbar=dict(title="Value"),
+        colorbar=dict(title=colorbar_title),
     ))
 
     fig.update_layout(
@@ -892,6 +922,7 @@ def generate_report(
                 "may appear outside the training cluster — this is expected exploration behavior.",
                 build_morphogen_pca_figure(
                     train_coords, fidelity_df["composite_fidelity"], rec_coords,
+                    rec_morphogens=recs,
                     loadings=loadings, active_cols=active_cols,
                     var_explained=var_pct,
                 ),
