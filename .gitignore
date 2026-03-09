@@ -8,6 +8,7 @@ __pycache__/
 # Data directory (all large files live here)
 data/*
 !data/README.md
+!data/*.csv
 
 # Neural organoid atlas (cloned repo + large model files)
 neural_organoid_atlas/

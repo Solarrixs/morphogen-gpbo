@@ -1,0 +1,47 @@
+condition,n_cells,n_cell_types,dominant_region,on_target_fraction,off_target_fraction,shannon_entropy,normalized_entropy,rss_best_region,rss_score,composite_fidelity
+IWP2,858,14,Dorsal telencephalon,0.9685,0.0,1.3025,0.464,Dorsal telencephalon,0.9995,0.9787
+IWP2 switch CHIR,557,14,Dorsal telencephalon,0.9318,0.0,1.4016,0.4993,Dorsal telencephalon,0.9986,0.9777
+FGF4,1235,14,Dorsal telencephalon,0.9377,0.0,1.5184,0.5409,Dorsal telencephalon,0.9786,0.9768
+FGF8,944,14,Dorsal telencephalon,0.9735,0.0,1.3215,0.4707,Dorsal telencephalon,0.9708,0.9718
+CHIR-d16-21,1670,14,Dorsal telencephalon,0.9383,0.0,1.4421,0.4549,Dorsal telencephalon,0.9989,0.9682
+DAPT,903,14,Dorsal telencephalon,0.9513,0.0,1.5762,0.5254,Dorsal telencephalon,0.9317,0.9628
+LDN,1236,14,Dorsal telencephalon,0.9701,0.0,1.1765,0.3711,Dorsal telencephalon,0.9957,0.9416
+I/Activin/DAPT/SR11,1423,14,Dorsal telencephalon,0.7836,0.0007,1.7664,0.5317,Dorsal telencephalon,0.9764,0.9368
+CHIR1.5,1154,14,Thalamus,0.6542,0.0,1.6241,0.6994,Thalamus,0.9168,0.8479
+C/S/R/E/FGF2/D,492,14,Dorsal midbrain,0.5244,0.002,1.5313,0.5455,Dorsal midbrain,0.8435,0.8258
+CHIR SAG FGF8,594,14,Dorsal midbrain,0.5556,0.0017,1.1178,0.4324,Dorsal midbrain,0.8375,0.8078
+CHIR-d6-11,182,14,Thalamus,0.522,0.0,1.407,0.7035,Thalamus,0.8793,0.8
+S/I/E/FGF2,365,14,Hypothalamus,0.4,0.0055,2.1236,0.6138,Hypothalamus,0.8415,0.7857
+CHIR SAG FGF4,686,14,Dorsal midbrain,0.4621,0.0073,1.4034,0.4678,Dorsal midbrain,0.7836,0.7758
+CHIR switch IWP2,852,14,Thalamus,0.4789,0.0,1.474,0.6348,Thalamus,0.7656,0.7748
+CHIR-d11-16,1123,14,Thalamus,0.52,0.0,1.7743,0.7642,Thalamus,0.853,0.7631
+C/L/S/FGF8,1338,14,Dorsal midbrain,0.4768,0.0291,1.341,0.447,Dorsal midbrain,0.757,0.7582
+BMP7 CHIR,798,14,Dorsal midbrain,0.4035,0.0038,1.5634,0.5569,Dorsal midbrain,0.7086,0.7478
+FGF-20/EGF,414,14,Cerebellum,0.4155,0.0024,1.8406,0.6135,Cerebellum,0.7043,0.7424
+FGF2-50,1028,14,Cerebellum,0.6099,0.0,1.0307,0.3671,Cerebellum,0.6879,0.742
+BMP4 SAG,448,14,Hypothalamus,0.3884,0.0022,1.8487,0.5565,Hypothalamus,0.6669,0.7299
+SAG-d11-16,691,14,Hypothalamus,0.3864,0.0,1.2657,0.4219,Hypothalamus,0.7425,0.7287
+BMP7,1148,14,Thalamus,0.5409,0.0,1.6604,0.8302,Thalamus,0.8135,0.7262
+CHIR-SAG-LDN,529,14,Dorsal midbrain,0.31,0.017,1.5843,0.5281,Dorsal midbrain,0.6204,0.6895
+CHIR3,656,14,Dorsal midbrain,0.3232,0.0,1.2077,0.4672,Dorsal midbrain,0.6306,0.6892
+C/S/BMP7/D,941,14,Dorsal midbrain,0.6217,0.0117,0.7336,0.2314,Dorsal midbrain,0.6887,0.6857
+CHIR-SAGd10-21,635,14,Hypothalamus,0.3543,0.0063,0.9425,0.3142,Hypothalamus,0.7226,0.6648
+BMP7 SAG,462,14,Unspecific,0.3355,0.013,1.5867,0.5289,Hypothalamus,0.4589,0.6404
+BMP4 CHIR d11-16,1214,14,Unspecific,0.5297,0.0016,1.4577,0.5639,Thalamus,0.3098,0.6401
+CHIR-SAG-d16-21,515,14,Unspecific,0.3495,0.0214,1.7999,0.6,Hypothalamus,0.4307,0.6282
+BMP4 CHIR,1479,14,Unspecific,0.5139,0.0027,1.4594,0.6285,Thalamus,0.3171,0.6277
+SAG-CHIR-d16-21,610,14,Dorsal midbrain,0.4361,0.0,0.597,0.2309,Dorsal midbrain,0.6432,0.6262
+CHIR1.5-SAG250,332,14,Unspecific,0.3434,0.0331,1.8643,0.6641,Hypothalamus,0.4353,0.6074
+CHIR3-SAG250,385,14,Dorsal midbrain,0.2545,0.0338,1.8669,0.665,Dorsal midbrain,0.4988,0.6069
+IWP2-SAG,1183,14,Unspecific,0.4759,0.0254,1.6936,0.5343,Hypothalamus,0.2457,0.5982
+SAG250,860,14,Unspecific,0.3872,0.0326,1.7585,0.5547,Dorsal midbrain,0.2919,0.5908
+SAG-d16-21,306,14,Unspecific,0.2157,0.0033,2.0954,0.661,Dorsal telencephalon,0.4502,0.5893
+RA10,764,14,Unspecific,0.517,0.034,2.2964,0.6638,Dorsal midbrain,0.2462,0.5845
+SAG-d6-11,1032,14,Unspecific,0.2045,0.0436,1.836,0.5792,Dorsal midbrain,0.4151,0.5839
+CHIR1.5-SAG1000,1223,14,Unspecific,0.4252,0.0466,1.8366,0.6122,Hypothalamus,0.2689,0.5817
+SAG1000,575,14,Unspecific,0.3322,0.0174,1.816,0.5729,Hypothalamus,0.2945,0.5808
+FGF2-20,1242,14,Dorsal telencephalon,0.3027,0.0,2.1602,0.7695,Dorsal telencephalon,0.4519,0.566
+RA100,190,14,Unspecific,0.3842,0.0158,2.1573,0.7191,Dorsal midbrain,0.324,0.5604
+SAG-CHIRd10-21,368,14,Unspecific,0.4321,0.0299,1.8297,0.6517,Dorsal midbrain,0.2135,0.5571
+CHIR3-SAG1000,499,14,Unspecific,0.4429,0.0481,2.2901,0.8158,Dorsal midbrain,0.4134,0.5554
+C/S/D/FGF4,126,14,Dorsal midbrain,0.246,0.0,0.6621,0.2852,Dorsal midbrain,0.4828,0.5429
