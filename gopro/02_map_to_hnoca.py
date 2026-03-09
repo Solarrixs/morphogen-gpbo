@@ -403,6 +403,38 @@ def compute_cell_type_fractions(
     return fractions
 
 
+def compute_soft_cell_type_fractions(
+    obs: pd.DataFrame,
+    soft_probs: pd.DataFrame,
+    condition_key: str = "condition",
+) -> pd.DataFrame:
+    """Compute cell type fractions by averaging soft probabilities per condition.
+
+    Instead of argmax followed by value_counts (hard assignment), this averages the
+    per-cell probability vectors within each condition. This preserves
+    annotation uncertainty and reduces noise in GP training labels.
+
+    Args:
+        obs: Cell metadata with condition column.
+        soft_probs: DataFrame (cells x cell types) of soft probabilities.
+        condition_key: Column identifying experimental conditions.
+
+    Returns:
+        DataFrame: rows=conditions, columns=cell types, values=fractions (sum to 1).
+    """
+    logger.info("Computing soft cell type fractions per %s...", condition_key)
+
+    conditions = obs[condition_key]
+    fractions = soft_probs.groupby(conditions).mean()
+
+    # Re-normalize rows to sum to 1 (should be close already)
+    row_sums = fractions.sum(axis=1)
+    fractions = fractions.div(row_sums, axis=0)
+
+    logger.info("Result: %d conditions x %d cell types", fractions.shape[0], fractions.shape[1])
+    return fractions
+
+
 if __name__ == "__main__":
     import time
     start = time.time()
