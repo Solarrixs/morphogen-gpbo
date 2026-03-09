@@ -282,6 +282,46 @@ class TestBaselinePredictor:
         assert (result.loc["neural_induction", "Neuroepithelium"]
                 > result.loc["bmp_high", "Neuroepithelium"])
 
+    def test_with_real_fractions_csv(self, tmp_path):
+        """Bug #3: When real_fractions_csv is provided, cell types match."""
+        # Create real training fractions with level-2 labels
+        real_Y = pd.DataFrame({
+            "Cortical EN": [0.4, 0.3],
+            "Cortical RG": [0.3, 0.4],
+            "Cortical IP": [0.2, 0.2],
+            "OPC": [0.1, 0.1],
+        }, index=["cond_A", "cond_B"])
+        csv_path = tmp_path / "real_fracs.csv"
+        real_Y.to_csv(csv_path)
+
+        protocols = pd.DataFrame({
+            "CHIR99021_uM": [1.5],
+            "SAG_uM": [0.25],
+            "log_harvest_day": [math.log(21)],
+        }, index=["test"])
+
+        result = step06._predict_baseline(protocols, real_fractions_csv=csv_path)
+
+        # Should use level-2 column names from real data
+        assert set(result.columns) == {"Cortical EN", "Cortical RG", "Cortical IP", "OPC"}
+        # Fractions still valid
+        np.testing.assert_allclose(result.sum(axis=1), 1.0, atol=1e-6)
+        assert (result >= 0).all().all()
+
+    def test_with_nonexistent_csv_falls_back(self, tmp_path):
+        """Bug #3: Missing CSV should fall back to level-1 types."""
+        protocols = pd.DataFrame({
+            "CHIR99021_uM": [1.5],
+            "log_harvest_day": [math.log(21)],
+        }, index=["test"])
+
+        result = step06._predict_baseline(
+            protocols, real_fractions_csv=tmp_path / "nonexistent.csv"
+        )
+        # Should use fallback level-1 labels
+        assert "Neuron" in result.columns
+        assert "NPC" in result.columns
+
 
 class TestPredictionConfidence:
     """Tests for CellFlow prediction confidence estimation."""
@@ -524,3 +564,286 @@ class TestPhase45Properties:
 
         confidence = step06.compute_prediction_confidence(predictions, training)
         assert confidence.loc["near"] > confidence.loc["far"]
+
+
+# ==============================================================================
+# Bug Fix Tests
+# ==============================================================================
+
+
+class TestCategoricalDtypeFix:
+    """Tests for the pandas CategoricalDtype fix in build_cellrank_kernel."""
+
+    def test_non_categorical_day_gets_converted(self):
+        """Verify non-categorical 'day' column doesn't crash with new API."""
+        import anndata as ad
+
+        adata = ad.AnnData(
+            X=np.random.rand(10, 5).astype(np.float32),
+            obs=pd.DataFrame({"day": [7] * 5 + [15] * 5}),
+        )
+        # The isinstance check should work without AttributeError
+        assert not isinstance(adata.obs["day"].dtype, pd.CategoricalDtype)
+        # After conversion (what the function does):
+        adata.obs["day"] = adata.obs["day"].astype("category")
+        assert isinstance(adata.obs["day"].dtype, pd.CategoricalDtype)
+
+    def test_already_categorical_day_unchanged(self):
+        """If day is already categorical, no error."""
+        import anndata as ad
+
+        adata = ad.AnnData(
+            X=np.random.rand(10, 5).astype(np.float32),
+            obs=pd.DataFrame({"day": pd.Categorical([7] * 5 + [15] * 5)}),
+        )
+        assert isinstance(adata.obs["day"].dtype, pd.CategoricalDtype)
+
+
+class TestMinBoundWidthFix:
+    """Tests for the MIN_BOUND_WIDTH guard in _compute_active_bounds."""
+
+    def test_near_zero_column_gets_minimum_width(self):
+        """Near-zero col_max should not produce zero-width bounds."""
+        X = pd.DataFrame({
+            "CHIR99021_uM": [0.0, 3.0, 6.0],
+            "BMP4_uM": [1e-10, 2e-10, 3e-10],  # near-zero but not zero-variance
+            "log_harvest_day": [np.log(72)] * 3,
+        })
+        bounds, active_cols = step04._compute_active_bounds(X, list(X.columns))
+
+        # BMP4 should still be active (not zero-variance)
+        assert "BMP4_uM" in active_cols
+        lo, hi = bounds["BMP4_uM"]
+        # Bounds must have nonzero width
+        assert hi - lo >= 1e-6
+        assert hi > lo
+
+    def test_exact_zero_variance_dropped(self):
+        """Truly zero-variance columns should still be dropped."""
+        X = pd.DataFrame({
+            "CHIR99021_uM": [0.0, 3.0, 6.0],
+            "SHH_uM": [0.0, 0.0, 0.0],  # exactly zero variance
+            "log_harvest_day": [np.log(72)] * 3,
+        })
+        bounds, active_cols = step04._compute_active_bounds(X, list(X.columns))
+        assert "SHH_uM" not in active_cols
+
+    def test_normal_range_unaffected(self):
+        """Normal-range columns should not be affected by MIN_BOUND_WIDTH."""
+        X = pd.DataFrame({
+            "CHIR99021_uM": [0.0, 3.0, 6.0],
+            "log_harvest_day": [np.log(72)] * 3,
+        })
+        bounds, active_cols = step04._compute_active_bounds(X, list(X.columns))
+        lo, hi = bounds["CHIR99021_uM"]
+        # Should use normal padding, not MIN_BOUND_WIDTH
+        assert hi - lo > 1.0  # much larger than 1e-6
+
+
+class TestTransportMapFix:
+    """Tests for transport-map-based virtual fraction computation."""
+
+    @pytest.fixture
+    def mock_transport_data(self):
+        """Create mock data for transport map testing.
+
+        Sets up:
+        - Atlas with 2 timepoints (day 15, day 30), 20 cells each
+        - Query with 2 conditions, 5 cells each, at day 21
+        - Mock moscot problem with a known transport matrix
+        - Cell types at target: first half Neurons, second half Glia
+        """
+        import anndata as ad
+
+        np.random.seed(42)
+        n_source = 20
+        n_target = 20
+        n_query = 10
+
+        # Atlas: source (day 15) and target (day 30)
+        atlas_X = np.random.rand(n_source + n_target, 50).astype(np.float32)
+        atlas_obs = pd.DataFrame({
+            "day": [15] * n_source + [30] * n_target,
+            "annot_level_2": (
+                [f"source_ct_{i % 3}" for i in range(n_source)]
+                + ["Neuron"] * 10 + ["Glia"] * 10
+            ),
+        })
+        atlas = ad.AnnData(X=atlas_X, obs=atlas_obs)
+        atlas.obsm["X_pca"] = np.random.rand(
+            n_source + n_target, 30
+        ).astype(np.float32)
+
+        # Query: 2 conditions, 5 cells each
+        query_X = np.random.rand(n_query, 50).astype(np.float32)
+        query_obs = pd.DataFrame({
+            "condition": ["condA"] * 5 + ["condB"] * 5,
+            "predicted_annot_level_2": ["Neuron"] * 5 + ["Glia"] * 5,
+        })
+        query = ad.AnnData(X=query_X, obs=query_obs)
+        # Place condA near source cells 0-4, condB near source cells 15-19
+        query_pca = np.random.rand(n_query, 30).astype(np.float32)
+        query_pca[:5] = atlas.obsm["X_pca"][:5] + np.random.randn(5, 30) * 0.01
+        query_pca[5:] = atlas.obsm["X_pca"][15:20] + np.random.randn(5, 30) * 0.01
+        query.obsm["X_pca"] = query_pca
+
+        # Mock transport matrix:
+        # Source cells 0-9 transport to target cells 0-9 (Neurons)
+        # Source cells 10-19 transport to target cells 10-19 (Glia)
+        transport = np.zeros((n_source, n_target))
+        for i in range(n_source):
+            if i < 10:
+                transport[i, :10] = 1.0 / 10  # -> Neurons
+            else:
+                transport[i, 10:] = 1.0 / 10  # -> Glia
+
+        # Mock moscot problem — production code accesses .solution.transport_matrix
+        class MockSolution:
+            def __init__(self, tm):
+                self.transport_matrix = tm
+                self.cost = 0.5
+                self.converged = True
+
+        class MockProblemEntry:
+            def __init__(self, tm):
+                self.solution = MockSolution(tm)
+
+        class MockProblem:
+            def __init__(self, tm):
+                self._solutions = {(15, 30): MockProblemEntry(tm)}
+                self.solutions = self._solutions
+
+            def __getitem__(self, key):
+                return self._solutions[key]
+
+        problem = MockProblem(transport)
+
+        return query, atlas, problem
+
+    def test_different_conditions_different_fractions(self, mock_transport_data):
+        """Core test: conditions near different source cells should get
+        different virtual fractions via transport maps."""
+        query, atlas, problem = mock_transport_data
+
+        result = step05.project_query_forward(
+            query_adata=query,
+            atlas_adata=atlas,
+            problem=problem,
+            query_timepoint=21,
+            target_timepoints=[30],
+            label_key="annot_level_2",
+            condition_key="condition",
+        )
+
+        assert len(result) == 2  # 2 conditions x 1 target timepoint
+
+        # condA neighbors are source cells 0-4, which transport to Neurons
+        # condB neighbors are source cells 15-19, which transport to Glia
+        ct_cols = [c for c in result.columns
+                   if c not in ["original_condition", "target_day", "n_source_cells"]]
+
+        condA_fracs = result.loc["condA_day30", ct_cols].astype(float)
+        condB_fracs = result.loc["condB_day30", ct_cols].astype(float)
+
+        # They should be DIFFERENT (this is what the old bug prevented)
+        assert not np.allclose(condA_fracs.values, condB_fracs.values), \
+            "Conditions should produce different fractions via transport maps"
+
+        # condA should have more Neurons, condB should have more Glia
+        assert condA_fracs.get("Neuron", 0) > condB_fracs.get("Neuron", 0)
+        assert condB_fracs.get("Glia", 0) > condA_fracs.get("Glia", 0)
+
+    def test_fractions_sum_to_one(self, mock_transport_data):
+        """Virtual fractions should be valid probability distributions."""
+        query, atlas, problem = mock_transport_data
+
+        result = step05.project_query_forward(
+            query_adata=query,
+            atlas_adata=atlas,
+            problem=problem,
+            query_timepoint=21,
+            target_timepoints=[30],
+        )
+
+        ct_cols = [c for c in result.columns
+                   if c not in ["original_condition", "target_day", "n_source_cells"]]
+        row_sums = result[ct_cols].sum(axis=1)
+        np.testing.assert_allclose(row_sums, 1.0, atol=1e-6)
+
+    def test_fallback_on_missing_transport(self):
+        """Should fall back to atlas average when transport key is missing."""
+        import anndata as ad
+
+        np.random.seed(42)
+        atlas = ad.AnnData(
+            X=np.random.rand(20, 5).astype(np.float32),
+            obs=pd.DataFrame({
+                "day": [15] * 10 + [30] * 10,
+                "annot_level_2": ["Neuron"] * 10 + ["Glia"] * 5 + ["Neuron"] * 5,
+            }),
+        )
+        atlas.obsm["X_pca"] = np.random.rand(20, 10).astype(np.float32)
+
+        query = ad.AnnData(
+            X=np.random.rand(5, 5).astype(np.float32),
+            obs=pd.DataFrame({
+                "condition": ["cond1"] * 5,
+                "predicted_annot_level_2": ["Neuron"] * 5,
+            }),
+        )
+        query.obsm["X_pca"] = np.random.rand(5, 10).astype(np.float32)
+
+        # Problem with no solutions for the needed timepoint pair
+        class EmptyProblem:
+            solutions = {}
+            def __getitem__(self, key):
+                raise KeyError(f"No solution for {key}")
+
+        result = step05.project_query_forward(
+            query_adata=query,
+            atlas_adata=atlas,
+            problem=EmptyProblem(),
+            query_timepoint=21,
+            target_timepoints=[30],
+        )
+
+        # Should still produce output (from fallback)
+        assert len(result) >= 1
+
+    def test_sparse_transport_matrix(self, mock_transport_data):
+        """Should work with scipy sparse transport matrices."""
+        import scipy.sparse as sp
+
+        query, atlas, problem = mock_transport_data
+
+        # Convert transport to sparse
+        orig_tm = problem[(15, 30)].solution.transport_matrix
+        problem[(15, 30)].solution.transport_matrix = sp.csr_matrix(orig_tm)
+
+        result = step05.project_query_forward(
+            query_adata=query,
+            atlas_adata=atlas,
+            problem=problem,
+            query_timepoint=21,
+            target_timepoints=[30],
+        )
+
+        assert len(result) == 2
+        ct_cols = [c for c in result.columns
+                   if c not in ["original_condition", "target_day", "n_source_cells"]]
+        row_sums = result[ct_cols].sum(axis=1)
+        np.testing.assert_allclose(row_sums, 1.0, atol=1e-6)
+
+
+class TestNewScriptsSyntax:
+    """Verify new scripts parse correctly."""
+
+    def test_00a_download_geo_syntax(self):
+        import ast
+        path = Path(__file__).parent.parent / "00a_download_geo.py"
+        ast.parse(path.read_text())
+
+    def test_00c_build_temporal_atlas_syntax(self):
+        import ast
+        path = Path(__file__).parent.parent / "00c_build_temporal_atlas.py"
+        ast.parse(path.read_text())

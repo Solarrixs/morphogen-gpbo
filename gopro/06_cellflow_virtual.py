@@ -38,13 +38,14 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 from gopro.config import (
+    DATA_DIR,
     PROTEIN_MW_KDA as MW,
+    get_logger,
     nM_to_uM,
     ng_mL_to_uM,
 )
 
-PROJECT_DIR = Path("/Users/maxxyung/Projects/morphogen-gpbo")
-DATA_DIR = PROJECT_DIR / "data"
+logger = get_logger(__name__)
 
 # Low fidelity level for CellFlow virtual data
 FIDELITY_LEVEL = 0.0
@@ -195,14 +196,7 @@ def generate_virtual_screen_grid(
     if harvest_days is None:
         harvest_days = [21]
 
-    # Import morphogen columns from step 04
-    from importlib import util
-    spec = util.spec_from_file_location(
-        "step04", str(Path(__file__).parent / "04_gpbo_loop.py")
-    )
-    step04 = util.module_from_spec(spec)
-    spec.loader.exec_module(step04)
-    MORPHOGEN_COLUMNS = step04.MORPHOGEN_COLUMNS
+    from gopro.config import MORPHOGEN_COLUMNS
 
     # Build the grid
     grid_dims = {}
@@ -224,8 +218,8 @@ def generate_virtual_screen_grid(
         total *= len(v)
 
     if total > max_combinations:
-        print(f"  Grid would produce {total:,} combinations, "
-              f"sampling {max_combinations:,} randomly")
+        logger.info("Grid would produce %s combinations, sampling %s randomly",
+                     f"{total:,}", f"{max_combinations:,}")
         # Random sampling instead of full grid
         rows = []
         rng = np.random.RandomState(42)
@@ -243,7 +237,7 @@ def generate_virtual_screen_grid(
     grid.index = [f"virtual_{i:05d}" for i in range(len(grid))]
     grid.index.name = None
 
-    print(f"  Generated {len(grid):,} virtual protocol combinations")
+    logger.info("Generated %s virtual protocol combinations", f"{len(grid):,}")
     return grid
 
 
@@ -252,6 +246,7 @@ def predict_cellflow(
     model_path: Optional[Path] = None,
     batch_size: int = 256,
     n_cells_per_condition: int = 500,
+    real_fractions_csv: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Run CellFlow predictions for a batch of protocols.
 
@@ -278,9 +273,8 @@ def predict_cellflow(
             protocols, model_path, batch_size, n_cells_per_condition
         )
     else:
-        print("  CellFlow not available or no model found. "
-              "Using baseline prediction.")
-        return _predict_baseline(protocols)
+        logger.info("CellFlow not available or no model found. Using baseline prediction.")
+        return _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
 
 
 def _predict_with_cellflow(
@@ -303,7 +297,7 @@ def _predict_with_cellflow(
     import cellflow
     import torch
 
-    print(f"  Loading CellFlow model from {model_path}...")
+    logger.info("Loading CellFlow model from %s...", model_path)
     model = cellflow.CellFlowModel.load(str(model_path))
 
     all_fractions = []
@@ -315,8 +309,8 @@ def _predict_with_cellflow(
         batch = protocols.iloc[start:end]
 
         if batch_idx % 10 == 0:
-            print(f"  Predicting batch {batch_idx + 1}/{n_batches} "
-                  f"({start}-{end})...")
+            logger.info("Predicting batch %d/%d (%d-%d)...",
+                        batch_idx + 1, n_batches, start, end)
 
         # Encode protocols
         encodings = []
@@ -362,6 +356,7 @@ def _predict_with_cellflow(
 
 def _predict_baseline(
     protocols: pd.DataFrame,
+    real_fractions_csv: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Baseline prediction when CellFlow is not available.
 
@@ -371,77 +366,101 @@ def _predict_baseline(
 
     Args:
         protocols: Morphogen concentration vectors.
+        real_fractions_csv: Path to real training fractions CSV. If provided,
+            cell type vocabulary is loaded from its columns to match real data.
 
     Returns:
         Predicted cell type fractions (heuristic).
     """
-    print("  Using heuristic baseline predictor...")
+    logger.info("Using heuristic baseline predictor...")
 
-    # Known morphogen-to-fate associations from literature
-    # These are rough approximations based on Amin/Kelley + Sanchis-Calleja results
-    CELL_TYPES = [
-        "Neuron", "NPC", "IP", "Neuroepithelium", "Glioblast",
-        "Astrocyte", "OPC", "CP", "PSC", "MC",
-    ]
+    # Load cell type vocabulary from real training data if available
+    if real_fractions_csv is not None and real_fractions_csv.exists():
+        real_Y = pd.read_csv(str(real_fractions_csv), index_col=0)
+        CELL_TYPES = list(real_Y.columns)
+        logger.info("Loaded %d cell types from real training data", len(CELL_TYPES))
+    else:
+        # Fallback: HNOCA level-1 labels
+        CELL_TYPES = [
+            "Neuron", "NPC", "IP", "Neuroepithelium", "Glioblast",
+            "Astrocyte", "OPC", "CP", "PSC", "MC",
+        ]
+        logger.warning("No real training data — using level-1 fallback cell types")
 
     results = []
     for cond_name, row in protocols.iterrows():
         # Start with a base composition
-        fracs = np.ones(len(CELL_TYPES)) * 0.05
+        frac_dict = {ct: 0.05 for ct in CELL_TYPES}
 
         # WNT signaling (CHIR) -> caudalizes; IWP2 -> anteriorizes
         chir = row.get("CHIR99021_uM", 0)
         iwp2 = row.get("IWP2_uM", 0)
         if chir > 2.0:
-            fracs[0] += 0.2  # More neurons with high CHIR
-            fracs[1] -= 0.02
+            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.2
         if iwp2 > 0:
-            fracs[1] += 0.15  # More NPC with WNT inhibition
-            fracs[3] += 0.1   # More neuroepithelium
+            if "NPC" in frac_dict:
+                frac_dict["NPC"] += 0.15
+            elif len(CELL_TYPES) > 1:
+                frac_dict[CELL_TYPES[1]] = frac_dict.get(CELL_TYPES[1], 0.05) + 0.15
+            if "Neuroepithelium" in frac_dict:
+                frac_dict["Neuroepithelium"] += 0.1
+            elif len(CELL_TYPES) > 3:
+                frac_dict[CELL_TYPES[3]] = frac_dict.get(CELL_TYPES[3], 0.05) + 0.1
 
-        # SHH pathway -> ventral fates (all values now in µM)
+        # SHH pathway -> ventral fates
         shh = row.get("SHH_uM", 0) + row.get("SAG_uM", 0)
         if shh > 0:
-            fracs[0] += 0.1 * min(shh / 0.05, 1)  # Ventral neurons
-            fracs[2] += 0.05  # Intermediate progenitors
+            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.1 * min(shh / 0.05, 1)
+            if "IP" in frac_dict:
+                frac_dict["IP"] += 0.05
+            elif len(CELL_TYPES) > 2:
+                frac_dict[CELL_TYPES[2]] = frac_dict.get(CELL_TYPES[2], 0.05) + 0.05
 
-        # BMP -> dorsal / choroid plexus (all values now in µM)
+        # BMP -> dorsal / choroid plexus
         bmp = row.get("BMP4_uM", 0) + row.get("BMP7_uM", 0)
         if bmp > 0:
-            fracs[7] += 0.15 * min(bmp / 0.003, 1)  # Choroid plexus
-            fracs[9] += 0.05  # Some mesenchymal
+            if "CP" in frac_dict:
+                frac_dict["CP"] += 0.15 * min(bmp / 0.003, 1)
+            if "MC" in frac_dict:
+                frac_dict["MC"] += 0.05
 
-        # FGF -> proliferation / gliogenesis (all values now in µM)
+        # FGF -> proliferation / gliogenesis
         fgf = (row.get("FGF2_uM", 0) + row.get("FGF4_uM", 0)
                + row.get("FGF8_uM", 0))
         if fgf > 0:
-            fracs[4] += 0.1 * min(fgf / 0.005, 1)  # Glioblast
-            fracs[1] += 0.05  # NPC maintenance
+            if "Glioblast" in frac_dict:
+                frac_dict["Glioblast"] += 0.1 * min(fgf / 0.005, 1)
+            if "NPC" in frac_dict:
+                frac_dict["NPC"] += 0.05
 
-        # LDN/SB -> dual SMAD inhibition -> neural induction (all in µM)
+        # LDN/SB -> dual SMAD inhibition -> neural induction
         ldn = row.get("LDN193189_uM", 0)
         sb = row.get("SB431542_uM", 0)
         if ldn > 0 or sb > 0:
-            fracs[3] += 0.15  # Neuroepithelium
-            fracs[8] -= 0.03  # Less PSC
-            fracs[9] -= 0.03  # Less MC
+            if "Neuroepithelium" in frac_dict:
+                frac_dict["Neuroepithelium"] += 0.15
+            if "PSC" in frac_dict:
+                frac_dict["PSC"] = max(frac_dict["PSC"] - 0.03, 0.01)
+            if "MC" in frac_dict:
+                frac_dict["MC"] = max(frac_dict["MC"] - 0.03, 0.01)
 
-        # RA -> caudal / hindbrain (all values now in µM)
+        # RA -> caudal / hindbrain
         ra = row.get("RA_uM", 0)
         if ra > 0:
-            fracs[0] += 0.1 * min(ra / 0.5, 1)  # Neurons
-            fracs[2] += 0.05  # IP
+            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.1 * min(ra / 0.5, 1)
+            if "IP" in frac_dict:
+                frac_dict["IP"] += 0.05
 
         # DAPT -> Notch inhibition -> neuronal differentiation
         dapt = row.get("DAPT_uM", 0)
         if dapt > 0:
-            fracs[0] += 0.15  # Neurons
-            fracs[1] -= 0.05  # Fewer NPCs
+            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.15
+            if "NPC" in frac_dict:
+                frac_dict["NPC"] = max(frac_dict["NPC"] - 0.05, 0.01)
 
-        # Ensure non-negative and normalize
-        fracs = np.maximum(fracs, 0.01)
+        # Normalize
+        fracs = np.array([max(frac_dict[ct], 0.01) for ct in CELL_TYPES])
         fracs = fracs / fracs.sum()
-
         results.append(dict(zip(CELL_TYPES, fracs)))
 
     result = pd.DataFrame(results, index=protocols.index)
@@ -510,6 +529,7 @@ def run_virtual_screen(
     harvest_days: list[int] = None,
     max_combinations: int = 5000,
     model_path: Optional[Path] = None,
+    real_fractions_csv: Optional[Path] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Run full CellFlow virtual screen.
 
@@ -519,6 +539,8 @@ def run_virtual_screen(
         harvest_days: Harvest days to include.
         max_combinations: Max number of virtual protocols.
         model_path: Path to CellFlow model (optional).
+        real_fractions_csv: Path to real training fractions CSV for
+            cell type vocabulary alignment.
 
     Returns:
         Tuple of (virtual_morphogens, virtual_fractions, quality_report).
@@ -534,6 +556,7 @@ def run_virtual_screen(
     predictions = predict_cellflow(
         protocols,
         model_path=model_path,
+        real_fractions_csv=real_fractions_csv,
     )
 
     # Compute confidence scores
@@ -557,13 +580,13 @@ def main() -> None:
     import time
     start = time.time()
 
-    print("=" * 60)
-    print("PHASE 5: CellFlow Virtual Protocol Screening")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("PHASE 5: CellFlow Virtual Protocol Screening")
+    logger.info("=" * 60)
 
     morphogen_path = DATA_DIR / "morphogen_matrix_amin_kelley.csv"
     if not morphogen_path.exists():
-        print(f"ERROR: Morphogen matrix not found at {morphogen_path}")
+        logger.error("Morphogen matrix not found at %s", morphogen_path)
         return
 
     # Define screening ranges for key morphogens
@@ -580,9 +603,9 @@ def main() -> None:
         "LDN193189_uM": [0.0, nM_to_uM(50.0), nM_to_uM(100.0), nM_to_uM(200.0)],
     }
 
-    print("\n  Screening ranges:")
+    logger.info("Screening ranges:")
     for morph, vals in morphogen_ranges.items():
-        print(f"    {morph}: {vals}")
+        logger.info("  %s: %s", morph, vals)
 
     # Run virtual screen
     virtual_X, virtual_Y, quality = run_virtual_screen(
@@ -591,31 +614,29 @@ def main() -> None:
         harvest_days=[21, 45, 72],
         max_combinations=5000,
         model_path=DATA_DIR / "cellflow_model",
+        real_fractions_csv=DATA_DIR / "gp_training_labels_amin_kelley.csv",
     )
 
     # Save outputs
-    print("\n" + "=" * 60)
-    print("Saving virtual screening data")
-    print("=" * 60)
+    logger.info("Saving virtual screening data")
 
     virtual_Y.to_csv(str(DATA_DIR / "cellflow_virtual_fractions.csv"))
     virtual_X.to_csv(str(DATA_DIR / "cellflow_virtual_morphogens.csv"))
+    # TODO: Wire confidence scores into merge_multi_fidelity_data() to filter low-confidence predictions
     quality.to_csv(str(DATA_DIR / "cellflow_screening_report.csv"), index=False)
 
-    print(f"  Virtual fractions  -> data/cellflow_virtual_fractions.csv")
-    print(f"  Virtual morphogens -> data/cellflow_virtual_morphogens.csv")
-    print(f"  Screening report   -> data/cellflow_screening_report.csv")
+    logger.info("Virtual fractions  -> data/cellflow_virtual_fractions.csv")
+    logger.info("Virtual morphogens -> data/cellflow_virtual_morphogens.csv")
+    logger.info("Screening report   -> data/cellflow_screening_report.csv")
 
     # Summary
     elapsed = time.time() - start
-    print("\n" + "=" * 60)
-    print("CELLFLOW VIRTUAL SCREEN SUMMARY")
-    print("=" * 60)
-    print(f"  Protocols screened:  {len(virtual_X):,}")
-    print(f"  Cell types predicted: {virtual_Y.shape[1]}")
-    print(f"  Mean confidence:     {quality['confidence'].mean():.3f}")
-    print(f"  Fidelity level:      {FIDELITY_LEVEL}")
-    print(f"  Time elapsed:        {elapsed:.1f}s")
+    logger.info("CELLFLOW VIRTUAL SCREEN SUMMARY")
+    logger.info("Protocols screened:  %s", f"{len(virtual_X):,}")
+    logger.info("Cell types predicted: %d", virtual_Y.shape[1])
+    logger.info("Mean confidence:     %.3f", quality["confidence"].mean())
+    logger.info("Fidelity level:      %s", FIDELITY_LEVEL)
+    logger.info("Time elapsed:        %.1fs", elapsed)
 
 
 if __name__ == "__main__":

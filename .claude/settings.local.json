@@ -20,7 +20,9 @@
       "WebFetch(domain:www.ncbi.nlm.nih.gov)",
       "WebFetch(domain:pubmed.ncbi.nlm.nih.gov)",
       "Bash(source:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "mcp__claude_ai_PubMed__get_article_metadata",
+      "WebFetch(domain:aacrjournals.org)"
     ]
   }
 }

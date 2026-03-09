@@ -30,8 +30,6 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
-from scipy.spatial.distance import cosine as cosine_distance
-
 warnings.filterwarnings("ignore")
 
 from gopro.config import (

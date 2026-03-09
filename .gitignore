@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 *.egg-info/
+.coverage
 
 # Data directory (all large files live here)
 data/*
@@ -25,3 +26,4 @@ neural_organoid_atlas/
 # Claude Code
 .claude/worktrees/
 .hypothesis/
+.worktrees/

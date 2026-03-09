@@ -43,18 +43,26 @@ logger = get_logger(__name__)
 
 
 def filter_quality_cells(adata: sc.AnnData) -> sc.AnnData:
-    """Filter to 'keep' quality cells based on Amin/Kelley QC annotations.
+    """Filter to quality cells based on dataset-specific QC annotations.
+
+    Handles two formats:
+    - Primary screen: 'quality' column, keep rows where quality == 'keep'
+    - SAG screen: 'ClusterLabel' column, drop rows where ClusterLabel == 'filtered'
 
     Args:
-        adata: AnnData with 'quality' column in obs.
+        adata: AnnData with QC annotation columns in obs.
 
     Returns:
-        Filtered AnnData with only 'keep' quality cells.
+        Filtered AnnData.
     """
+    n_before = adata.n_obs
     if "quality" in adata.obs.columns:
-        n_before = adata.n_obs
         adata = adata[adata.obs["quality"] == "keep"].copy()
         logger.info("Quality filter: %d -> %d cells (%d removed)",
+                    n_before, adata.n_obs, n_before - adata.n_obs)
+    elif "ClusterLabel" in adata.obs.columns:
+        adata = adata[adata.obs["ClusterLabel"] != "filtered"].copy()
+        logger.info("ClusterLabel filter: %d -> %d cells (%d 'filtered' removed)",
                     n_before, adata.n_obs, n_before - adata.n_obs)
     return adata
 
@@ -393,13 +401,28 @@ def compute_cell_type_fractions(
 
 if __name__ == "__main__":
     import time
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Map query data to HNOCA via scPoli")
+    parser.add_argument("--input", type=str, default=None,
+                        help="Path to input h5ad (default: amin_kelley_2024.h5ad)")
+    parser.add_argument("--output-prefix", type=str, default=None,
+                        help="Output file prefix (default: amin_kelley)")
+    parser.add_argument("--condition-key", type=str, default="condition",
+                        help="obs column identifying experimental conditions")
+    parser.add_argument("--batch-key", type=str, default="sample",
+                        help="obs column identifying batch/sample")
+    args = parser.parse_args()
+
     start = time.time()
 
-    # Check prerequisites
-    ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
-    query_path = DATA_DIR / "amin_kelley_2024.h5ad"
+    # Resolve paths
+    query_path = Path(args.input) if args.input else DATA_DIR / "amin_kelley_2024.h5ad"
+    output_prefix = args.output_prefix or "amin_kelley"
 
-    for path, name in [(ref_path, "HNOCA reference"), (query_path, "Amin/Kelley data")]:
+    ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
+
+    for path, name in [(ref_path, "HNOCA reference"), (query_path, "Query data")]:
         if not path.exists():
             logger.error("%s not found at %s", name, path)
             raise SystemExit(1)
@@ -413,7 +436,7 @@ if __name__ == "__main__":
     ref = sc.read_h5ad(str(ref_path))
     logger.info("Reference: %s", ref.shape)
 
-    logger.info("Loading Amin/Kelley data...")
+    logger.info("Loading query data from %s...", query_path.name)
     query = sc.read_h5ad(str(query_path))
     logger.info("Query: %s", query.shape)
 
@@ -421,7 +444,7 @@ if __name__ == "__main__":
     query = filter_quality_cells(query)
 
     # Prepare query
-    query = prepare_query_for_scpoli(query, ref, batch_column="sample")
+    query = prepare_query_for_scpoli(query, ref, batch_column=args.batch_key)
 
     # Map to HNOCA via scPoli
     query_latent, ref_latent = map_to_hnoca_scpoli(
@@ -450,27 +473,27 @@ if __name__ == "__main__":
     # Compute cell type fractions for GP training
     fractions = compute_cell_type_fractions(
         query.obs,
-        condition_key="condition",
+        condition_key=args.condition_key,
         label_key=f"predicted_{ANNOT_LEVEL_2}",
     )
 
     # Also compute region fractions
     region_fractions = compute_cell_type_fractions(
         query.obs,
-        condition_key="condition",
+        condition_key=args.condition_key,
         label_key=f"predicted_{ANNOT_REGION}",
     )
 
     # Save outputs
     logger.info("Saving outputs...")
 
-    fractions.to_csv(str(DATA_DIR / "gp_training_labels_amin_kelley.csv"))
-    logger.info("Cell type fractions -> data/gp_training_labels_amin_kelley.csv")
+    fractions.to_csv(str(DATA_DIR / f"gp_training_labels_{output_prefix}.csv"))
+    logger.info("Cell type fractions -> data/gp_training_labels_%s.csv", output_prefix)
 
-    region_fractions.to_csv(str(DATA_DIR / "gp_training_regions_amin_kelley.csv"))
-    logger.info("Region fractions -> data/gp_training_regions_amin_kelley.csv")
+    region_fractions.to_csv(str(DATA_DIR / f"gp_training_regions_{output_prefix}.csv"))
+    logger.info("Region fractions -> data/gp_training_regions_%s.csv", output_prefix)
 
-    output_path = DATA_DIR / "amin_kelley_mapped.h5ad"
+    output_path = DATA_DIR / f"{output_prefix}_mapped.h5ad"
     query.write(str(output_path), compression="gzip")
     logger.info("Mapped data -> %s", output_path)
 
@@ -480,7 +503,7 @@ if __name__ == "__main__":
     # Summary
     logger.info("--- MAPPING SUMMARY ---")
     logger.info("Cells mapped: %d", query.n_obs)
-    logger.info("Conditions: %d", query.obs['condition'].nunique())
+    logger.info("Conditions: %d", query.obs[args.condition_key].nunique())
     for label_col in label_cols:
         pred_col = f"predicted_{label_col}"
         if pred_col in query.obs.columns:

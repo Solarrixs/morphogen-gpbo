@@ -120,6 +120,11 @@ def _compute_active_bounds(
         upper = min(padded_upper, lit_hi)
         lower = max(0.0, col_min)  # morphogen concentrations are non-negative
 
+        # Guarantee nonzero bound width for near-zero columns
+        MIN_BOUND_WIDTH = 1e-6  # µM — minimum meaningful concentration range
+        if upper - lower < MIN_BOUND_WIDTH:
+            upper = lower + MIN_BOUND_WIDTH
+
         active_cols.append(col)
         active_bounds[col] = (lower, upper)
         logger.info("Bounds for %s: [%.6f, %.6f] (train: [%.6f, %.6f])",
@@ -420,8 +425,8 @@ def recommend_next_experiments(
         acq_function=acqf,
         bounds=bounds_tensor,
         q=n_recommendations,
-        num_restarts=10,
-        raw_samples=2048,
+        num_restarts=5,
+        raw_samples=512,
     )
 
     # Get predictions at recommended points
@@ -490,6 +495,7 @@ def merge_multi_fidelity_data(
 
     aligned_Y = []
     for Y in all_Y:
+        Y = Y.copy()
         for col in all_ct_cols:
             if col not in Y.columns:
                 Y[col] = 0.0
@@ -503,6 +509,7 @@ def merge_multi_fidelity_data(
 
     aligned_X = []
     for X in all_X:
+        X = X.copy()
         for col in all_morph_cols:
             if col not in X.columns:
                 X[col] = 0.0
@@ -663,6 +670,10 @@ if __name__ == "__main__":
                         help="Path to CellFlow virtual fractions CSV (fidelity=0.0)")
     parser.add_argument("--cellflow-morphogens", type=str, default=None,
                         help="Path to CellFlow virtual morphogens CSV")
+    parser.add_argument("--sag-fractions", type=str, default=None,
+                        help="Path to SAG screen fractions CSV (fidelity=1.0)")
+    parser.add_argument("--sag-morphogens", type=str, default=None,
+                        help="Path to SAG screen morphogens CSV")
     args = parser.parse_args()
 
     fractions_path = Path(args.fractions) if args.fractions else DATA_DIR / "gp_training_labels_amin_kelley.csv"
@@ -713,6 +724,13 @@ if __name__ == "__main__":
     if cf_frac.exists() and cf_morph.exists():
         virtual_sources.append((cf_frac, cf_morph, 0.0))
         logger.info("Including CellFlow virtual data (fidelity=0.0)")
+
+    # Check for SAG secondary screen real data
+    sag_frac = Path(args.sag_fractions) if args.sag_fractions else DATA_DIR / "gp_training_labels_sag_screen.csv"
+    sag_morph = Path(args.sag_morphogens) if args.sag_morphogens else DATA_DIR / "morphogen_matrix_sag_screen.csv"
+    if sag_frac.exists() and sag_morph.exists():
+        virtual_sources.append((sag_frac, sag_morph, 1.0))
+        logger.info("Including SAG secondary screen real data (fidelity=1.0)")
 
     # Run GP-BO loop
     recs = run_gpbo_loop(

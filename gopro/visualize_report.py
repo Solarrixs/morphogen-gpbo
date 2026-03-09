@@ -157,7 +157,7 @@ def compute_morphogen_pca_with_recommendations(
     morphogen_df: pd.DataFrame,
     recs_df: pd.DataFrame,
     morphogen_cols: list[str],
-) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, float]:
+) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, float, list[str]]:
     """Compute PCA on training data and project recommendations into same space.
 
     Drops zero-variance columns before fitting. Returns PC coordinates plus

@@ -306,6 +306,53 @@ class TestFidelityScoring:
         # NPC and IP both map to Radial glia and Neuronal IPC
         assert "Neuron" in aligned.index
 
+    def test_align_sums_multiple_to_same_target(self):
+        """NPC + Neuroepithelium should both map to Radial glia and sum."""
+        fracs = pd.Series({"NPC": 0.3, "Neuroepithelium": 0.2, "Neuron": 0.5})
+        label_map = step03.build_hnoca_to_braun_label_map()
+        aligned = step03.align_composition_to_braun(fracs, label_map)
+        assert aligned["Radial glia"] == pytest.approx(0.5)  # 0.3 + 0.2
+        assert aligned.sum() == pytest.approx(1.0)
+
+    def test_score_all_conditions_with_label_map(self):
+        """Bug #2: label_map should improve RSS scores when using Braun profiles."""
+        import scanpy as sc
+
+        np.random.seed(42)
+        n_cells = 200
+        conditions = ["A", "B"]
+        level1_types = ["Neuron", "NPC", "IP"]
+        level2_types = ["Cortical EN", "Cortical RG", "Cortical IP"]
+        regions = ["Dorsal telencephalon", "Ventral telencephalon"]
+
+        obs = pd.DataFrame({
+            "condition": np.random.choice(conditions, size=n_cells),
+            "predicted_annot_level_1": np.random.choice(level1_types, size=n_cells),
+            "predicted_annot_level_2": np.random.choice(level2_types, size=n_cells),
+            "predicted_annot_region_rev2": np.random.choice(regions, size=n_cells),
+        })
+        adata = sc.AnnData(X=np.zeros((n_cells, 5)), obs=obs)
+
+        braun_profiles = pd.DataFrame({
+            "Neuron": [0.4, 0.3],
+            "Radial glia": [0.3, 0.4],
+            "Neuronal IPC": [0.2, 0.2],
+            "Oligo": [0.1, 0.1],
+        }, index=["Dorsal telencephalon", "Ventral telencephalon"])
+
+        label_map = step03.build_hnoca_to_braun_label_map()
+
+        # Without label_map (HNOCA labels vs Braun — near-orthogonal)
+        report_without = step03.score_all_conditions(adata, braun_profiles, "condition")
+
+        # With label_map (aligned labels — meaningful similarity)
+        report_with = step03.score_all_conditions(
+            adata, braun_profiles, "condition", label_map=label_map
+        )
+
+        # RSS scores should be higher with label alignment
+        assert report_with["rss_score"].mean() > report_without["rss_score"].mean()
+
 
 class TestVisualizationReport:
     """Tests for visualization report module."""
@@ -581,3 +628,219 @@ class TestConfig:
         from gopro.config import get_logger
         log = get_logger("test_debug_level")
         assert log.level == logging.DEBUG
+
+    def test_model_dir_under_data(self):
+        """Bug #9: MODEL_DIR should be under data/neural_organoid_atlas."""
+        from gopro.config import MODEL_DIR
+        assert "data" in str(MODEL_DIR)
+        assert "neural_organoid_atlas" in str(MODEL_DIR)
+
+
+from gopro.config import MORPHOGEN_COLUMNS
+
+
+class TestSAGSecondaryScreen:
+    """Tests for SAG secondary screen condition parsing."""
+
+    def test_sag_50nm_vector(self):
+        """SAG_50nM: CHIR=1.5, SAG=0.05, harvest=Day70."""
+        from gopro.morphogen_parser import parse_condition_name
+        import math
+        vec = parse_condition_name("SAG_50nM")
+        assert vec["CHIR99021_uM"] == 1.5
+        assert vec["SAG_uM"] == pytest.approx(0.05)
+        assert vec["log_harvest_day"] == pytest.approx(math.log(70))
+        # All other morphogens should be 0
+        for col in MORPHOGEN_COLUMNS:
+            if col not in ("CHIR99021_uM", "SAG_uM", "log_harvest_day"):
+                assert vec[col] == 0.0, f"{col} should be 0"
+
+    def test_sag_2um_vector(self):
+        """SAG_2uM: CHIR=1.5, SAG=2.0, harvest=Day70."""
+        from gopro.morphogen_parser import parse_condition_name
+        import math
+        vec = parse_condition_name("SAG_2uM")
+        assert vec["CHIR99021_uM"] == 1.5
+        assert vec["SAG_uM"] == pytest.approx(2.0)
+        assert vec["log_harvest_day"] == pytest.approx(math.log(70))
+
+    def test_sag_secondary_conditions_list(self):
+        """SAG_SECONDARY_CONDITIONS should have exactly 2 entries."""
+        from gopro.morphogen_parser import SAG_SECONDARY_CONDITIONS
+        assert len(SAG_SECONDARY_CONDITIONS) == 2
+        assert "SAG_50nM" in SAG_SECONDARY_CONDITIONS
+        assert "SAG_2uM" in SAG_SECONDARY_CONDITIONS
+
+    def test_sag_secondary_build_matrix(self):
+        """build_morphogen_matrix works for SAG secondary conditions."""
+        from gopro.morphogen_parser import build_morphogen_matrix, SAG_SECONDARY_CONDITIONS
+        df = build_morphogen_matrix(SAG_SECONDARY_CONDITIONS)
+        assert df.shape == (2, 20)
+        assert df.loc["SAG_50nM", "CHIR99021_uM"] == 1.5
+        assert df.loc["SAG_2uM", "SAG_uM"] == pytest.approx(2.0)
+
+
+class TestSAGScreenFiltering:
+    """Tests for SAG screen cell filtering (ClusterLabel-based)."""
+
+    def test_filter_sag_screen_cells(self):
+        """filter_quality_cells handles SAG screen ClusterLabel column."""
+        import anndata
+        obs = pd.DataFrame({
+            "ClusterLabel": ["MAF_NKX2-1", "filtered", "LHX8_NKX2-1", "filtered", "c0"],
+            "condition": ["SAG_1uM"] * 5,
+        })
+        adata = anndata.AnnData(
+            X=np.zeros((5, 10)),
+            obs=obs,
+        )
+        filtered = step02.filter_quality_cells(adata)
+        assert filtered.n_obs == 3  # 2 'filtered' cells removed
+
+
+class TestCrossScreenQC:
+    """Tests for cross-screen condition QC validation."""
+
+    def test_cosine_similarity_identical(self):
+        """Identical fractions should have cosine similarity = 1.0."""
+        from gopro.qc_cross_screen import compute_cross_screen_similarity
+        fracs_a = pd.DataFrame({"NPC": [0.5], "Neuron": [0.5]}, index=["SAG250"])
+        fracs_b = pd.DataFrame({"NPC": [0.5], "Neuron": [0.5]}, index=["SAG_250nM"])
+        mapping = {"SAG250": "SAG_250nM"}
+        result = compute_cross_screen_similarity(fracs_a, fracs_b, mapping)
+        assert result["SAG250"]["cosine_similarity"] == pytest.approx(1.0)
+
+    def test_cosine_similarity_orthogonal(self):
+        """Orthogonal fractions should have cosine similarity = 0.0."""
+        from gopro.qc_cross_screen import compute_cross_screen_similarity
+        fracs_a = pd.DataFrame({"NPC": [1.0], "Neuron": [0.0]}, index=["cond_a"])
+        fracs_b = pd.DataFrame({"NPC": [0.0], "Neuron": [1.0]}, index=["cond_b"])
+        mapping = {"cond_a": "cond_b"}
+        result = compute_cross_screen_similarity(fracs_a, fracs_b, mapping)
+        assert result["cond_a"]["cosine_similarity"] == pytest.approx(0.0)
+
+    def test_flag_low_similarity(self):
+        """Should flag conditions with similarity < threshold."""
+        from gopro.qc_cross_screen import validate_cross_screen
+        fracs_a = pd.DataFrame({"NPC": [0.9], "Neuron": [0.1]}, index=["cond_a"])
+        fracs_b = pd.DataFrame({"NPC": [0.1], "Neuron": [0.9]}, index=["cond_b"])
+        mapping = {"cond_a": "cond_b"}
+        flagged = validate_cross_screen(fracs_a, fracs_b, mapping, threshold=0.8)
+        assert len(flagged) == 1
+        assert "cond_a" in flagged
+
+
+class TestMultiSourceRealData:
+    """Tests for merging multiple real-data sources at fidelity=1.0."""
+
+    def test_merge_primary_plus_sag(self):
+        """merge_multi_fidelity_data handles two fidelity=1.0 sources."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+
+            # Primary screen (3 conditions, 4 cell types)
+            fracs_1 = pd.DataFrame(
+                {"NPC": [0.5, 0.3, 0.2], "Neuron": [0.3, 0.4, 0.5], "IP": [0.1, 0.2, 0.2], "Glia": [0.1, 0.1, 0.1]},
+                index=["cond_a", "cond_b", "cond_c"],
+            )
+            morph_1 = pd.DataFrame(
+                {"CHIR99021_uM": [1.5, 0, 3.0], "SAG_uM": [0, 0.25, 0], "log_harvest_day": [4.28, 4.28, 4.28]},
+                index=["cond_a", "cond_b", "cond_c"],
+            )
+            fracs_1.to_csv(tmpdir / "fracs_primary.csv")
+            morph_1.to_csv(tmpdir / "morph_primary.csv")
+
+            # SAG screen (2 conditions, 3 cell types — missing 'Glia')
+            fracs_2 = pd.DataFrame(
+                {"NPC": [0.4, 0.2], "Neuron": [0.4, 0.6], "IP": [0.2, 0.2]},
+                index=["SAG_50nM", "SAG_2uM"],
+            )
+            morph_2 = pd.DataFrame(
+                {"CHIR99021_uM": [1.5, 1.5], "SAG_uM": [0.05, 2.0], "log_harvest_day": [4.25, 4.25]},
+                index=["SAG_50nM", "SAG_2uM"],
+            )
+            fracs_2.to_csv(tmpdir / "fracs_sag.csv")
+            morph_2.to_csv(tmpdir / "morph_sag.csv")
+
+            sources = [
+                (tmpdir / "fracs_primary.csv", tmpdir / "morph_primary.csv", 1.0),
+                (tmpdir / "fracs_sag.csv", tmpdir / "morph_sag.csv", 1.0),
+            ]
+            X, Y = step04.merge_multi_fidelity_data(sources)
+
+            assert len(X) == 5  # 3 + 2
+            assert len(Y) == 5
+            assert "Glia" in Y.columns  # aligned from primary
+            assert Y.loc["SAG_50nM", "Glia"] == 0.0  # filled with 0
+            assert np.allclose(Y.sum(axis=1), 1.0, atol=1e-6)  # re-normalized
+
+
+class TestMorphogenParserClass:
+    """Tests for generic MorphogenParser class."""
+
+    def test_amin_kelley_parser(self):
+        """AminKelleyParser should parse all 46 primary conditions."""
+        from gopro.morphogen_parser import AminKelleyParser
+        parser = AminKelleyParser()
+        assert len(parser.conditions) == 46
+        vec = parser.parse("CHIR1.5")
+        assert vec["CHIR99021_uM"] == 1.5
+
+    def test_sag_secondary_parser(self):
+        """SAGSecondaryParser should parse 2 conditions."""
+        from gopro.morphogen_parser import SAGSecondaryParser
+        parser = SAGSecondaryParser()
+        assert len(parser.conditions) == 2
+        vec = parser.parse("SAG_2uM")
+        assert vec["SAG_uM"] == pytest.approx(2.0)
+
+    def test_build_matrix_from_parser(self):
+        """Parser.build_matrix() should return DataFrame."""
+        from gopro.morphogen_parser import AminKelleyParser
+        parser = AminKelleyParser()
+        df = parser.build_matrix()
+        assert df.shape == (46, 20)
+
+    def test_combined_parser(self):
+        """CombinedParser merges multiple parsers."""
+        from gopro.morphogen_parser import AminKelleyParser, SAGSecondaryParser, CombinedParser
+        combined = CombinedParser([AminKelleyParser(), SAGSecondaryParser()])
+        assert len(combined.conditions) == 48
+        df = combined.build_matrix()
+        assert df.shape == (48, 20)
+
+
+class TestNoHardcodedPaths:
+    """Verify no hardcoded absolute paths remain in gopro/ source files."""
+
+    def test_no_hardcoded_user_paths(self):
+        """Bug #5: No /Users/... paths should remain in any gopro/ source file."""
+        import re
+        gopro_dir = Path(__file__).parent.parent
+        violations = []
+        for py_file in gopro_dir.glob("*.py"):
+            content = py_file.read_text()
+            matches = re.findall(r'/Users/\w+/.*', content)
+            if matches:
+                violations.append((py_file.name, matches))
+        assert violations == [], f"Hardcoded paths found: {violations}"
+
+    def test_no_print_calls_in_cellrank2(self):
+        """Bug #12: 05_cellrank2_virtual.py should use logger, not print."""
+        import re
+        gopro_dir = Path(__file__).parent.parent
+        content = (gopro_dir / "05_cellrank2_virtual.py").read_text()
+        # Match print( at start of line (with optional indentation)
+        prints = re.findall(r'^\s*print\(', content, re.MULTILINE)
+        assert prints == [], f"Found {len(prints)} print() calls in 05_cellrank2_virtual.py"
+
+    def test_no_print_calls_in_cellflow(self):
+        """Bug #12: 06_cellflow_virtual.py should use logger, not print."""
+        import re
+        gopro_dir = Path(__file__).parent.parent
+        content = (gopro_dir / "06_cellflow_virtual.py").read_text()
+        prints = re.findall(r'^\s*print\(', content, re.MULTILINE)
+        assert prints == [], f"Found {len(prints)} print() calls in 06_cellflow_virtual.py"

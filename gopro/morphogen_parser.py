@@ -311,6 +311,23 @@ def _sag250(v: dict[str, float]) -> None:
     v["SAG_uM"] = nM_to_uM(250.0)  # 250 nM = 0.25 µM
 
 
+# SAG Secondary Screen conditions (Amin/Kelley 2024, Day 70, CHIR 1.5µM base)
+_SAG_SECONDARY_HARVEST_DAY: int = 70
+_LOG_SAG_SECONDARY_HARVEST_DAY: float = math.log(_SAG_SECONDARY_HARVEST_DAY)
+
+def _sag_50nm(v: dict[str, float]) -> None:
+    """SAG secondary: 50nM SAG + 1.5µM CHIR, Day 70."""
+    v["CHIR99021_uM"] = 1.5
+    v["SAG_uM"] = nM_to_uM(50.0)  # 50 nM = 0.05 µM
+    v["log_harvest_day"] = _LOG_SAG_SECONDARY_HARVEST_DAY
+
+def _sag_2um(v: dict[str, float]) -> None:
+    """SAG secondary: 2µM SAG + 1.5µM CHIR, Day 70."""
+    v["CHIR99021_uM"] = 1.5
+    v["SAG_uM"] = 2.0  # 2000 nM = 2.0 µM
+    v["log_harvest_day"] = _LOG_SAG_SECONDARY_HARVEST_DAY
+
+
 # ==============================================================================
 # Dispatch table: condition name -> handler
 # ==============================================================================
@@ -361,11 +378,14 @@ _CONDITION_PARSERS: dict[str, Any] = {
     "SAG-d6-11":            _sag_d6_11,
     "SAG1000":              _sag1000,
     "SAG250":               _sag250,
+    # SAG secondary screen (Day 70, non-duplicate conditions only)
+    "SAG_50nM":             _sag_50nm,
+    "SAG_2uM":              _sag_2um,
 }
 
-# Sanity check: we must have exactly 46 conditions
-assert len(_CONDITION_PARSERS) == 46, (
-    f"Expected 46 conditions, got {len(_CONDITION_PARSERS)}"
+# Sanity check: 46 primary + 2 SAG secondary = 48 conditions
+assert len(_CONDITION_PARSERS) == 48, (
+    f"Expected 48 conditions, got {len(_CONDITION_PARSERS)}"
 )
 
 
@@ -390,7 +410,81 @@ def build_morphogen_matrix(conditions: list[str]) -> pd.DataFrame:
 
 
 ALL_CONDITIONS: list[str] = sorted(_CONDITION_PARSERS.keys())
-"""All 46 condition names in alphabetical order."""
+"""All 48 condition names in alphabetical order (46 primary + 2 SAG secondary)."""
+
+SAG_SECONDARY_CONDITIONS: list[str] = ["SAG_50nM", "SAG_2uM"]
+"""SAG secondary screen conditions (non-duplicate only)."""
+
+
+# ==============================================================================
+# Generic parser class hierarchy
+# ==============================================================================
+
+class MorphogenParser:
+    """Base class for morphogen condition parsers."""
+
+    def __init__(self, parsers: dict[str, Any], harvest_day: int):
+        self._parsers = parsers
+        self._harvest_day = harvest_day
+        self._log_harvest_day = math.log(harvest_day)
+
+    @property
+    def conditions(self) -> list[str]:
+        return sorted(self._parsers.keys())
+
+    def parse(self, name: str) -> dict[str, float]:
+        vec = _zeros()
+        vec["log_harvest_day"] = self._log_harvest_day
+        if name not in self._parsers:
+            raise ValueError(f"Unrecognized condition: {name!r}")
+        self._parsers[name](vec)
+        return vec
+
+    def build_matrix(self, conditions: list[str] | None = None) -> pd.DataFrame:
+        conditions = conditions or self.conditions
+        rows = [self.parse(c) for c in conditions]
+        return pd.DataFrame(rows, index=conditions, columns=MORPHOGEN_COLUMNS)
+
+
+class AminKelleyParser(MorphogenParser):
+    """Parser for Amin/Kelley 2024 primary screen (46 conditions, Day 72)."""
+    def __init__(self):
+        primary = {k: v for k, v in _CONDITION_PARSERS.items()
+                   if k not in SAG_SECONDARY_CONDITIONS}
+        super().__init__(primary, harvest_day=72)
+
+
+class SAGSecondaryParser(MorphogenParser):
+    """Parser for SAG secondary screen (2 conditions, Day 70)."""
+    def __init__(self):
+        sag = {k: v for k, v in _CONDITION_PARSERS.items()
+               if k in SAG_SECONDARY_CONDITIONS}
+        super().__init__(sag, harvest_day=70)
+
+
+class CombinedParser:
+    """Combines multiple MorphogenParsers."""
+
+    def __init__(self, parsers: list[MorphogenParser]):
+        self._sub_parsers = parsers
+
+    @property
+    def conditions(self) -> list[str]:
+        all_conds = []
+        for p in self._sub_parsers:
+            all_conds.extend(p.conditions)
+        return sorted(all_conds)
+
+    def parse(self, name: str) -> dict[str, float]:
+        for p in self._sub_parsers:
+            if name in p.conditions:
+                return p.parse(name)
+        raise ValueError(f"Unrecognized condition: {name!r}")
+
+    def build_matrix(self, conditions: list[str] | None = None) -> pd.DataFrame:
+        conditions = conditions or self.conditions
+        rows = [self.parse(c) for c in conditions]
+        return pd.DataFrame(rows, index=conditions, columns=MORPHOGEN_COLUMNS)
 
 
 # ==============================================================================
@@ -420,5 +514,15 @@ if __name__ == "__main__":
     # Save morphogen matrix for downstream pipeline steps (04, 05, 06)
     from gopro.config import DATA_DIR
     output_path = DATA_DIR / "morphogen_matrix_amin_kelley.csv"
-    df.to_csv(str(output_path))
-    logger.info("Saved morphogen matrix to %s", output_path)
+    # Only include primary screen conditions (exclude SAG secondary)
+    primary_conditions = [c for c in ALL_CONDITIONS if c not in SAG_SECONDARY_CONDITIONS]
+    primary_df = build_morphogen_matrix(primary_conditions)
+    primary_df.to_csv(str(output_path))
+    logger.info("Saved primary screen matrix to %s (%d conditions)", output_path, len(primary_df))
+
+    # Also generate SAG secondary screen matrix
+    sag_df = build_morphogen_matrix(SAG_SECONDARY_CONDITIONS)
+    sag_output_path = DATA_DIR / "morphogen_matrix_sag_screen.csv"
+    sag_df.to_csv(str(sag_output_path))
+    logger.info("Saved SAG secondary screen matrix to %s", sag_output_path)
+    logger.info("SAG matrix:\n%s", sag_df.to_string())

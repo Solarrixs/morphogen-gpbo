@@ -27,7 +27,7 @@ Optional (not required for main pipeline):
 
 **Source:** [GSE233574](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE233574)
 
-Download these files from GEO and place them in this `data/` directory:
+Download automatically with `python gopro/00a_download_geo.py`, or manually place in this `data/` directory:
 
 | File | Size | Description |
 |------|------|-------------|
@@ -57,10 +57,10 @@ python 00b_download_patterning_screen.py
 
 ## 4. Neural Organoid Atlas (HNOCA)
 
-The `neural_organoid_atlas/` directory (in project root, not in `data/`) is cloned from the [theislab HNOCA reproducibility repo](https://github.com/theislab/neural_organoid_atlas). It contains the trained scPoli model parameters needed for step 02:
+The `data/neural_organoid_atlas/` directory is cloned from the [theislab HNOCA reproducibility repo](https://github.com/theislab/neural_organoid_atlas). It contains the trained scPoli model parameters needed for step 02:
 
 ```
-neural_organoid_atlas/supplemental_files/scpoli_model_params/
+data/neural_organoid_atlas/supplemental_files/scpoli_model_params/
 ├── model_params.pt
 ├── attr.pkl
 └── var_names.csv
@@ -68,6 +68,7 @@ neural_organoid_atlas/supplemental_files/scpoli_model_params/
 
 Clone it with:
 ```bash
+cd data
 git clone https://github.com/theislab/neural_organoid_atlas.git
 ```
 
@@ -83,3 +84,19 @@ These are created by the pipeline steps and don't need to be downloaded:
 | `gp_training_labels_amin_kelley.csv` | Step 02 | Cell type fractions per condition |
 | `amin_kelley_fidelity.h5ad` | Step 03 | With fidelity scores |
 | `fidelity_report.csv` | Step 03 | Per-condition fidelity summary |
+| `morphogen_matrix_amin_kelley.csv` | morphogen_parser.py | 20D morphogen concentration matrix (46 primary conditions) |
+| `morphogen_matrix_sag_screen.csv` | morphogen_parser.py | 20D morphogen concentration matrix (2 SAG conditions) |
+| `sag_screen_mapped.h5ad` | Step 02 (SAG) | HNOCA-mapped SAG screen with cell type labels |
+| `gp_training_labels_sag_screen.csv` | Step 02 (SAG) | Cell type fractions per SAG condition |
+| `gp_training_regions_sag_screen.csv` | Step 02 (SAG) | Brain region fractions per SAG condition |
+| `braun_reference_profiles.csv` | Step 03 | Cached Braun fetal brain region profiles |
+| `braun_reference_celltype_profiles.csv` | Step 03 | Cached Braun CellType profiles |
+| `gp_training_regions_amin_kelley.csv` | Step 02 | Brain region fractions per condition |
+| `gp_recommendations_round{N}.csv` | Step 04 | GP-BO recommended conditions per round |
+| `gp_diagnostics_round{N}.csv` | Step 04 | GP model diagnostics per round |
+| `azbukina_temporal_atlas.h5ad` | Step 00c | Temporal atlas for CellRank2 projection |
+| `cellrank2_virtual_fractions.csv` | Step 05/CellRank2 | Virtual cell type fractions |
+| `cellrank2_virtual_morphogens.csv` | Step 05/CellRank2 | Morphogen vectors for virtual points |
+| `cellflow_virtual_fractions.csv` | Step 06 | CellFlow-predicted cell type fractions |
+| `cellflow_virtual_morphogens.csv` | Step 06 | Morphogen vectors for virtual screen |
+| `report_round{N}.html` | Step 05/visualize | Interactive Plotly visualization report |

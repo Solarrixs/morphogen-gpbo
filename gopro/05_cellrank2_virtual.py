@@ -36,6 +36,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import scipy.sparse as sp
 
 warnings.filterwarnings("ignore")
 
@@ -195,7 +196,7 @@ def build_cellrank_kernel(
     logger.info("Building CellRank 2 RealTimeKernel...")
 
     # Ensure time_key is categorical for CellRank
-    if not pd.api.types.is_categorical_dtype(adata.obs.get("day")):
+    if not isinstance(adata.obs["day"].dtype, pd.CategoricalDtype):
         adata.obs["day"] = adata.obs["day"].astype("category")
 
     rtk = cr.kernels.RealTimeKernel.from_moscot(problem)
@@ -362,6 +363,7 @@ def project_query_forward(
         # Get target timepoint atlas cells and their labels
         target_mask = atlas_adata.obs["day"] == target_tp
         target_obs = atlas_adata[target_mask].obs
+        n_target_atlas = int(target_mask.sum())
 
         # Get cell type labels at target timepoint
         # Use the annotation available in the atlas
@@ -377,7 +379,73 @@ def project_query_forward(
             continue
 
         target_labels = target_obs[target_label_col]
+
+        # Harmonize labels if using a non-standard column
+        if target_label_col != label_key:
+            LABEL_HARMONIZATION = {
+                "Excitatory neuron": "Cortical EN",
+                "Inhibitory neuron": "Cortical IN",
+                "Radial glia": "Cortical RG",
+                "Intermediate progenitor": "Cortical IP",
+                "Astrocyte": "Astroglia",
+                "Oligodendrocyte precursor": "OPC",
+                "Oligodendrocyte": "OPC",
+                "Choroid plexus": "CP epithelial",
+                "Microglia": "Microglia",
+                "Endothelial": "Vascular endothelial",
+                "Fibroblast": "Mesenchymal",
+            }
+            logger.info("Using atlas column '%s' — harmonizing to '%s' vocabulary", target_label_col, label_key)
+            mapped = target_labels.map(LABEL_HARMONIZATION)
+            n_unmapped = mapped.isna().sum()
+            if n_unmapped > 0:
+                unmapped_labels = target_labels[mapped.isna()].unique()
+                logger.warning("%d cells (%d labels) unmapped: %s", n_unmapped, len(unmapped_labels), list(unmapped_labels)[:10])
+                mapped = mapped.fillna(target_labels)  # keep unmapped as-is
+            target_labels = mapped
+
         target_ct_fracs = target_labels.value_counts(normalize=True)
+
+        # Compose transport across intermediate timepoints (sparse)
+        # Done once per target_tp, shared across all conditions
+        tp_pairs = list(zip(intermediate_tps[:-1], intermediate_tps[1:]))
+        use_transport = True
+        try:
+            transport = problem[(tp_pairs[0][0], tp_pairs[0][1])].solution.transport_matrix
+            if not sp.issparse(transport):
+                transport = sp.csr_matrix(transport)
+            elif not sp.isspmatrix_csr(transport):
+                transport = transport.tocsr()
+            for src_t, tgt_t in tp_pairs[1:]:
+                t_next = problem[(src_t, tgt_t)].solution.transport_matrix
+                if not sp.issparse(t_next):
+                    t_next = sp.csr_matrix(t_next)
+                elif not sp.isspmatrix_csr(t_next):
+                    t_next = t_next.tocsr()
+                transport = transport @ t_next  # sparse @ sparse = sparse
+
+            # Dimension check: transport target dim must match atlas target cells
+            n_target_transport = transport.shape[1]
+            if n_target_transport != n_target_atlas:
+                logger.warning(
+                    "Transport target dim (%d) != atlas target cells (%d) at Day %s — "
+                    "moscot may have subsampled. Using atlas average.",
+                    n_target_transport, n_target_atlas, target_tp,
+                )
+                use_transport = False
+
+            # Build local index lookup for vectorized neighbor mapping
+            if use_transport:
+                max_source_idx = int(source_indices.max()) + 1
+                local_idx_map = -np.ones(max_source_idx, dtype=np.intp)
+                local_idx_map[source_indices] = np.arange(len(source_indices))
+                target_labels_arr = target_labels.values
+        except (KeyError, AttributeError, IndexError) as e:
+            logger.warning(
+                "Transport composition failed at Day %s (%s), using atlas average for all conditions",
+                target_tp, e,
+            )
+            use_transport = False
 
         # For each condition, compute predicted cell type fractions
         # weighted by transport probability
@@ -389,15 +457,52 @@ def project_query_forward(
             if n_cells == 0:
                 continue
 
-            # The virtual prediction uses the atlas target timepoint
-            # composition weighted by the transport coupling from the
-            # query cells' nearest atlas neighbors
             virtual_key = f"{cond}_day{target_tp}"
 
-            # Use atlas target composition as the predicted fractions
-            # weighted by the query-to-atlas coupling strength
-            # This is a simplified transport: query -> atlas source -> atlas target
-            virtual_fracs = target_ct_fracs.copy()
+            if use_transport:
+                try:
+                    cond_nn = neighbor_idx[cond_indices]   # [n_cond_cells, k]
+                    cond_w = weights[cond_indices]          # [n_cond_cells, k]
+
+                    # Vectorized mapping of global neighbor indices to local source indices
+                    flat_nn = cond_nn.ravel()
+                    flat_w = cond_w.ravel()
+
+                    # Map to local indices; out-of-range -> -1
+                    in_range = flat_nn < len(local_idx_map)
+                    flat_local = np.full_like(flat_nn, -1, dtype=np.intp)
+                    flat_local[in_range] = local_idx_map[flat_nn[in_range]]
+                    valid = (flat_local >= 0) & (flat_local < transport.shape[0])
+
+                    if valid.any():
+                        # Gather transport rows for valid neighbors (sparse row indexing)
+                        t_rows = transport[flat_local[valid], :]  # CSR supports row fancy indexing
+                        w_valid = flat_w[valid]
+
+                        # Weight and sum: W @ t_rows where W is diagonal
+                        W = sp.diags(w_valid)
+                        weighted = W @ t_rows
+                        target_dist = np.asarray(weighted.sum(axis=0)).ravel()
+
+                        if target_dist.sum() > 0:
+                            target_dist /= target_dist.sum()
+
+                            # Compute cell type fractions from weighted target distribution
+                            virtual_fracs = pd.Series(0.0, index=target_ct_fracs.index)
+                            for ct in virtual_fracs.index:
+                                ct_mask = (target_labels_arr == ct)
+                                virtual_fracs[ct] = target_dist[ct_mask].sum()
+                        else:
+                            logger.warning("No valid transport for condition '%s' at Day %s, using atlas average", cond, target_tp)
+                            virtual_fracs = target_ct_fracs.copy()
+                    else:
+                        logger.warning("No valid neighbors for condition '%s' at Day %s, using atlas average", cond, target_tp)
+                        virtual_fracs = target_ct_fracs.copy()
+                except (KeyError, AttributeError, IndexError) as e:
+                    logger.warning("Transport lookup failed for condition '%s' at Day %s (%s), using atlas average", cond, target_tp, e)
+                    virtual_fracs = target_ct_fracs.copy()
+            else:
+                virtual_fracs = target_ct_fracs.copy()
 
             all_virtual_fractions.append({
                 "virtual_condition": virtual_key,
@@ -408,7 +513,7 @@ def project_query_forward(
             })
 
     if not all_virtual_fractions:
-        print("  WARNING: No virtual fractions generated")
+        logger.warning("No virtual fractions generated")
         return pd.DataFrame()
 
     result = pd.DataFrame(all_virtual_fractions)
@@ -423,7 +528,7 @@ def project_query_forward(
     row_sums = result[ct_cols].sum(axis=1)
     result[ct_cols] = result[ct_cols].div(row_sums, axis=0)
 
-    print(f"  Generated {len(result)} virtual data points")
+    logger.info("Generated %d virtual data points", len(result))
     return result
 
 
@@ -526,10 +631,10 @@ def generate_virtual_training_data(
     virtual_Y = virtual_Y.loc[common]
     virtual_morphogens = virtual_morphogens.loc[common]
 
-    print(f"\n  Virtual training data summary:")
-    print(f"    X (morphogens): {virtual_morphogens.shape}")
-    print(f"    Y (fractions):  {virtual_Y.shape}")
-    print(f"    Fidelity level: {FIDELITY_LEVEL}")
+    logger.info("Virtual training data summary:")
+    logger.info("X (morphogens): %s", virtual_morphogens.shape)
+    logger.info("Y (fractions):  %s", virtual_Y.shape)
+    logger.info("Fidelity level: %s", FIDELITY_LEVEL)
 
     return virtual_morphogens, virtual_Y
 
@@ -550,7 +655,7 @@ def validate_transport_quality(
     Returns:
         DataFrame with transport costs per timepoint pair.
     """
-    print("\n  Validating transport map quality...")
+    logger.info("Validating transport map quality...")
     results = []
 
     for key in problem.solutions:
@@ -574,8 +679,8 @@ def validate_transport_quality(
     report = pd.DataFrame(results)
     for _, row in report.iterrows():
         flag = " !!!" if row["status"] != "OK" else ""
-        print(f"    {row['transition']}: cost={row['cost']:.4f} "
-              f"converged={row['converged']}{flag}")
+        logger.info("%s: cost=%.4f converged=%s%s",
+                    row["transition"], row["cost"], row["converged"], flag)
 
     return report
 
@@ -585,9 +690,9 @@ def main() -> None:
     import time
     start = time.time()
 
-    print("=" * 60)
-    print("PHASE 4: CellRank 2 Virtual Data Generation")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("PHASE 4: CellRank 2 Virtual Data Generation")
+    logger.info("=" * 60)
 
     # -----------------------------------------------------------------------
     # Check prerequisites
@@ -602,16 +707,16 @@ def main() -> None:
         (morphogen_path, "Morphogen matrix (from morphogen_parser)"),
     ]:
         if not path.exists():
-            print(f"ERROR: {name} not found at {path}")
-            print("  See data/README.md for download instructions.")
+            logger.error("%s not found at %s", name, path)
+            logger.error("See data/README.md for download instructions.")
             return
 
     # -----------------------------------------------------------------------
     # Step 1: Load temporal atlas
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("STEP 1: Load and preprocess temporal atlas")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("STEP 1: Load and preprocess temporal atlas")
+    logger.info("=" * 60)
 
     atlas = load_temporal_atlas(atlas_path, time_key="day")
     atlas = preprocess_for_moscot(atlas)
@@ -619,9 +724,9 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 2: Compute transport maps
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("STEP 2: Compute moscot transport maps")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("STEP 2: Compute moscot transport maps")
+    logger.info("=" * 60)
 
     cache_path = DATA_DIR / "cellrank2_transport_maps.pkl"
     problem = compute_transport_maps(
@@ -636,14 +741,14 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 3: Load query data and project forward
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("STEP 3: Project query data forward in time")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("STEP 3: Project query data forward in time")
+    logger.info("=" * 60)
 
-    print("  Loading mapped query data...")
+    logger.info("Loading mapped query data...")
     query = sc.read_h5ad(str(query_path))
-    print(f"  Query: {query.n_obs:,} cells, "
-          f"{query.obs['condition'].nunique()} conditions")
+    logger.info("Query: %s cells, %d conditions",
+                f"{query.n_obs:,}", query.obs["condition"].nunique())
 
     virtual_X, virtual_Y = generate_virtual_training_data(
         query_adata=query,
@@ -657,34 +762,35 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 4: Save outputs
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("STEP 4: Save virtual training data")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("STEP 4: Save virtual training data")
+    logger.info("=" * 60)
 
     if not virtual_X.empty:
         virtual_Y.to_csv(str(DATA_DIR / "cellrank2_virtual_fractions.csv"))
         virtual_X.to_csv(str(DATA_DIR / "cellrank2_virtual_morphogens.csv"))
+        # TODO: Wire quality scores into step 04 to filter/weight virtual data
         quality_report.to_csv(
             str(DATA_DIR / "cellrank2_transport_quality.csv"), index=False
         )
-        print(f"  Virtual fractions  -> data/cellrank2_virtual_fractions.csv")
-        print(f"  Virtual morphogens -> data/cellrank2_virtual_morphogens.csv")
-        print(f"  Transport quality  -> data/cellrank2_transport_quality.csv")
+        logger.info("Virtual fractions  -> data/cellrank2_virtual_fractions.csv")
+        logger.info("Virtual morphogens -> data/cellrank2_virtual_morphogens.csv")
+        logger.info("Transport quality  -> data/cellrank2_transport_quality.csv")
     else:
-        print("  WARNING: No virtual data generated.")
+        logger.warning("No virtual data generated.")
 
     # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     elapsed = time.time() - start
-    print("\n" + "=" * 60)
-    print("CELLRANK 2 VIRTUAL DATA SUMMARY")
-    print("=" * 60)
-    print(f"  Virtual data points: {len(virtual_X)}")
-    print(f"  Fidelity level:      {FIDELITY_LEVEL}")
-    print(f"  Data amplification:  {len(virtual_X)} virtual from "
-          f"{query.obs['condition'].nunique()} real conditions")
-    print(f"  Time elapsed:        {elapsed:.1f}s")
+    logger.info("=" * 60)
+    logger.info("CELLRANK 2 VIRTUAL DATA SUMMARY")
+    logger.info("=" * 60)
+    logger.info("Virtual data points: %d", len(virtual_X))
+    logger.info("Fidelity level:      %s", FIDELITY_LEVEL)
+    logger.info("Data amplification:  %d virtual from %d real conditions",
+                len(virtual_X), query.obs["condition"].nunique())
+    logger.info("Time elapsed:        %.1fs", elapsed)
 
 
 if __name__ == "__main__":
