@@ -51,6 +51,13 @@ _DEFAULTS: dict[str, float] = {
     "ActivinA_uM":     ng_mL_to_uM(50.0, PROTEIN_MW_KDA["ActivinA"]),  # 50 ng/mL
 }
 
+# Shorthand aliases for frequently hardcoded default concentrations.
+# Handlers should use these instead of repeating magic numbers.
+_CHIR = _DEFAULTS["CHIR99021_uM"]     # 1.5 µM
+_SB = _DEFAULTS["SB431542_uM"]        # 10.0 µM
+_DAPT = _DEFAULTS["DAPT_uM"]          # 2.5 µM
+_IWP2 = _DEFAULTS["IWP2_uM"]          # 5.0 µM
+
 # Base media morphogens — constant across all conditions (from day 21 onwards)
 # These are not varied in the screen but are present in every well.
 _BASE_MEDIA: dict[str, float] = {
@@ -131,11 +138,11 @@ def parse_condition_name(name: str) -> dict[str, float]:
 
 def _bmp4_chir(v: dict[str, float]) -> None:
     v["BMP4_uM"] = _DEFAULTS["BMP4_uM"]
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
 
 def _bmp4_chir_d11_16(v: dict[str, float]) -> None:
     v["BMP4_uM"] = _DEFAULTS["BMP4_uM"]
-    v["CHIR99021_uM"] = 1.5 * _time_fraction(11, 16)
+    v["CHIR99021_uM"] = _CHIR * _time_fraction(11, 16)
 
 def _bmp4_sag(v: dict[str, float]) -> None:
     v["BMP4_uM"] = _DEFAULTS["BMP4_uM"]
@@ -146,7 +153,7 @@ def _bmp7(v: dict[str, float]) -> None:
 
 def _bmp7_chir(v: dict[str, float]) -> None:
     v["BMP7_uM"] = _DEFAULTS["BMP7_uM"]
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
 
 def _bmp7_sag(v: dict[str, float]) -> None:
     v["BMP7_uM"] = _DEFAULTS["BMP7_uM"]
@@ -154,82 +161,82 @@ def _bmp7_sag(v: dict[str, float]) -> None:
 
 def _c_l_s_fgf8(v: dict[str, float]) -> None:
     """C/L/S/FGF8 = CHIR + LDN + SB431542 + FGF8."""
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
     v["LDN193189_uM"] = _DEFAULTS["LDN193189_uM"]
-    v["SB431542_uM"] = 10.0
+    v["SB431542_uM"] = _SB
     v["FGF8_uM"] = _DEFAULTS["FGF8_uM"]
 
 def _c_s_bmp7_d(v: dict[str, float]) -> None:
     """C/S/BMP7/D = CHIR + SB431542 + BMP7 + DAPT."""
-    v["CHIR99021_uM"] = 1.5
-    v["SB431542_uM"] = 10.0
+    v["CHIR99021_uM"] = _CHIR
+    v["SB431542_uM"] = _SB
     v["BMP7_uM"] = _DEFAULTS["BMP7_uM"]
-    v["DAPT_uM"] = 2.5
+    v["DAPT_uM"] = _DAPT
 
 def _c_s_d_fgf4(v: dict[str, float]) -> None:
     """C/S/D/FGF4 = CHIR + SB431542 + DAPT + FGF4."""
-    v["CHIR99021_uM"] = 1.5
-    v["SB431542_uM"] = 10.0
-    v["DAPT_uM"] = 2.5
+    v["CHIR99021_uM"] = _CHIR
+    v["SB431542_uM"] = _SB
+    v["DAPT_uM"] = _DAPT
     v["FGF4_uM"] = _DEFAULTS["FGF4_uM"]
 
 def _c_s_r_e_fgf2_d(v: dict[str, float]) -> None:
     """C/S/R/E/FGF2/D = CHIR + SB431542 + RA + EGF + FGF2 + DAPT."""
-    v["CHIR99021_uM"] = 1.5
-    v["SB431542_uM"] = 10.0
+    v["CHIR99021_uM"] = _CHIR
+    v["SB431542_uM"] = _SB
     v["RA_uM"] = _DEFAULTS["RA_uM"]
     v["EGF_uM"] = _DEFAULTS["EGF_uM"]
     v["FGF2_uM"] = _DEFAULTS["FGF2_uM"]
-    v["DAPT_uM"] = 2.5
+    v["DAPT_uM"] = _DAPT
 
 def _chir_sag_fgf4(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
     v["SAG_uM"] = _DEFAULTS["SAG_uM"]
     v["FGF4_uM"] = _DEFAULTS["FGF4_uM"]
 
 def _chir_sag_fgf8(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
     v["SAG_uM"] = _DEFAULTS["SAG_uM"]
     v["FGF8_uM"] = _DEFAULTS["FGF8_uM"]
 
 def _chir_switch_iwp2(v: dict[str, float]) -> None:
     """CHIR first half, then IWP2 second half of standard window."""
-    v["CHIR99021_uM"] = 1.5 * _time_fraction(6, 13)
-    v["IWP2_uM"] = 5.0 * _time_fraction(13, 21)
+    v["CHIR99021_uM"] = _CHIR * _time_fraction(6, 13)
+    v["IWP2_uM"] = _IWP2 * _time_fraction(13, 21)
 
 def _chir_d11_16(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5 * _time_fraction(11, 16)
+    v["CHIR99021_uM"] = _CHIR * _time_fraction(11, 16)
 
 def _chir_d16_21(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5 * _time_fraction(16, 21)
+    v["CHIR99021_uM"] = _CHIR * _time_fraction(16, 21)
 
 def _chir_d6_11(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5 * _time_fraction(6, 11)
+    v["CHIR99021_uM"] = _CHIR * _time_fraction(6, 11)
 
 def _chir_sag_d16_21(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5 * _time_fraction(16, 21)
+    v["CHIR99021_uM"] = _CHIR * _time_fraction(16, 21)
     v["SAG_uM"] = _DEFAULTS["SAG_uM"] * _time_fraction(16, 21)
 
 def _chir_sag_ldn(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
     v["SAG_uM"] = _DEFAULTS["SAG_uM"]
     v["LDN193189_uM"] = _DEFAULTS["LDN193189_uM"]
 
 def _chir_sagd10_21(v: dict[str, float]) -> None:
     """CHIR full window, SAG days 10-21 only."""
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
     v["SAG_uM"] = _DEFAULTS["SAG_uM"] * _time_fraction(10, 21)
 
 def _chir1_5_sag1000(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
     v["SAG_uM"] = nM_to_uM(1000.0)  # 1000 nM = 1.0 µM
 
 def _chir1_5_sag250(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
     v["SAG_uM"] = nM_to_uM(250.0)  # 250 nM = 0.25 µM
 
 def _chir1_5(v: dict[str, float]) -> None:
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
 
 def _chir3_sag1000(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 3.0
@@ -243,7 +250,7 @@ def _chir3(v: dict[str, float]) -> None:
     v["CHIR99021_uM"] = 3.0
 
 def _dapt(v: dict[str, float]) -> None:
-    v["DAPT_uM"] = 2.5
+    v["DAPT_uM"] = _DAPT
 
 def _fgf20_egf(v: dict[str, float]) -> None:
     """FGF-20/EGF: FGF2 at 20 ng/mL + EGF."""
@@ -264,21 +271,21 @@ def _fgf8(v: dict[str, float]) -> None:
 
 def _i_activin_dapt_sr11(v: dict[str, float]) -> None:
     """I/Activin/DAPT/SR11 = IWP2 + Activin A + DAPT + SR11237 (retinoid)."""
-    v["IWP2_uM"] = 5.0
+    v["IWP2_uM"] = _IWP2
     v["ActivinA_uM"] = _DEFAULTS["ActivinA_uM"]
-    v["DAPT_uM"] = 2.5
+    v["DAPT_uM"] = _DAPT
     v["RA_uM"] = _DEFAULTS["RA_uM"]  # SR11237 treated as RA equivalent
 
 def _iwp2(v: dict[str, float]) -> None:
-    v["IWP2_uM"] = 5.0
+    v["IWP2_uM"] = _IWP2
 
 def _iwp2_switch_chir(v: dict[str, float]) -> None:
     """IWP2 first half, then CHIR second half of standard window."""
-    v["IWP2_uM"] = 5.0 * _time_fraction(6, 13)
-    v["CHIR99021_uM"] = 1.5 * _time_fraction(13, 21)
+    v["IWP2_uM"] = _IWP2 * _time_fraction(6, 13)
+    v["CHIR99021_uM"] = _CHIR * _time_fraction(13, 21)
 
 def _iwp2_sag(v: dict[str, float]) -> None:
-    v["IWP2_uM"] = 5.0
+    v["IWP2_uM"] = _IWP2
     v["SAG_uM"] = _DEFAULTS["SAG_uM"]
 
 def _ldn(v: dict[str, float]) -> None:
@@ -292,20 +299,20 @@ def _ra100(v: dict[str, float]) -> None:
 
 def _s_i_e_fgf2(v: dict[str, float]) -> None:
     """S/I/E/FGF2 = SB431542 + IWP2 + EGF + FGF2."""
-    v["SB431542_uM"] = 10.0
-    v["IWP2_uM"] = 5.0
+    v["SB431542_uM"] = _SB
+    v["IWP2_uM"] = _IWP2
     v["EGF_uM"] = _DEFAULTS["EGF_uM"]
     v["FGF2_uM"] = _DEFAULTS["FGF2_uM"]
 
 def _sag_chir_d16_21(v: dict[str, float]) -> None:
     """SAG full window, CHIR days 16-21 only."""
     v["SAG_uM"] = _DEFAULTS["SAG_uM"]
-    v["CHIR99021_uM"] = 1.5 * _time_fraction(16, 21)
+    v["CHIR99021_uM"] = _CHIR * _time_fraction(16, 21)
 
 def _sag_chird10_21(v: dict[str, float]) -> None:
     """SAG full window, CHIR days 10-21 only."""
     v["SAG_uM"] = _DEFAULTS["SAG_uM"]
-    v["CHIR99021_uM"] = 1.5 * _time_fraction(10, 21)
+    v["CHIR99021_uM"] = _CHIR * _time_fraction(10, 21)
 
 def _sag_d11_16(v: dict[str, float]) -> None:
     v["SAG_uM"] = _DEFAULTS["SAG_uM"] * _time_fraction(11, 16)
@@ -329,13 +336,13 @@ _LOG_SAG_SECONDARY_HARVEST_DAY: float = math.log(_SAG_SECONDARY_HARVEST_DAY)
 
 def _sag_50nm(v: dict[str, float]) -> None:
     """SAG secondary: 50nM SAG + 1.5µM CHIR, Day 70."""
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
     v["SAG_uM"] = nM_to_uM(50.0)  # 50 nM = 0.05 µM
     v["log_harvest_day"] = _LOG_SAG_SECONDARY_HARVEST_DAY
 
 def _sag_2um(v: dict[str, float]) -> None:
     """SAG secondary: 2µM SAG + 1.5µM CHIR, Day 70."""
-    v["CHIR99021_uM"] = 1.5
+    v["CHIR99021_uM"] = _CHIR
     v["SAG_uM"] = 2.0  # 2000 nM = 2.0 µM
     v["log_harvest_day"] = _LOG_SAG_SECONDARY_HARVEST_DAY
 
@@ -475,7 +482,11 @@ class SAGSecondaryParser(MorphogenParser):
 
 
 class CombinedParser:
-    """Combines multiple MorphogenParsers."""
+    """Combines multiple MorphogenParsers.
+
+    Delegates ``parse`` to the first sub-parser that recognizes the condition.
+    Inherits ``build_matrix`` logic identical to ``MorphogenParser``.
+    """
 
     def __init__(self, parsers: list[MorphogenParser]):
         self._sub_parsers = parsers
@@ -494,6 +505,7 @@ class CombinedParser:
         raise ValueError(f"Unrecognized condition: {name!r}")
 
     def build_matrix(self, conditions: list[str] | None = None) -> pd.DataFrame:
+        # Same as MorphogenParser.build_matrix — kept for duck-type compatibility
         conditions = conditions or self.conditions
         rows = [self.parse(c) for c in conditions]
         return pd.DataFrame(rows, index=conditions, columns=MORPHOGEN_COLUMNS)

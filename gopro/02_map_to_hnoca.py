@@ -456,6 +456,10 @@ if __name__ == "__main__":
                         help="obs column identifying experimental conditions")
     parser.add_argument("--batch-key", type=str, default="sample",
                         help="obs column identifying batch/sample")
+    parser.add_argument("--no-gruffi", action="store_true",
+                        help="Skip Gruffi cell stress filtering")
+    parser.add_argument("--gruffi-threshold", type=float, default=0.15,
+                        help="Gruffi stress score threshold for cluster filtering")
     args = parser.parse_args()
 
     start = time.time()
@@ -486,6 +490,15 @@ if __name__ == "__main__":
 
     # Filter to quality cells
     query = filter_quality_cells(query)
+
+    # Gruffi stress filtering (optional)
+    if not args.no_gruffi:
+        from gopro.gruffi_qc import filter_stressed_cells
+        query = filter_stressed_cells(
+            query,
+            threshold=args.gruffi_threshold,
+            condition_key=args.condition_key,
+        )
 
     # Prepare query
     query = prepare_query_for_scpoli(query, ref, batch_column=args.batch_key)

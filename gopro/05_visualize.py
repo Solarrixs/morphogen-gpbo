@@ -10,15 +10,11 @@ Output:
   - data/report_round{N}.html
 """
 
-import sys
 from pathlib import Path
 
-# Ensure project root is on sys.path when run as a script
-_project_root = str(Path(__file__).resolve().parent.parent)
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
+from gopro.config import DATA_DIR, get_logger
 
-from gopro.config import DATA_DIR
+logger = get_logger(__name__)
 
 
 if __name__ == "__main__":
@@ -40,5 +36,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     output_path = Path(args.output) if args.output else None
+    logger.info("Starting visualization report generation")
     report_path = generate_report(Path(args.data_dir), output_path)
-    print(f"Report generated: {report_path}")
+    logger.info("Report generated: %s", report_path)

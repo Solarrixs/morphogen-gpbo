@@ -4,10 +4,11 @@ import sys
 import importlib.util
 from pathlib import Path
 
-# Add gopro directory to Python path
+# Add gopro directory and tests directory to Python path
 GOPRO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(GOPRO_DIR))
 sys.path.insert(0, str(GOPRO_DIR.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 
 
 def _import_pipeline_module(name: str):

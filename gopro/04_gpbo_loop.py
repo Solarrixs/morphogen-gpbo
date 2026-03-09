@@ -66,6 +66,10 @@ MORPHOGEN_BOUNDS_LITERATURE = {
     "purmorphamine_uM": (0.0, 2.0),
     "cyclopamine_uM":   (0.0, 10.0),
     "log_harvest_day":  (np.log(7), np.log(120)),  # Day 7 to Day 120
+    "BDNF_uM":          (0.0, ng_mL_to_uM(40.0, PROTEIN_MW_KDA["BDNF"])),
+    "NT3_uM":           (0.0, ng_mL_to_uM(40.0, PROTEIN_MW_KDA["NT3"])),
+    "cAMP_uM":          (0.0, 100.0),             # dibutyryl-cAMP 0-100 µM
+    "AscorbicAcid_uM":  (0.0, 400.0),             # ascorbic acid 2-phosphate 0-400 µM
 }
 
 # Keep legacy name for backwards compatibility
@@ -82,7 +86,7 @@ def _compute_active_bounds(
     Args:
         X: Training morphogen matrix (without fidelity column).
         columns: Morphogen column names.
-        padding: Fraction of training range to add as padding (default 50%).
+        padding: Fraction of training range to add as padding (default 5%).
 
     Returns:
         Tuple of (bounds_dict, active_columns) where zero-variance columns
@@ -641,16 +645,18 @@ def run_gpbo_loop(
     # Build training set (potentially multi-fidelity)
     logger.info("Building training set...")
 
+    # Always load real data first (used for bounds and as base training set)
+    X_real, Y_real = build_training_set(fractions_csv, morphogen_csv)
+
     if virtual_sources:
         # Multi-fidelity: combine real + virtual data
         all_sources = [(fractions_csv, morphogen_csv, 1.0)] + virtual_sources
         X, Y = merge_multi_fidelity_data(all_sources)
     else:
-        X, Y = build_training_set(fractions_csv, morphogen_csv)
+        X, Y = X_real, Y_real
 
     # Compute active bounds from REAL data only (not virtual), to prevent
     # GP from exploring far outside the experimentally tested range
-    X_real = build_training_set(fractions_csv, morphogen_csv)[0]
     active_bounds, active_cols = _compute_active_bounds(X_real, list(X.columns))
 
     # Filter X to active columns only

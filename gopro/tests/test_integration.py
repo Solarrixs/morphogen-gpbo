@@ -4,24 +4,15 @@ import pytest
 import numpy as np
 import pandas as pd
 from pathlib import Path
-import importlib.util
 import tempfile
 
-GOPRO_DIR = Path(__file__).parent.parent
+from conftest import _import_pipeline_module
 
-
-def _load(name):
-    spec = importlib.util.spec_from_file_location(name, str(GOPRO_DIR / f"{name}.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-step01 = _load("01_load_and_convert_data")
-step02 = _load("02_map_to_hnoca")
-step03 = _load("03_fidelity_scoring")
-step04 = _load("04_gpbo_loop")
-morphogen_parser = _load("morphogen_parser")
+step01 = _import_pipeline_module("01_load_and_convert_data")
+step02 = _import_pipeline_module("02_map_to_hnoca")
+step03 = _import_pipeline_module("03_fidelity_scoring")
+step04 = _import_pipeline_module("04_gpbo_loop")
+morphogen_parser = _import_pipeline_module("morphogen_parser")
 
 
 class TestMorphogenParserIntegration:
@@ -41,7 +32,7 @@ class TestMorphogenParserIntegration:
             "SAG-d16-21", "SAG-d6-11", "SAG1000", "SAG250",
         ]
         matrix = morphogen_parser.build_morphogen_matrix(conditions)
-        assert matrix.shape == (46, 20)
+        assert matrix.shape == (46, 24)
         assert not matrix.isnull().any().any()
 
     def test_all_conditions_have_harvest_day(self):

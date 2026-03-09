@@ -5,21 +5,12 @@ import pytest
 import numpy as np
 import pandas as pd
 from pathlib import Path
-import importlib.util
 
-GOPRO_DIR = Path(__file__).parent.parent
+from conftest import _import_pipeline_module
 
-
-def _load(name):
-    spec = importlib.util.spec_from_file_location(name, str(GOPRO_DIR / f"{name}.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-step04 = _load("04_gpbo_loop")
-step05 = _load("05_cellrank2_virtual")
-step06 = _load("06_cellflow_virtual")
+step04 = _import_pipeline_module("04_gpbo_loop")
+step05 = _import_pipeline_module("05_cellrank2_virtual")
+step06 = _import_pipeline_module("06_cellflow_virtual")
 
 
 # ==============================================================================
@@ -181,7 +172,7 @@ class TestCellFlowConstants:
 
     def test_pathway_values_valid(self):
         valid_pathways = {"WNT", "BMP", "SHH", "RA", "FGF", "TGFb",
-                         "Notch", "EGF", "unknown"}
+                         "Notch", "EGF", "neurotrophin", "unknown"}
         for col, pathway in step06.MORPHOGEN_PATHWAYS.items():
             assert pathway in valid_pathways, (
                 f"Invalid pathway '{pathway}' for {col}"

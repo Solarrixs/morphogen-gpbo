@@ -1,0 +1,44 @@
+{
+  "glycolysis": [
+    "ALDOA", "ALDOB", "ALDOC", "BPGM", "ENO1", "ENO2", "ENO3",
+    "GAPDH", "GAPDHS", "GPI", "HK1", "HK2", "HK3", "HKDC1",
+    "LDHA", "LDHB", "LDHC", "PFKL", "PFKM", "PFKP", "PFKFB1",
+    "PFKFB2", "PFKFB3", "PFKFB4", "PGAM1", "PGAM2", "PGAM4",
+    "PGK1", "PGK2", "PKM", "PKLR", "TPI1", "GCK", "ADPGK",
+    "GALM", "FBP1", "FBP2", "PCK1", "PCK2", "G6PD", "PGLS",
+    "PGD", "SLC2A1", "SLC2A3", "SLC2A4", "SLC16A3", "PDK1",
+    "PDK2", "PDK3", "PDK4", "PDHB", "PDHA1", "DLAT", "DLD",
+    "MPC1", "MPC2", "PFK2", "TIGAR"
+  ],
+  "er_stress": [
+    "ATF4", "ATF6", "ATF6B", "DDIT3", "DDIT4", "DNAJB9", "DNAJB11",
+    "DNAJC3", "ERN1", "ERO1A", "ERO1B", "HSPA5", "HSP90B1",
+    "HYOU1", "PDIA3", "PDIA4", "PDIA6", "PPP1R15A", "SDF2L1",
+    "SERP1", "SYVN1", "TRIB3", "XBP1", "CALR", "CANX", "CREB3",
+    "CREB3L1", "CREB3L2", "CREB3L3", "CREB3L4", "EIF2AK3",
+    "EIF2S1", "GOSR2", "HERPUD1", "KDELR1", "KDELR2", "KDELR3",
+    "LMAN1", "MANF", "OS9", "SEC61A1", "SEC61B", "SEC61G",
+    "SELENOS", "SSR1", "SSR3", "SSR4", "VAPB"
+  ],
+  "upr": [
+    "ATF4", "ATF6", "DDIT3", "DNAJB9", "DNAJB11", "DNAJC3",
+    "EDEM1", "EDEM2", "EDEM3", "ERN1", "ERO1A", "HSPA5",
+    "HSP90B1", "HERPUD1", "HYOU1", "MANF", "OS9", "PDIA4",
+    "PDIA6", "PPP1R15A", "SEL1L", "SYVN1", "TRIB3", "XBP1",
+    "CALR", "CANX", "CREB3", "DERL1", "DERL2", "DERL3",
+    "EIF2AK3", "EIF2S1", "ERLEC1", "FICD", "GANAB", "LMAN1",
+    "MBTPS1", "MBTPS2", "NFE2L2", "PARK7", "RNF5", "SEC61A1",
+    "SEC61B", "SERP1", "SDF2L1", "SSR1", "UBE2J1", "UGGT1",
+    "UGGT2", "VCP", "VIMP", "WFS1"
+  ],
+  "apoptosis": [
+    "BAX", "BAK1", "BCL2", "BCL2L1", "BCL2L11", "BID", "BIK",
+    "BAD", "BBC3", "PMAIP1", "MCL1", "CASP3", "CASP6", "CASP7",
+    "CASP8", "CASP9", "CASP10", "APAF1", "CYCS", "DIABLO",
+    "XIAP", "BIRC2", "BIRC3", "BIRC5", "FADD", "FAS", "FASLG",
+    "TNFRSF10A", "TNFRSF10B", "TRADD", "TRAF2", "RIPK1",
+    "DFFA", "DFFB", "ENDOG", "AIFM1", "AIFM2", "TP53", "MDM2",
+    "CDKN1A", "GADD45A", "GADD45B", "GADD45G", "BNIP3",
+    "BNIP3L", "HRK", "BMF", "BOK"
+  ]
+}

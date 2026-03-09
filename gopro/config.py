@@ -13,19 +13,11 @@ from pathlib import Path
 
 # --- Paths ---
 PROJECT_DIR = Path(os.environ.get("GPBO_PROJECT_DIR", str(Path(__file__).resolve().parent.parent)))
-if isinstance(PROJECT_DIR, str):
-    PROJECT_DIR = Path(PROJECT_DIR)
-
 DATA_DIR = Path(os.environ.get("GPBO_DATA_DIR", str(PROJECT_DIR / "data")))
-if isinstance(DATA_DIR, str):
-    DATA_DIR = Path(DATA_DIR)
-
 MODEL_DIR = Path(os.environ.get(
     "GPBO_MODEL_DIR",
     str(PROJECT_DIR / "data" / "neural_organoid_atlas" / "supplemental_files" / "scpoli_model_params"),
 ))
-if isinstance(MODEL_DIR, str):
-    MODEL_DIR = Path(MODEL_DIR)
 
 # --- Morphogen columns (canonical ordering, all concentrations in µM) ---
 MORPHOGEN_COLUMNS: list[str] = [
@@ -111,3 +103,8 @@ def get_logger(name: str) -> logging.Logger:
     level = os.environ.get("GPBO_LOG_LEVEL", "INFO").upper()
     logger.setLevel(getattr(logging, level, logging.INFO))
     return logger
+
+# --- Gruffi stress-filtering defaults ---
+GRUFFI_DEFAULT_THRESHOLD = 0.15
+GRUFFI_DEFAULT_RESOLUTION = 2.0
+GRUFFI_MIN_CELLS_PER_CONDITION = 50

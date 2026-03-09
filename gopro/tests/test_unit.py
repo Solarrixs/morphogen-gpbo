@@ -5,24 +5,14 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import sys
-import importlib.util
 import plotly.graph_objects as go
 
-# Import pipeline modules using spec loader (handles numeric prefixes)
-GOPRO_DIR = Path(__file__).parent.parent
+from conftest import _import_pipeline_module
 
-
-def _load(name):
-    spec = importlib.util.spec_from_file_location(name, str(GOPRO_DIR / f"{name}.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-step01 = _load("01_load_and_convert_data")
-step02 = _load("02_map_to_hnoca")
-step03 = _load("03_fidelity_scoring")
-step04 = _load("04_gpbo_loop")
+step01 = _import_pipeline_module("01_load_and_convert_data")
+step02 = _import_pipeline_module("02_map_to_hnoca")
+step03 = _import_pipeline_module("03_fidelity_scoring")
+step04 = _import_pipeline_module("04_gpbo_loop")
 
 
 class TestILRTransform:
@@ -589,9 +579,9 @@ class TestConfig:
         importlib.reload(gopro.config)
 
     def test_morphogen_columns_length(self):
-        """MORPHOGEN_COLUMNS has exactly 20 entries."""
+        """MORPHOGEN_COLUMNS has exactly 24 entries."""
         from gopro.config import MORPHOGEN_COLUMNS
-        assert len(MORPHOGEN_COLUMNS) == 20
+        assert len(MORPHOGEN_COLUMNS) == 24
 
     def test_morphogen_columns_canonical_order(self):
         """Indices 16-18 are Dorsomorphin, purmorphamine, cyclopamine."""
@@ -643,16 +633,20 @@ class TestSAGSecondaryScreen:
     """Tests for SAG secondary screen condition parsing."""
 
     def test_sag_50nm_vector(self):
-        """SAG_50nM: CHIR=1.5, SAG=0.05, harvest=Day70."""
-        from gopro.morphogen_parser import parse_condition_name
+        """SAG_50nM: CHIR=1.5, SAG=0.05, harvest=Day70, plus base media."""
+        from gopro.morphogen_parser import parse_condition_name, _BASE_MEDIA
         import math
         vec = parse_condition_name("SAG_50nM")
         assert vec["CHIR99021_uM"] == 1.5
         assert vec["SAG_uM"] == pytest.approx(0.05)
         assert vec["log_harvest_day"] == pytest.approx(math.log(70))
-        # All other morphogens should be 0
+        # Base media morphogens should have their default values
+        for col, val in _BASE_MEDIA.items():
+            assert vec[col] == pytest.approx(val), f"{col} should be {val}"
+        # All other morphogens (not CHIR, SAG, harvest, or base media) should be 0
+        non_zero_cols = {"CHIR99021_uM", "SAG_uM", "log_harvest_day"} | set(_BASE_MEDIA.keys())
         for col in MORPHOGEN_COLUMNS:
-            if col not in ("CHIR99021_uM", "SAG_uM", "log_harvest_day"):
+            if col not in non_zero_cols:
                 assert vec[col] == 0.0, f"{col} should be 0"
 
     def test_sag_2um_vector(self):
@@ -675,7 +669,7 @@ class TestSAGSecondaryScreen:
         """build_morphogen_matrix works for SAG secondary conditions."""
         from gopro.morphogen_parser import build_morphogen_matrix, SAG_SECONDARY_CONDITIONS
         df = build_morphogen_matrix(SAG_SECONDARY_CONDITIONS)
-        assert df.shape == (2, 20)
+        assert df.shape == (2, 24)
         assert df.loc["SAG_50nM", "CHIR99021_uM"] == 1.5
         assert df.loc["SAG_2uM", "SAG_uM"] == pytest.approx(2.0)
 
@@ -802,7 +796,7 @@ class TestMorphogenParserClass:
         from gopro.morphogen_parser import AminKelleyParser
         parser = AminKelleyParser()
         df = parser.build_matrix()
-        assert df.shape == (46, 20)
+        assert df.shape == (46, 24)
 
     def test_combined_parser(self):
         """CombinedParser merges multiple parsers."""
@@ -810,7 +804,7 @@ class TestMorphogenParserClass:
         combined = CombinedParser([AminKelleyParser(), SAGSecondaryParser()])
         assert len(combined.conditions) == 48
         df = combined.build_matrix()
-        assert df.shape == (48, 20)
+        assert df.shape == (48, 24)
 
 
 class TestNoHardcodedPaths:
@@ -997,6 +991,190 @@ class TestSoftKNNFractions:
         )
         assert "predicted_annot_level_2" in results.columns
         assert "annot_level_2_confidence" in results.columns
+
+
+class TestGruffiStressFiltering:
+    """Tests for Gruffi-inspired stress cell filtering."""
+
+    def test_fetch_go_gene_sets(self):
+        """Bundled JSON contains expected pathways with >20 genes each."""
+        from gopro.gruffi_qc import fetch_go_gene_sets
+        gene_sets = fetch_go_gene_sets()
+        for key in ("glycolysis", "er_stress", "upr"):
+            assert key in gene_sets, f"Missing pathway: {key}"
+            assert len(gene_sets[key]) > 20, f"{key} has only {len(gene_sets[key])} genes"
+
+    def test_score_stress_pathways_scanpy(self):
+        """Scanpy scoring adds gruffi_stress_score; stressed cells score higher."""
+        import anndata
+        import scipy.sparse as sp
+
+        np.random.seed(42)
+        n_cells, n_genes = 100, 200
+        # Known glycolysis genes to plant in the first few columns
+        stress_genes = ["ALDOA", "ENO1", "GAPDH", "PKM", "LDHA", "PGK1",
+                        "TPI1", "GPI", "PFKL", "HK1"]
+        other_genes = [f"Gene_{i}" for i in range(n_genes - len(stress_genes))]
+        var_names = stress_genes + other_genes
+
+        X = sp.random(n_cells, n_genes, density=0.1, format="csr", dtype=np.float32)
+        X = X.toarray()
+        # Make ~20 cells have high expression in stress genes
+        stressed_idx = np.arange(20)
+        X[stressed_idx, :len(stress_genes)] = np.random.uniform(3.0, 6.0,
+            size=(len(stressed_idx), len(stress_genes)))
+
+        adata = anndata.AnnData(X=sp.csr_matrix(X))
+        adata.var_names = var_names
+        adata.obs_names = [f"cell_{i}" for i in range(n_cells)]
+
+        gene_sets = {"glycolysis": stress_genes}
+        from gopro.gruffi_qc import score_stress_pathways
+        score_stress_pathways(adata, gene_sets=gene_sets, method="scanpy")
+
+        assert "gruffi_stress_score" in adata.obs.columns
+        stressed_scores = adata.obs["gruffi_stress_score"].values[stressed_idx]
+        unstressed_scores = adata.obs["gruffi_stress_score"].values[20:]
+        assert np.mean(stressed_scores) > np.mean(unstressed_scores)
+
+    def test_identify_stressed_clusters(self):
+        """Clusters with high median stress score are flagged."""
+        import anndata
+        import scanpy as sc
+
+        np.random.seed(42)
+        n_cells = 100
+        # Create two groups: 20 stressed, 80 clean
+        X = np.random.randn(n_cells, 50).astype(np.float32)
+        # Make stressed cells cluster together by shifting their features
+        X[:20] += 5.0
+
+        adata = anndata.AnnData(X=X)
+        adata.obs_names = [f"cell_{i}" for i in range(n_cells)]
+        # Pre-assign stress scores
+        scores = np.full(n_cells, 0.01)
+        scores[:20] = 0.5
+        adata.obs["gruffi_stress_score"] = scores
+
+        sc.pp.pca(adata)
+        sc.pp.neighbors(adata)
+
+        from gopro.gruffi_qc import identify_stressed_clusters
+        mask = identify_stressed_clusters(adata, threshold=0.15, resolution=2.0)
+
+        assert mask.dtype == bool
+        assert mask.shape == (n_cells,)
+        # Most of the flagged cells should be from the stressed group
+        flagged_stressed = mask[:20].sum()
+        flagged_clean = mask[20:].sum()
+        assert flagged_stressed > flagged_clean
+
+    def test_filter_stressed_cells_removes_stressed(self):
+        """End-to-end: stressed cells are removed and gruffi_is_stressed exists."""
+        import anndata
+
+        np.random.seed(42)
+        n_cells, n_genes = 100, 200
+        stress_genes = ["ALDOA", "ENO1", "GAPDH", "PKM", "LDHA", "PGK1",
+                        "TPI1", "GPI", "PFKL", "HK1"]
+        other_genes = [f"Gene_{i}" for i in range(n_genes - len(stress_genes))]
+        var_names = stress_genes + other_genes
+
+        X = np.random.rand(n_cells, n_genes).astype(np.float32) * 0.1
+        # Make 20 cells highly express stress genes
+        X[:20, :len(stress_genes)] = np.random.uniform(3.0, 6.0,
+            size=(20, len(stress_genes)))
+
+        adata = anndata.AnnData(X=X)
+        adata.var_names = var_names
+        adata.obs_names = [f"cell_{i}" for i in range(n_cells)]
+        adata.obs["condition"] = np.array(["A"] * 50 + ["B"] * 50)
+
+        from gopro.gruffi_qc import filter_stressed_cells
+        filtered = filter_stressed_cells(adata, threshold=0.15, method="scanpy",
+                                          min_cells_per_condition=10)
+
+        assert filtered.n_obs < n_cells
+        assert "gruffi_is_stressed" in filtered.obs.columns
+
+    def test_filter_stressed_cells_min_cells_safety(self):
+        """Safety floor: conditions keep at least min_cells_per_condition cells."""
+        import anndata
+
+        np.random.seed(42)
+        n_cells, n_genes = 60, 200
+        stress_genes = ["ALDOA", "ENO1", "GAPDH", "PKM", "LDHA", "PGK1",
+                        "TPI1", "GPI", "PFKL", "HK1"]
+        other_genes = [f"Gene_{i}" for i in range(n_genes - len(stress_genes))]
+        var_names = stress_genes + other_genes
+
+        X = np.random.rand(n_cells, n_genes).astype(np.float32) * 0.1
+        # Make 40 out of 60 cells stressed
+        X[:40, :len(stress_genes)] = np.random.uniform(3.0, 6.0,
+            size=(40, len(stress_genes)))
+
+        adata = anndata.AnnData(X=X)
+        adata.var_names = var_names
+        adata.obs_names = [f"cell_{i}" for i in range(n_cells)]
+        adata.obs["condition"] = "only_cond"
+
+        from gopro.gruffi_qc import filter_stressed_cells
+        filtered = filter_stressed_cells(adata, threshold=0.15, method="scanpy",
+                                          min_cells_per_condition=50)
+
+        # Safety floor should rescue cells so at least 50 remain
+        assert filtered.n_obs >= 50
+
+    def test_filter_stressed_cells_no_stress(self):
+        """Clean data: all cells retained when none are stressed."""
+        import anndata
+
+        np.random.seed(42)
+        n_cells, n_genes = 100, 200
+        # All low expression — no stress signal
+        X = np.random.rand(n_cells, n_genes).astype(np.float32) * 0.01
+
+        adata = anndata.AnnData(X=X)
+        adata.var_names = [f"Gene_{i}" for i in range(n_genes)]
+        adata.obs_names = [f"cell_{i}" for i in range(n_cells)]
+        adata.obs["condition"] = "clean"
+
+        # Provide gene sets with genes not in var_names so scoring yields 0
+        gene_sets = {"glycolysis": ["NOT_A_GENE_1", "NOT_A_GENE_2"]}
+
+        from gopro.gruffi_qc import score_stress_pathways, filter_stressed_cells
+        # score_stress_pathways with <3 overlapping genes will set scores to 0
+        # filter_stressed_cells calls score internally, so we use it directly
+        # but we need the gene sets to produce zero scores — use method=scanpy
+        # with genes absent from var_names
+        filtered = filter_stressed_cells(adata, threshold=0.15, method="scanpy",
+                                          min_cells_per_condition=10)
+        assert filtered.n_obs == n_cells
+
+    def test_compute_stress_fraction_per_condition(self):
+        """Stress fraction computation returns correct per-condition values."""
+        import anndata
+
+        n_cells = 100
+        adata = anndata.AnnData(X=np.zeros((n_cells, 5)))
+        adata.obs["condition"] = np.array(["A"] * 60 + ["B"] * 40)
+        # 10 stressed in A, 20 stressed in B
+        stressed = np.zeros(n_cells, dtype=bool)
+        stressed[50:60] = True   # 10 in A
+        stressed[60:80] = True   # 20 in B
+        adata.obs["gruffi_is_stressed"] = stressed
+
+        from gopro.gruffi_qc import compute_stress_fraction_per_condition
+        df = compute_stress_fraction_per_condition(adata, condition_key="condition")
+
+        assert "condition" in df.columns
+        assert "fraction_stressed" in df.columns
+        row_a = df[df["condition"] == "A"].iloc[0]
+        row_b = df[df["condition"] == "B"].iloc[0]
+        assert row_a["n_stressed"] == pytest.approx(10)
+        assert row_a["fraction_stressed"] == pytest.approx(10 / 60)
+        assert row_b["n_stressed"] == pytest.approx(20)
+        assert row_b["fraction_stressed"] == pytest.approx(20 / 40)
 
 
 class TestComputeSoftCellTypeFractions:

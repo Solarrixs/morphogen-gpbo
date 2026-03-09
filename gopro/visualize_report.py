@@ -19,13 +19,17 @@ Output:
 
 from __future__ import annotations
 
-import glob
+import logging
 import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+
+from gopro.config import get_logger
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -47,11 +51,9 @@ def discover_rounds(data_dir: Path) -> list[int]:
     Returns:
         Sorted list of round integers found.
     """
-    pattern = str(data_dir / "gp_recommendations_round*.csv")
-    files = glob.glob(pattern)
     rounds = []
-    for f in files:
-        m = re.search(r"round(\d+)\.csv$", f)
+    for f in data_dir.glob("gp_recommendations_round*.csv"):
+        m = re.search(r"round(\d+)\.csv$", f.name)
         if m:
             rounds.append(int(m.group(1)))
     return sorted(rounds)
@@ -846,6 +848,7 @@ def generate_report(
         Path to the generated HTML report.
     """
     data_dir = Path(data_dir)
+    logger.info("Generating report from %s", data_dir)
 
     # Discover rounds
     rounds = discover_rounds(data_dir)
@@ -854,8 +857,10 @@ def generate_report(
             f"No gp_recommendations_round*.csv found in {data_dir}"
         )
     current_round = max(rounds)
+    logger.info("Found %d round(s), latest is round %d", len(rounds), current_round)
 
     # Load data
+    logger.info("Loading pipeline data files")
     fidelity_df = load_fidelity_report(data_dir / "fidelity_report.csv")
     morphogen_df = load_morphogen_matrix(data_dir / "morphogen_matrix_amin_kelley.csv")
     recs = load_recommendations(data_dir / f"gp_recommendations_round{current_round}.csv")
@@ -872,6 +877,7 @@ def generate_report(
     sections: dict[str, tuple[str, go.Figure | str]] = {}
 
     # 1. Summary text
+    logger.info("Building section: Summary")
     summary = generate_summary_text(fidelity_df, diagnostics, len(recs))
     sections["Summary"] = (
         "",
@@ -879,6 +885,7 @@ def generate_report(
     )
 
     # 2. Convergence trend — cumulative best up to each round
+    logger.info("Building section: Convergence")
     best_per_round = {}
     if "round" in fidelity_df.columns:
         cumulative_best = -np.inf
@@ -900,6 +907,7 @@ def generate_report(
 
     # 3. Morphogen-space PCA — use all 20 training dimensions,
     #    zero-pad recommendations for missing columns
+    logger.info("Building section: Morphogen Space PCA")
     try:
         all_morph_cols = list(morphogen_df.columns)
         if all_morph_cols and len(morphogen_df) > 2:
@@ -932,11 +940,13 @@ def generate_report(
                 "", _placeholder_figure("Insufficient data for morphogen PCA"),
             )
     except Exception as e:
+        logger.warning("Morphogen Space PCA failed: %s", e)
         sections["Morphogen Space"] = (
             "", _placeholder_figure(f"PCA error: {e}"),
         )
 
     # 4. Cell-space UMAP
+    logger.info("Building section: Cell Space UMAP")
     h5ad_path = data_dir / "amin_kelley_mapped.h5ad"
     cell_umap_desc = (
         "UMAP of individual cells from the scRNA-seq data, colored by predicted cell type "
@@ -958,6 +968,7 @@ def generate_report(
                     _placeholder_figure("No UMAP coordinates in h5ad file"),
                 )
         except Exception as e:
+            logger.warning("Cell Space UMAP failed: %s", e)
             sections["Cell Space UMAP"] = (
                 cell_umap_desc,
                 _placeholder_figure(f"h5ad error: {e}"),
@@ -969,6 +980,7 @@ def generate_report(
         )
 
     # 5. Plate map
+    logger.info("Building section: Plate Map")
     sections["Plate Map"] = (
         "24-well plate layout for the next recommended experiment. "
         "Hover over each well to see the exact morphogen concentrations. "
@@ -977,6 +989,7 @@ def generate_report(
     )
 
     # 6. Morphogen importance
+    logger.info("Building section: Morphogen Importance")
     lengthscales = diagnostics.get("lengthscales")
     if lengthscales:
         imp_desc = (
@@ -997,6 +1010,7 @@ def generate_report(
     )
 
     # 7. Leaderboard
+    logger.info("Building section: Leaderboard")
     sections["Leaderboard"] = (
         "Top conditions ranked by composite fidelity. Composite fidelity combines: "
         "<b>on_target_fraction</b> (fraction of cells assigned to the dominant brain region), "
@@ -1006,6 +1020,7 @@ def generate_report(
     )
 
     # 8. Cell type composition
+    logger.info("Building section: Cell Type Composition")
     sort_order = fidelity_df.sort_values("composite_fidelity", ascending=False).index.tolist()
     if labels_df is not None:
         sections["Cell Type Composition (Level 2)"] = (
@@ -1032,4 +1047,6 @@ def generate_report(
     if output_path is None:
         output_path = data_dir / f"report_round{current_round}.html"
 
-    return assemble_html_report(sections, output_path)
+    result = assemble_html_report(sections, output_path)
+    logger.info("Report written to %s", result)
+    return result

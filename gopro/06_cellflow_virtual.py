@@ -72,6 +72,10 @@ MORPHOGEN_IDENTITIES: dict[str, tuple[str, str]] = {
     "purmorphamine_uM": ("small_molecule", "purmorphamine"),
     "cyclopamine_uM": ("small_molecule", "cyclopamine"),
     "Dorsomorphin_uM": ("small_molecule", "Dorsomorphin"),
+    "BDNF_uM": ("protein", "BDNF"),
+    "NT3_uM": ("protein", "NT3"),
+    "cAMP_uM": ("small_molecule", "dibutyryl_cAMP"),
+    "AscorbicAcid_uM": ("small_molecule", "ascorbic_acid_2_phosphate"),
 }
 
 # Signaling pathway annotations for morphogens
@@ -95,6 +99,10 @@ MORPHOGEN_PATHWAYS: dict[str, str] = {
     "purmorphamine_uM": "SHH",
     "cyclopamine_uM": "SHH",
     "Dorsomorphin_uM": "BMP",
+    "BDNF_uM": "neurotrophin",
+    "NT3_uM": "neurotrophin",
+    "cAMP_uM": "unknown",
+    "AscorbicAcid_uM": "unknown",
 }
 
 # SMILES strings for small molecule morphogens (for RDKit fingerprints)

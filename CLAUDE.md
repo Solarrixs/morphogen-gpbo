@@ -22,7 +22,8 @@ morphogen-gpbo/
 │   ├── 05_cellrank2_virtual.py         # CellRank 2 temporal projection via moscot
 │   ├── 05_visualize.py                 # CLI wrapper → generates interactive HTML report
 │   ├── 06_cellflow_virtual.py          # CellFlow virtual protocol screening
-│   ├── morphogen_parser.py             # Parse condition names → 20D concentration vectors (48 total)
+│   ├── gruffi_qc.py                    # Gruffi cell stress filtering (GO-term pathway scoring)
+│   ├── morphogen_parser.py             # Parse condition names → 24D concentration vectors (48 total)
 │   ├── qc_cross_screen.py             # Cross-screen QC validation (cosine similarity)
 │   ├── convert_rds_to_h5ad.py         # RDS→h5ad conversion via R subprocess (requires R 4.2+)
 │   ├── visualize_report.py             # Plotly report generation (called by 05_visualize.py)
@@ -49,7 +50,7 @@ morphogen-gpbo/
 Centralized configuration — import paths and constants from here instead of defining locally.
 
 - `PROJECT_DIR`, `DATA_DIR`, `MODEL_DIR` — derived from env vars (`GPBO_PROJECT_DIR`, `GPBO_DATA_DIR`, `GPBO_MODEL_DIR`) or auto-detected from `__file__`
-- `MORPHOGEN_COLUMNS` — canonical list of 20 morphogen dimension names (all concentrations in µM)
+- `MORPHOGEN_COLUMNS` — canonical list of 24 morphogen dimension names (all concentrations in µM)
 - `PROTEIN_MW_KDA` — molecular weights (kDa) for recombinant protein morphogens
 - `ng_mL_to_uM(ng_per_mL, mw_kda)`, `nM_to_uM(nM)` — unit conversion functions
 - `ANNOT_LEVEL_1`, `ANNOT_LEVEL_2`, `ANNOT_REGION`, `ANNOT_LEVEL_3` — HNOCA annotation column names
@@ -141,9 +142,9 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 **Data flow:** Raw scRNA-seq (GEO) → AnnData → scArches atlas mapping → cell type fractions per condition → fidelity scoring → GP-BO recommendation of next 24 conditions → interactive visualization report. Multiple datasets (primary screen + SAG secondary screen) are mapped independently, producing separate CSVs that are merged at GP fitting time.
 
 **Key domain concepts:**
-- **20 morphogen dimensions** (`MORPHOGEN_COLUMNS` in `config.py`): WNT, BMP, SHH, RA, FGF, Notch, EGF signaling + harvest time. All concentrations in µM.
+- **24 morphogen dimensions** (`MORPHOGEN_COLUMNS` in `config.py`): WNT, BMP, SHH, RA, FGF, Notch, EGF signaling + harvest time + 4 base media columns (BDNF_uM, NT3_uM, cAMP_uM, AscorbicAcid_uM). All concentrations in µM.
 - **48 parsed conditions**: 46 primary screen (Amin/Kelley, Day 72) + 2 SAG secondary screen (SAG_50nM, SAG_2uM, Day 70). SAG_250nM and SAG_1uM are near-duplicates of primary screen and are excluded.
-- **Morphogen parser class hierarchy**: `MorphogenParser` base class → `AminKelleyParser` (46 conditions, Day 72), `SAGSecondaryParser` (2 conditions, Day 70), `CombinedParser` (merges parsers). Legacy functions (`parse_condition_name`, `build_morphogen_matrix`, `ALL_CONDITIONS`) remain for backward compatibility.
+- **Morphogen parser class hierarchy**: `MorphogenParser` base class → `AminKelleyParser` (46 conditions, Day 72), `SAGSecondaryParser` (2 conditions, Day 70), `CombinedParser` (merges parsers). `_BASE_MEDIA` dict provides default base media concentrations (BDNF, NT3, cAMP, Ascorbic Acid) appended to all 24-column vectors. Legacy functions (`parse_condition_name`, `build_morphogen_matrix`, `ALL_CONDITIONS`) remain for backward compatibility.
 - **scArches/scPoli architecture surgery**: Transfer learning to map query organoid cells onto HNOCA reference atlas. Step 02 supports multiple datasets via `--input`/`--output-prefix` CLI args.
 - **Cell filtering**: Primary screen uses `quality == 'keep'`; SAG screen uses `ClusterLabel != 'filtered'` (handled automatically by `filter_quality_cells()`).
 - **Two-tier fidelity scoring** (step 03): Tier 1 = brain region assignment, Tier 2 = subtype fidelity via cosine similarity to Braun fetal brain
@@ -162,7 +163,8 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 ## Critical Files Reference
 
 - `gopro/config.py` — `MORPHOGEN_COLUMNS`, `PROTEIN_MW_KDA`, `nM_to_uM`, `ng_mL_to_uM`, `get_logger`
-- `gopro/morphogen_parser.py` — `parse_condition_name()`, `build_morphogen_matrix()`, `ALL_CONDITIONS`, `SAG_SECONDARY_CONDITIONS`, `AminKelleyParser`, `SAGSecondaryParser`, `CombinedParser`
+- `gopro/gruffi_qc.py` — `score_gruffi()`, Gruffi cell stress filtering via GO-term pathway scoring
+- `gopro/morphogen_parser.py` — `parse_condition_name()`, `build_morphogen_matrix()`, `ALL_CONDITIONS`, `SAG_SECONDARY_CONDITIONS`, `_BASE_MEDIA`, `AminKelleyParser`, `SAGSecondaryParser`, `CombinedParser`
 - `gopro/02_map_to_hnoca.py` — `filter_quality_cells()`, `prepare_query_for_scpoli()`, `map_to_hnoca_scpoli()`, `transfer_labels_knn()`, `compute_cell_type_fractions()`
 - `gopro/03_fidelity_scoring.py` — `score_all_conditions()`, `compute_composite_fidelity()`, `compute_rss()`, `build_hnoca_to_braun_label_map()`, `align_composition_to_braun()`
 - `gopro/04_gpbo_loop.py` — `build_training_set()`, `merge_multi_fidelity_data()`, `run_gpbo_loop()`, `fit_gp_botorch()`, `recommend_next_experiments()`, `ilr_transform()`, `ilr_inverse()`, `_compute_active_bounds()`
