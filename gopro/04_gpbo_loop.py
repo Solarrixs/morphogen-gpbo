@@ -236,21 +236,67 @@ def build_training_set(
     return X, Y
 
 
+def _extract_lengthscales(model, n_input_dims: int):
+    """Extract lengthscales from a fitted GP model.
+
+    Handles SingleTaskGP (MAP), SaasFullyBayesianSingleTaskGP,
+    and ModelListGP containing SAAS models.
+
+    Returns:
+        1-D numpy array of lengthscales, or None.
+    """
+    try:
+        # ModelListGP of SAAS models — median across sub-models
+        if hasattr(model, 'models'):
+            all_ls = []
+            for sub_model in model.models:
+                if hasattr(sub_model, 'median_lengthscale'):
+                    ls = sub_model.median_lengthscale.detach().cpu().numpy()
+                    all_ls.append(ls)
+            if all_ls:
+                return np.median(np.stack(all_ls), axis=0)
+
+        # Single SAAS model
+        if hasattr(model, 'median_lengthscale'):
+            return model.median_lengthscale.detach().cpu().numpy().flatten()
+
+        # Standard GP (MAP)
+        if hasattr(model, 'covar_module'):
+            if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
+                ls = model.covar_module.base_kernel.lengthscale
+                if ls is not None:
+                    return ls.detach().cpu().numpy().flatten()
+            elif hasattr(model.covar_module, 'lengthscale'):
+                ls = model.covar_module.lengthscale
+                if ls is not None:
+                    return ls.detach().cpu().numpy().flatten()
+    except (AttributeError, RuntimeError):
+        pass
+    return None
+
+
 def fit_gp_botorch(
     X: pd.DataFrame,
     Y: pd.DataFrame,
     target_cell_types: Optional[list[str]] = None,
     use_ilr: bool = True,
+    use_saasbo: bool = False,
+    saasbo_warmup: int = 256,
+    saasbo_num_samples: int = 128,
+    saasbo_thinning: int = 16,
 ) -> tuple:
-    """Fit a multi-fidelity GP using BoTorch.
-
-    Uses SingleTaskMultiFidelityGP with Matérn 5/2 + ARD kernel.
+    """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
 
     Args:
         X: Morphogen concentration matrix with fidelity column.
         Y: Cell type fraction matrix.
         target_cell_types: List of cell types to optimize. If None, uses all.
         use_ilr: Whether to apply ILR transform to Y.
+        use_saasbo: Use SAASBO (fully Bayesian GP with sparsity prior).
+            Ignored when multi-fidelity data is detected.
+        saasbo_warmup: NUTS warmup steps for SAASBO.
+        saasbo_num_samples: NUTS posterior samples for SAASBO.
+        saasbo_thinning: NUTS thinning factor for SAASBO.
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -289,6 +335,8 @@ def fit_gp_botorch(
     if has_fidelity and X["fidelity"].nunique() > 1:
         from botorch.models import SingleTaskMultiFidelityGP
         logger.info("Using multi-fidelity GP (fidelity column detected)")
+        if use_saasbo:
+            logger.info("SAASBO ignored — multi-fidelity takes priority")
         model = SingleTaskMultiFidelityGP(
             train_X,
             train_Y,
@@ -296,6 +344,47 @@ def fit_gp_botorch(
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+    elif use_saasbo:
+        from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+        from botorch.fit import fit_fully_bayesian_model_nuts
+
+        if train_Y.shape[1] == 1:
+            logger.info("Using SAASBO (single output, fully Bayesian)")
+            model = SaasFullyBayesianSingleTaskGP(
+                train_X, train_Y,
+                input_transform=Normalize(d=train_X.shape[1]),
+                outcome_transform=Standardize(m=1),
+            )
+            fit_fully_bayesian_model_nuts(
+                model,
+                warmup_steps=saasbo_warmup,
+                num_samples=saasbo_num_samples,
+                thinning=saasbo_thinning,
+            )
+        else:
+            from botorch.models import ModelListGP
+            n_outputs = train_Y.shape[1]
+            logger.info("Using SAASBO with ModelListGP (%d outputs)", n_outputs)
+            saas_models = []
+            for i in range(n_outputs):
+                logger.info("  Fitting SAAS model %d/%d...", i + 1, n_outputs)
+                m = SaasFullyBayesianSingleTaskGP(
+                    train_X,
+                    train_Y[:, i:i+1],
+                    input_transform=Normalize(d=train_X.shape[1]),
+                    outcome_transform=Standardize(m=1),
+                )
+                fit_fully_bayesian_model_nuts(
+                    m,
+                    warmup_steps=saasbo_warmup,
+                    num_samples=saasbo_num_samples,
+                    thinning=saasbo_thinning,
+                    disable_progbar=True,
+                )
+                saas_models.append(m)
+            model = ModelListGP(*saas_models)
     else:
         logger.info("Using single-task GP (single fidelity level)")
         model = SingleTaskGP(
@@ -304,26 +393,12 @@ def fit_gp_botorch(
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
-
-    # Optimize hyperparameters
-    mll = ExactMarginalLogLikelihood(model.likelihood, model)
-    fit_gpytorch_mll(mll)
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
 
     # Report kernel parameters
     logger.info("GP Kernel Parameters:")
-    lengthscales = None
-    try:
-        if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
-            ls = model.covar_module.base_kernel.lengthscale
-            if ls is not None:
-                lengthscales = ls.detach().cpu().numpy().flatten()
-        elif hasattr(model.covar_module, 'lengthscale'):
-            ls = model.covar_module.lengthscale
-            if ls is not None:
-                lengthscales = ls.detach().cpu().numpy().flatten()
-    except (AttributeError, RuntimeError):
-        pass
-
+    lengthscales = _extract_lengthscales(model, train_X.shape[1])
     if lengthscales is not None:
         importance = 1.0 / lengthscales
         morph_importance = pd.Series(importance[:len(X.columns)], index=X.columns)
@@ -542,6 +617,7 @@ def run_gpbo_loop(
     round_num: int = 1,
     use_ilr: bool = True,
     virtual_sources: Optional[list[tuple[Path, Path, float]]] = None,
+    use_saasbo: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -555,6 +631,7 @@ def run_gpbo_loop(
         virtual_sources: Optional list of (fractions_csv, morphogen_csv, fidelity)
             tuples for multi-fidelity data. Real data is always included at
             fidelity=1.0. Virtual sources add CellRank2 (0.5) or CellFlow (0.0).
+        use_saasbo: Use SAASBO (fully Bayesian GP with sparsity prior).
 
     Returns:
         DataFrame of recommended next experiments.
@@ -583,6 +660,7 @@ def run_gpbo_loop(
         X_active, Y,
         target_cell_types=target_cell_types,
         use_ilr=use_ilr,
+        use_saasbo=use_saasbo,
     )
 
     # Recommend next experiments (in active dimensions)
@@ -624,15 +702,12 @@ def run_gpbo_loop(
         diagnostics["fidelity_levels"] = str(sorted(X["fidelity"].unique().tolist()))
 
     try:
-        ls = None
-        if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
-            _ls = model.covar_module.base_kernel.lengthscale
-            if _ls is not None:
-                ls = _ls.detach().cpu().numpy().flatten()
+        ls = _extract_lengthscales(model, train_X.shape[1])
         if ls is not None:
-            for i, col in enumerate(X.columns):
+            for i, col in enumerate(X_active.columns):
                 if i < len(ls):
-                    diagnostics[f"lengthscale_{col}"] = ls[i]
+                    diagnostics[f"lengthscale_{col}"] = float(ls[i])
+        diagnostics["model_type"] = "saasbo" if use_saasbo else "map"
     except (AttributeError, RuntimeError):
         pass
 
@@ -674,6 +749,8 @@ if __name__ == "__main__":
                         help="Path to SAG screen fractions CSV (fidelity=1.0)")
     parser.add_argument("--sag-morphogens", type=str, default=None,
                         help="Path to SAG screen morphogens CSV")
+    parser.add_argument("--saasbo", action="store_true",
+                        help="Use SAASBO (fully Bayesian GP with sparsity prior)")
     args = parser.parse_args()
 
     fractions_path = Path(args.fractions) if args.fractions else DATA_DIR / "gp_training_labels_amin_kelley.csv"
@@ -741,6 +818,7 @@ if __name__ == "__main__":
         round_num=args.round,
         use_ilr=not args.no_ilr,
         virtual_sources=virtual_sources if virtual_sources else None,
+        use_saasbo=args.saasbo,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

@@ -262,7 +262,7 @@ def transfer_labels_knn(
     label_columns: list[str],
     k: int = 50,
     class_balanced: bool = True,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """Transfer cell type labels from reference to query via KNN in latent space.
 
     Uses class-balanced KNN by default: each neighbor's vote is weighted by
@@ -280,11 +280,14 @@ def transfer_labels_knn(
             to correct for reference class imbalance.
 
     Returns:
-        DataFrame with transferred labels and confidence scores.
+        Tuple of:
+        - DataFrame with transferred labels and confidence scores.
+        - Dict mapping label_col -> DataFrame of soft probabilities (cells x types).
     """
     from sklearn.neighbors import NearestNeighbors
 
     results = pd.DataFrame(index=query_obs.index)
+    soft_probs = {}
 
     # Fit a single NearestNeighbors model (shared across label columns)
     logger.info("Fitting NearestNeighbors (k=%d) on %d reference cells...", k, len(ref_latent))
@@ -347,6 +350,15 @@ def transfer_labels_knn(
                        (np.arange(len(query_latent)), neighbor_label_idx[:, j]),
                        weights[:, j])
 
+        # Soft probabilities: normalize vote matrix to per-cell probability distribution
+        row_totals = vote_matrix.sum(axis=1, keepdims=True)
+        prob_matrix = vote_matrix / (row_totals + 1e-10)
+        soft_probs[label_col] = pd.DataFrame(
+            prob_matrix,
+            index=query_obs.index,
+            columns=[idx_to_class[i] for i in range(n_classes)],
+        )
+
         # Predict: class with highest vote
         predicted_idx = vote_matrix.argmax(axis=1)
         predicted = np.array([idx_to_class[i] for i in predicted_idx])
@@ -358,7 +370,7 @@ def transfer_labels_knn(
         results[f"predicted_{label_col}"] = predicted
         results[f"{label_col}_confidence"] = confidence
 
-    return results
+    return results, soft_probs
 
 
 def compute_cell_type_fractions(
@@ -396,6 +408,38 @@ def compute_cell_type_fractions(
     assert np.allclose(row_sums, 1.0, atol=1e-6), \
         f"Fractions don't sum to 1: {row_sums[~np.isclose(row_sums, 1.0)]}"
 
+    return fractions
+
+
+def compute_soft_cell_type_fractions(
+    obs: pd.DataFrame,
+    soft_probs: pd.DataFrame,
+    condition_key: str = "condition",
+) -> pd.DataFrame:
+    """Compute cell type fractions by averaging soft probabilities per condition.
+
+    Instead of argmax followed by value_counts (hard assignment), this averages the
+    per-cell probability vectors within each condition. This preserves
+    annotation uncertainty and reduces noise in GP training labels.
+
+    Args:
+        obs: Cell metadata with condition column.
+        soft_probs: DataFrame (cells x cell types) of soft probabilities.
+        condition_key: Column identifying experimental conditions.
+
+    Returns:
+        DataFrame: rows=conditions, columns=cell types, values=fractions (sum to 1).
+    """
+    logger.info("Computing soft cell type fractions per %s...", condition_key)
+
+    conditions = obs[condition_key]
+    fractions = soft_probs.groupby(conditions).mean()
+
+    # Re-normalize rows to sum to 1 (should be close already)
+    row_sums = fractions.sum(axis=1)
+    fractions = fractions.div(row_sums, axis=0)
+
+    logger.info("Result: %d conditions x %d cell types", fractions.shape[0], fractions.shape[1])
     return fractions
 
 
@@ -459,7 +503,7 @@ if __name__ == "__main__":
     # Transfer labels
     logger.info("Transferring cell type labels...")
     label_cols = [ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3]
-    transferred = transfer_labels_knn(
+    transferred, soft_probs = transfer_labels_knn(
         ref_latent, query_latent,
         ref.obs, query.obs,
         label_columns=label_cols,
@@ -483,6 +527,21 @@ if __name__ == "__main__":
         condition_key=args.condition_key,
         label_key=f"predicted_{ANNOT_REGION}",
     )
+
+    # Compute soft cell type fractions (probability-averaged)
+    if ANNOT_LEVEL_2 in soft_probs:
+        soft_fractions = compute_soft_cell_type_fractions(
+            query.obs,
+            soft_probs[ANNOT_LEVEL_2],
+            condition_key="condition",
+        )
+        soft_fractions.to_csv(str(DATA_DIR / "gp_training_labels_soft_amin_kelley.csv"))
+        logger.info("Soft cell type fractions -> data/gp_training_labels_soft_amin_kelley.csv")
+
+        # Compare hard vs soft
+        diff = (fractions - soft_fractions.reindex_like(fractions).fillna(0)).abs()
+        logger.info("Hard vs soft fraction max diff: %.4f, mean diff: %.4f",
+                    diff.values.max(), diff.values.mean())
 
     # Save outputs
     logger.info("Saving outputs...")

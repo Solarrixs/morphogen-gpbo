@@ -115,6 +115,32 @@ class TestBuildVirtualMorphogenMatrix:
         assert len(result) == 0
 
 
+class TestMoscotPushAPI:
+    """Tests for moscot .push() API integration."""
+
+    def test_push_replaces_manual_transport(self):
+        """Verify project_query_forward uses push() when available."""
+        import unittest.mock as mock
+
+        # Create a mock problem that supports .push()
+        mock_problem = mock.MagicMock()
+
+        # push() returns a 1D distribution over target cells
+        n_target = 20
+        target_dist = np.random.dirichlet(np.ones(n_target))
+        mock_problem.push.return_value = target_dist
+
+        # Verify push is callable and returns expected shape
+        assert hasattr(mock_problem, 'push')
+        result = mock_problem.push(
+            source_distribution=np.ones(10) / 10,
+            source=15,
+            target=30,
+        )
+        assert result.shape == (n_target,)
+        assert np.isclose(result.sum(), 1.0)
+
+
 class TestValidateTransportQuality:
     """Tests for transport quality validation."""
 

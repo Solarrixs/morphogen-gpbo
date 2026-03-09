@@ -406,49 +406,48 @@ def project_query_forward(
 
         target_ct_fracs = target_labels.value_counts(normalize=True)
 
-        # Compose transport across intermediate timepoints (sparse)
-        # Done once per target_tp, shared across all conditions
-        tp_pairs = list(zip(intermediate_tps[:-1], intermediate_tps[1:]))
-        use_transport = True
-        try:
-            transport = problem[(tp_pairs[0][0], tp_pairs[0][1])].solution.transport_matrix
-            if not sp.issparse(transport):
-                transport = sp.csr_matrix(transport)
-            elif not sp.isspmatrix_csr(transport):
-                transport = transport.tocsr()
-            for src_t, tgt_t in tp_pairs[1:]:
-                t_next = problem[(src_t, tgt_t)].solution.transport_matrix
-                if not sp.issparse(t_next):
-                    t_next = sp.csr_matrix(t_next)
-                elif not sp.isspmatrix_csr(t_next):
-                    t_next = t_next.tocsr()
-                transport = transport @ t_next  # sparse @ sparse = sparse
+        # Try moscot .push() API first (handles subsampling internally)
+        use_push_api = hasattr(problem, 'push')
 
-            # Dimension check: transport target dim must match atlas target cells
-            n_target_transport = transport.shape[1]
-            if n_target_transport != n_target_atlas:
+        # Fallback: manual transport matrix composition (legacy path)
+        use_transport = False
+        if not use_push_api:
+            tp_pairs = list(zip(intermediate_tps[:-1], intermediate_tps[1:]))
+            try:
+                transport = problem[(tp_pairs[0][0], tp_pairs[0][1])].solution.transport_matrix
+                if not sp.issparse(transport):
+                    transport = sp.csr_matrix(transport)
+                elif not sp.isspmatrix_csr(transport):
+                    transport = transport.tocsr()
+                for src_t, tgt_t in tp_pairs[1:]:
+                    t_next = problem[(src_t, tgt_t)].solution.transport_matrix
+                    if not sp.issparse(t_next):
+                        t_next = sp.csr_matrix(t_next)
+                    elif not sp.isspmatrix_csr(t_next):
+                        t_next = t_next.tocsr()
+                    transport = transport @ t_next  # sparse @ sparse = sparse
+
+                # Dimension check: transport target dim must match atlas target cells
+                n_target_transport = transport.shape[1]
+                if n_target_transport != n_target_atlas:
+                    logger.warning(
+                        "Transport target dim (%d) != atlas target cells (%d) at Day %s — "
+                        "moscot may have subsampled. Using atlas average.",
+                        n_target_transport, n_target_atlas, target_tp,
+                    )
+                else:
+                    use_transport = True
+                    max_source_idx = int(source_indices.max()) + 1
+                    local_idx_map = -np.ones(max_source_idx, dtype=np.intp)
+                    local_idx_map[source_indices] = np.arange(len(source_indices))
+                    target_labels_arr = target_labels.values
+            except (KeyError, AttributeError, IndexError) as e:
                 logger.warning(
-                    "Transport target dim (%d) != atlas target cells (%d) at Day %s — "
-                    "moscot may have subsampled. Using atlas average.",
-                    n_target_transport, n_target_atlas, target_tp,
+                    "Transport composition failed at Day %s (%s), using atlas average for all conditions",
+                    target_tp, e,
                 )
-                use_transport = False
-
-            # Build local index lookup for vectorized neighbor mapping
-            if use_transport:
-                max_source_idx = int(source_indices.max()) + 1
-                local_idx_map = -np.ones(max_source_idx, dtype=np.intp)
-                local_idx_map[source_indices] = np.arange(len(source_indices))
-                target_labels_arr = target_labels.values
-        except (KeyError, AttributeError, IndexError) as e:
-            logger.warning(
-                "Transport composition failed at Day %s (%s), using atlas average for all conditions",
-                target_tp, e,
-            )
-            use_transport = False
 
         # For each condition, compute predicted cell type fractions
-        # weighted by transport probability
         for cond in conditions:
             cond_mask = query_adata.obs[condition_key] == cond
             cond_indices = np.where(cond_mask)[0]
@@ -459,7 +458,47 @@ def project_query_forward(
 
             virtual_key = f"{cond}_day{target_tp}"
 
-            if use_transport:
+            if use_push_api:
+                # moscot .push() API — handles subsampling internally
+                try:
+                    # Build condition-specific source distribution from KNN weights
+                    n_source = int(source_mask.sum())
+                    source_dist = np.zeros(n_source)
+                    cond_nn = neighbor_idx[cond_indices]
+                    cond_w = weights[cond_indices]
+                    for j in range(cond_nn.shape[1]):
+                        for ci in range(len(cond_indices)):
+                            nn_idx = cond_nn[ci, j]
+                            if nn_idx < n_source:
+                                source_dist[nn_idx] += cond_w[ci, j]
+                    if source_dist.sum() > 0:
+                        source_dist /= source_dist.sum()
+
+                    target_dist = problem.push(
+                        source_distribution=source_dist,
+                        source=source_tp,
+                        target=target_tp,
+                    )
+                    if hasattr(target_dist, 'values'):
+                        target_dist = target_dist.values
+                    target_dist = np.asarray(target_dist).ravel()
+
+                    if target_dist.sum() > 0 and len(target_dist) == n_target_atlas:
+                        target_dist /= target_dist.sum()
+                        virtual_fracs = pd.Series(0.0, index=target_ct_fracs.index)
+                        target_labels_vals = target_labels.values
+                        for ct in virtual_fracs.index:
+                            ct_mask = (target_labels_vals == ct)
+                            virtual_fracs[ct] = target_dist[ct_mask].sum()
+                    else:
+                        logger.warning("push() returned invalid dist for '%s' Day %s, using atlas average", cond, target_tp)
+                        virtual_fracs = target_ct_fracs.copy()
+                except Exception as e:
+                    logger.warning("push() failed for '%s' Day %s (%s), using atlas average", cond, target_tp, e)
+                    virtual_fracs = target_ct_fracs.copy()
+
+            elif use_transport:
+                # Manual transport matrix composition (vectorized)
                 try:
                     cond_nn = neighbor_idx[cond_indices]   # [n_cond_cells, k]
                     cond_w = weights[cond_indices]          # [n_cond_cells, k]
@@ -502,6 +541,7 @@ def project_query_forward(
                     logger.warning("Transport lookup failed for condition '%s' at Day %s (%s), using atlas average", cond, target_tp, e)
                     virtual_fracs = target_ct_fracs.copy()
             else:
+                # Fallback: atlas-wide average
                 virtual_fracs = target_ct_fracs.copy()
 
             all_virtual_fractions.append({

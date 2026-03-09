@@ -844,3 +844,190 @@ class TestNoHardcodedPaths:
         content = (gopro_dir / "06_cellflow_virtual.py").read_text()
         prints = re.findall(r'^\s*print\(', content, re.MULTILINE)
         assert prints == [], f"Found {len(prints)} print() calls in 06_cellflow_virtual.py"
+
+
+class TestExtractLengthscales:
+    """Tests for _extract_lengthscales helper."""
+
+    def test_standard_gp(self):
+        """Extract lengthscales from MAP-fitted SingleTaskGP."""
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+        from gpytorch.mlls import ExactMarginalLogLikelihood
+        from botorch.fit import fit_gpytorch_mll
+        import torch
+
+        X = torch.rand(10, 3, dtype=torch.double)
+        Y = torch.rand(10, 1, dtype=torch.double)
+        model = SingleTaskGP(X, Y, input_transform=Normalize(d=3), outcome_transform=Standardize(m=1))
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+
+        ls = step04._extract_lengthscales(model, 3)
+        assert ls is not None
+        assert ls.shape == (3,)
+        assert np.all(ls > 0)
+
+    def test_returns_none_for_unknown_model(self):
+        """Returns None for unrecognized model types."""
+        ls = step04._extract_lengthscales("not_a_model", 3)
+        assert ls is None
+
+
+class TestSAASBO:
+    """Tests for SAASBO integration in GP-BO pipeline."""
+
+    @pytest.fixture
+    def small_data(self):
+        np.random.seed(42)
+        n, d, m = 15, 4, 3
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM", "log_harvest_day"],
+            index=[f"cond_{i}" for i in range(n)],
+        )
+        X["fidelity"] = 1.0
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(m), size=n),
+            columns=["ct_A", "ct_B", "ct_C"],
+            index=X.index,
+        )
+        return X, Y
+
+    def test_saasbo_returns_model_list_gp(self, small_data):
+        from botorch.models import ModelListGP
+        X, Y = small_data
+        model, _, train_Y, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_saasbo=True,
+            saasbo_warmup=8, saasbo_num_samples=8, saasbo_thinning=4,
+        )
+        assert isinstance(model, ModelListGP)
+        assert train_Y.shape[1] == 2  # ILR: 3 -> 2
+
+    def test_saasbo_lengthscales_extractable(self, small_data):
+        X, Y = small_data
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_saasbo=True,
+            saasbo_warmup=8, saasbo_num_samples=8, saasbo_thinning=4,
+        )
+        ls = step04._extract_lengthscales(model, X.shape[1])
+        assert ls is not None
+        assert len(ls) == X.shape[1]
+
+    def test_saasbo_posterior_works(self, small_data):
+        import torch
+        X, Y = small_data
+        model, train_X, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_saasbo=True,
+            saasbo_warmup=8, saasbo_num_samples=8, saasbo_thinning=4,
+        )
+        with torch.no_grad():
+            post = model.posterior(train_X[:2])
+        assert post.mean.shape[-1] == 2
+
+    def test_saasbo_false_uses_standard_gp(self, small_data):
+        from botorch.models import SingleTaskGP
+        X, Y = small_data
+        model, _, _, _ = step04.fit_gp_botorch(X, Y, use_ilr=True, use_saasbo=False)
+        assert isinstance(model, SingleTaskGP)
+
+    def test_saasbo_ignored_for_multi_fidelity(self, small_data):
+        from botorch.models import SingleTaskMultiFidelityGP
+        X, Y = small_data
+        X = X.copy()
+        X.loc[X.index[:5], "fidelity"] = 0.5
+        model, _, _, _ = step04.fit_gp_botorch(X, Y, use_ilr=True, use_saasbo=True)
+        assert isinstance(model, SingleTaskMultiFidelityGP)
+
+    def test_saasbo_single_output(self, small_data):
+        from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+        X, Y = small_data
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y[["ct_A"]], use_ilr=False, use_saasbo=True,
+            saasbo_warmup=8, saasbo_num_samples=8, saasbo_thinning=4,
+        )
+        assert isinstance(model, SaasFullyBayesianSingleTaskGP)
+
+
+class TestSoftKNNFractions:
+    """Tests for soft probability output from KNN label transfer."""
+
+    @pytest.fixture
+    def knn_data(self):
+        np.random.seed(42)
+        n_ref, n_query, d = 100, 20, 10
+        ref_latent = np.random.randn(n_ref, d)
+        query_latent = np.random.randn(n_query, d)
+        ref_obs = pd.DataFrame({
+            "annot_level_2": np.random.choice(["TypeA", "TypeB", "TypeC"], n_ref),
+        }, index=[f"ref_{i}" for i in range(n_ref)])
+        query_obs = pd.DataFrame({
+            "condition": np.random.choice(["cond1", "cond2"], n_query),
+        }, index=[f"query_{i}" for i in range(n_query)])
+        return ref_latent, query_latent, ref_obs, query_obs
+
+    def test_returns_soft_probabilities(self, knn_data):
+        ref_latent, query_latent, ref_obs, query_obs = knn_data
+        results, soft_probs = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_2"], k=10,
+        )
+        assert "annot_level_2" in soft_probs
+        prob_df = soft_probs["annot_level_2"]
+        assert prob_df.shape == (20, 3)  # 20 query cells x 3 types
+        assert np.allclose(prob_df.sum(axis=1), 1.0, atol=1e-6)
+        assert (prob_df >= 0).all().all()
+
+    def test_hard_labels_match_soft_argmax(self, knn_data):
+        ref_latent, query_latent, ref_obs, query_obs = knn_data
+        results, soft_probs = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_2"], k=10,
+        )
+        prob_df = soft_probs["annot_level_2"]
+        hard = results["predicted_annot_level_2"].values
+        soft_argmax = prob_df.columns[prob_df.values.argmax(axis=1)]
+        assert np.array_equal(hard, soft_argmax)
+
+    def test_backward_compatible_results_df(self, knn_data):
+        ref_latent, query_latent, ref_obs, query_obs = knn_data
+        results, _ = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_2"], k=10,
+        )
+        assert "predicted_annot_level_2" in results.columns
+        assert "annot_level_2_confidence" in results.columns
+
+
+class TestComputeSoftCellTypeFractions:
+    """Tests for soft probability-based cell type fraction computation."""
+
+    def test_soft_fractions_sum_to_one(self):
+        np.random.seed(42)
+        n_cells = 50
+        obs = pd.DataFrame({
+            "condition": np.repeat(["condA", "condB"], n_cells // 2),
+        }, index=[f"cell_{i}" for i in range(n_cells)])
+        prob_df = pd.DataFrame(
+            np.random.dirichlet([1, 1, 1], size=n_cells),
+            columns=["TypeA", "TypeB", "TypeC"],
+            index=obs.index,
+        )
+        fracs = step02.compute_soft_cell_type_fractions(obs, prob_df, condition_key="condition")
+        assert np.allclose(fracs.sum(axis=1), 1.0, atol=1e-6)
+        assert fracs.shape == (2, 3)
+
+    def test_deterministic_cells_match_hard(self):
+        obs = pd.DataFrame({
+            "condition": ["A", "A", "B", "B"],
+        }, index=[f"c{i}" for i in range(4)])
+        prob_df = pd.DataFrame(
+            [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 0.0]],
+            columns=["X", "Y"],
+            index=obs.index,
+        )
+        fracs = step02.compute_soft_cell_type_fractions(obs, prob_df, condition_key="condition")
+        assert fracs.loc["A", "X"] == pytest.approx(0.5)
+        assert fracs.loc["A", "Y"] == pytest.approx(0.5)
+        assert fracs.loc["B", "X"] == pytest.approx(1.0)
+        assert fracs.loc["B", "Y"] == pytest.approx(0.0)

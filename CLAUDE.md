@@ -147,12 +147,14 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 - **scArches/scPoli architecture surgery**: Transfer learning to map query organoid cells onto HNOCA reference atlas. Step 02 supports multiple datasets via `--input`/`--output-prefix` CLI args.
 - **Cell filtering**: Primary screen uses `quality == 'keep'`; SAG screen uses `ClusterLabel != 'filtered'` (handled automatically by `filter_quality_cells()`).
 - **Two-tier fidelity scoring** (step 03): Tier 1 = brain region assignment, Tier 2 = subtype fidelity via cosine similarity to Braun fetal brain
-- **GP fitting**: BoTorch `SingleTaskGP` / `SingleTaskMultiFidelityGP` with Matérn 5/2 + ARD kernel
+- **GP fitting**: BoTorch `SingleTaskGP` / `SingleTaskMultiFidelityGP` with Matérn 5/2 + ARD kernel; `--saasbo` flag enables `SaasFullyBayesianSingleTaskGP` with half-Cauchy sparsity prior
+- **SAASBO**: Fully Bayesian GP via NUTS; wraps per-output models in `ModelListGP`; automatic variable selection in high-D morphogen space; `_extract_lengthscales` helper for diagnostics
+- **Soft fractions**: `compute_soft_cell_type_fractions` averages per-cell KNN probabilities instead of hard argmax; saved as `gp_training_labels_soft_*.csv`
 - **ILR transform**: Isometric log-ratio via Helmert basis for compositional Y data
 - **Multi-objective acquisition**: `qLogNoisyExpectedHypervolumeImprovement` or scalarized `qLogExpectedImprovement`
 - **Multi-fidelity GP integration**: `merge_multi_fidelity_data()` in step 04 combines real data (fidelity=1.0, from both primary and SAG screens) + CellRank2 virtual (0.5) + CellFlow virtual (0.0). SAG screen CSVs are auto-discovered if present.
 - **Cross-screen QC** (`qc_cross_screen.py`): Validates overlapping conditions between screens via cosine similarity on cell type fraction vectors. Flags conditions below threshold (default 0.8).
-- **CellRank 2 virtual data** (step 05): moscot OT maps on Azbukina temporal atlas → forward-project query cells → medium-fidelity (0.5) training points
+- **CellRank 2 virtual data** (step 05): moscot OT maps on Azbukina temporal atlas → forward-project query cells via `.push()` API → medium-fidelity (0.5) training points; falls back to manual transport composition or atlas average
 - **CellFlow virtual screening** (step 06): Protocol encoding (RDKit + ESM2) → generative model → low-fidelity (0.0) training points
 - **RDS→h5ad converter** (`convert_rds_to_h5ad.py`): Converts Seurat RDS files via R subprocess (Seurat/SeuratDisk). Auto-discovers R at `/Library/Frameworks/R.framework/`, auto-installs missing R packages. Supports `--check-only` inspection mode and `.rds.gz` decompression.
 - **Visualization report**: Self-contained Plotly HTML report showing optimization state per round
