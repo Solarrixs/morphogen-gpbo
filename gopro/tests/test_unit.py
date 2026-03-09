@@ -609,3 +609,78 @@ class TestExtractLengthscales:
         """Returns None for unrecognized model types."""
         ls = step04._extract_lengthscales("not_a_model", 3)
         assert ls is None
+
+
+class TestSAASBO:
+    """Tests for SAASBO integration in GP-BO pipeline."""
+
+    @pytest.fixture
+    def small_data(self):
+        np.random.seed(42)
+        n, d, m = 15, 4, 3
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM", "log_harvest_day"],
+            index=[f"cond_{i}" for i in range(n)],
+        )
+        X["fidelity"] = 1.0
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(m), size=n),
+            columns=["ct_A", "ct_B", "ct_C"],
+            index=X.index,
+        )
+        return X, Y
+
+    def test_saasbo_returns_model_list_gp(self, small_data):
+        from botorch.models import ModelListGP
+        X, Y = small_data
+        model, _, train_Y, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_saasbo=True,
+            saasbo_warmup=8, saasbo_num_samples=8, saasbo_thinning=4,
+        )
+        assert isinstance(model, ModelListGP)
+        assert train_Y.shape[1] == 2  # ILR: 3 -> 2
+
+    def test_saasbo_lengthscales_extractable(self, small_data):
+        X, Y = small_data
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_saasbo=True,
+            saasbo_warmup=8, saasbo_num_samples=8, saasbo_thinning=4,
+        )
+        ls = step04._extract_lengthscales(model, X.shape[1])
+        assert ls is not None
+        assert len(ls) == X.shape[1]
+
+    def test_saasbo_posterior_works(self, small_data):
+        import torch
+        X, Y = small_data
+        model, train_X, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_saasbo=True,
+            saasbo_warmup=8, saasbo_num_samples=8, saasbo_thinning=4,
+        )
+        with torch.no_grad():
+            post = model.posterior(train_X[:2])
+        assert post.mean.shape[-1] == 2
+
+    def test_saasbo_false_uses_standard_gp(self, small_data):
+        from botorch.models import SingleTaskGP
+        X, Y = small_data
+        model, _, _, _ = step04.fit_gp_botorch(X, Y, use_ilr=True, use_saasbo=False)
+        assert isinstance(model, SingleTaskGP)
+
+    def test_saasbo_ignored_for_multi_fidelity(self, small_data):
+        from botorch.models import SingleTaskMultiFidelityGP
+        X, Y = small_data
+        X = X.copy()
+        X.loc[X.index[:5], "fidelity"] = 0.5
+        model, _, _, _ = step04.fit_gp_botorch(X, Y, use_ilr=True, use_saasbo=True)
+        assert isinstance(model, SingleTaskMultiFidelityGP)
+
+    def test_saasbo_single_output(self, small_data):
+        from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+        X, Y = small_data
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y[["ct_A"]], use_ilr=False, use_saasbo=True,
+            saasbo_warmup=8, saasbo_num_samples=8, saasbo_thinning=4,
+        )
+        assert isinstance(model, SaasFullyBayesianSingleTaskGP)

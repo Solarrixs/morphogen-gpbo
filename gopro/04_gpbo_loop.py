@@ -275,16 +275,23 @@ def fit_gp_botorch(
     Y: pd.DataFrame,
     target_cell_types: Optional[list[str]] = None,
     use_ilr: bool = True,
+    use_saasbo: bool = False,
+    saasbo_warmup: int = 256,
+    saasbo_num_samples: int = 128,
+    saasbo_thinning: int = 16,
 ) -> tuple:
-    """Fit a multi-fidelity GP using BoTorch.
-
-    Uses SingleTaskMultiFidelityGP with Matérn 5/2 + ARD kernel.
+    """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
 
     Args:
         X: Morphogen concentration matrix with fidelity column.
         Y: Cell type fraction matrix.
         target_cell_types: List of cell types to optimize. If None, uses all.
         use_ilr: Whether to apply ILR transform to Y.
+        use_saasbo: Use SAASBO (fully Bayesian GP with sparsity prior).
+            Ignored when multi-fidelity data is detected.
+        saasbo_warmup: NUTS warmup steps for SAASBO.
+        saasbo_num_samples: NUTS posterior samples for SAASBO.
+        saasbo_thinning: NUTS thinning factor for SAASBO.
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -323,6 +330,8 @@ def fit_gp_botorch(
     if has_fidelity and X["fidelity"].nunique() > 1:
         from botorch.models import SingleTaskMultiFidelityGP
         logger.info("Using multi-fidelity GP (fidelity column detected)")
+        if use_saasbo:
+            logger.info("SAASBO ignored — multi-fidelity takes priority")
         model = SingleTaskMultiFidelityGP(
             train_X,
             train_Y,
@@ -330,6 +339,47 @@ def fit_gp_botorch(
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+    elif use_saasbo:
+        from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+        from botorch.fit import fit_fully_bayesian_model_nuts
+
+        if train_Y.shape[1] == 1:
+            logger.info("Using SAASBO (single output, fully Bayesian)")
+            model = SaasFullyBayesianSingleTaskGP(
+                train_X, train_Y,
+                input_transform=Normalize(d=train_X.shape[1]),
+                outcome_transform=Standardize(m=1),
+            )
+            fit_fully_bayesian_model_nuts(
+                model,
+                warmup_steps=saasbo_warmup,
+                num_samples=saasbo_num_samples,
+                thinning=saasbo_thinning,
+            )
+        else:
+            from botorch.models import ModelListGP
+            n_outputs = train_Y.shape[1]
+            logger.info("Using SAASBO with ModelListGP (%d outputs)", n_outputs)
+            saas_models = []
+            for i in range(n_outputs):
+                logger.info("  Fitting SAAS model %d/%d...", i + 1, n_outputs)
+                m = SaasFullyBayesianSingleTaskGP(
+                    train_X,
+                    train_Y[:, i:i+1],
+                    input_transform=Normalize(d=train_X.shape[1]),
+                    outcome_transform=Standardize(m=1),
+                )
+                fit_fully_bayesian_model_nuts(
+                    m,
+                    warmup_steps=saasbo_warmup,
+                    num_samples=saasbo_num_samples,
+                    thinning=saasbo_thinning,
+                    disable_progbar=True,
+                )
+                saas_models.append(m)
+            model = ModelListGP(*saas_models)
     else:
         logger.info("Using single-task GP (single fidelity level)")
         model = SingleTaskGP(
@@ -338,26 +388,12 @@ def fit_gp_botorch(
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
-
-    # Optimize hyperparameters
-    mll = ExactMarginalLogLikelihood(model.likelihood, model)
-    fit_gpytorch_mll(mll)
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
 
     # Report kernel parameters
     logger.info("GP Kernel Parameters:")
-    lengthscales = None
-    try:
-        if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
-            ls = model.covar_module.base_kernel.lengthscale
-            if ls is not None:
-                lengthscales = ls.detach().cpu().numpy().flatten()
-        elif hasattr(model.covar_module, 'lengthscale'):
-            ls = model.covar_module.lengthscale
-            if ls is not None:
-                lengthscales = ls.detach().cpu().numpy().flatten()
-    except (AttributeError, RuntimeError):
-        pass
-
+    lengthscales = _extract_lengthscales(model, train_X.shape[1])
     if lengthscales is not None:
         importance = 1.0 / lengthscales
         morph_importance = pd.Series(importance[:len(X.columns)], index=X.columns)
