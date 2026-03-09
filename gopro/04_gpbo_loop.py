@@ -610,6 +610,7 @@ def run_gpbo_loop(
     round_num: int = 1,
     use_ilr: bool = True,
     virtual_sources: Optional[list[tuple[Path, Path, float]]] = None,
+    use_saasbo: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -623,6 +624,7 @@ def run_gpbo_loop(
         virtual_sources: Optional list of (fractions_csv, morphogen_csv, fidelity)
             tuples for multi-fidelity data. Real data is always included at
             fidelity=1.0. Virtual sources add CellRank2 (0.5) or CellFlow (0.0).
+        use_saasbo: Use SAASBO (fully Bayesian GP with sparsity prior).
 
     Returns:
         DataFrame of recommended next experiments.
@@ -651,6 +653,7 @@ def run_gpbo_loop(
         X_active, Y,
         target_cell_types=target_cell_types,
         use_ilr=use_ilr,
+        use_saasbo=use_saasbo,
     )
 
     # Recommend next experiments (in active dimensions)
@@ -692,15 +695,12 @@ def run_gpbo_loop(
         diagnostics["fidelity_levels"] = str(sorted(X["fidelity"].unique().tolist()))
 
     try:
-        ls = None
-        if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
-            _ls = model.covar_module.base_kernel.lengthscale
-            if _ls is not None:
-                ls = _ls.detach().cpu().numpy().flatten()
+        ls = _extract_lengthscales(model, train_X.shape[1])
         if ls is not None:
-            for i, col in enumerate(X.columns):
+            for i, col in enumerate(X_active.columns):
                 if i < len(ls):
-                    diagnostics[f"lengthscale_{col}"] = ls[i]
+                    diagnostics[f"lengthscale_{col}"] = float(ls[i])
+        diagnostics["model_type"] = "saasbo" if use_saasbo else "map"
     except (AttributeError, RuntimeError):
         pass
 
@@ -738,6 +738,8 @@ if __name__ == "__main__":
                         help="Path to CellFlow virtual fractions CSV (fidelity=0.0)")
     parser.add_argument("--cellflow-morphogens", type=str, default=None,
                         help="Path to CellFlow virtual morphogens CSV")
+    parser.add_argument("--saasbo", action="store_true",
+                        help="Use SAASBO (fully Bayesian GP with sparsity prior)")
     args = parser.parse_args()
 
     fractions_path = Path(args.fractions) if args.fractions else DATA_DIR / "gp_training_labels_amin_kelley.csv"
@@ -798,6 +800,7 @@ if __name__ == "__main__":
         round_num=args.round,
         use_ilr=not args.no_ilr,
         virtual_sources=virtual_sources if virtual_sources else None,
+        use_saasbo=args.saasbo,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
