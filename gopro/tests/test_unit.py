@@ -581,3 +581,31 @@ class TestConfig:
         from gopro.config import get_logger
         log = get_logger("test_debug_level")
         assert log.level == logging.DEBUG
+
+
+class TestExtractLengthscales:
+    """Tests for _extract_lengthscales helper."""
+
+    def test_standard_gp(self):
+        """Extract lengthscales from MAP-fitted SingleTaskGP."""
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+        from gpytorch.mlls import ExactMarginalLogLikelihood
+        from botorch.fit import fit_gpytorch_mll
+        import torch
+
+        X = torch.rand(10, 3, dtype=torch.double)
+        Y = torch.rand(10, 1, dtype=torch.double)
+        model = SingleTaskGP(X, Y, input_transform=Normalize(d=3), outcome_transform=Standardize(m=1))
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+
+        ls = step04._extract_lengthscales(model, 3)
+        assert ls is not None
+        assert ls.shape == (3,)
+        assert np.all(ls > 0)
+
+    def test_returns_none_for_unknown_model(self):
+        """Returns None for unrecognized model types."""
+        ls = step04._extract_lengthscales("not_a_model", 3)
+        assert ls is None

@@ -231,6 +231,45 @@ def build_training_set(
     return X, Y
 
 
+def _extract_lengthscales(model, n_input_dims: int):
+    """Extract lengthscales from a fitted GP model.
+
+    Handles SingleTaskGP (MAP), SaasFullyBayesianSingleTaskGP,
+    and ModelListGP containing SAAS models.
+
+    Returns:
+        1-D numpy array of lengthscales, or None.
+    """
+    try:
+        # ModelListGP of SAAS models — median across sub-models
+        if hasattr(model, 'models'):
+            all_ls = []
+            for sub_model in model.models:
+                if hasattr(sub_model, 'median_lengthscale'):
+                    ls = sub_model.median_lengthscale.detach().cpu().numpy()
+                    all_ls.append(ls)
+            if all_ls:
+                return np.median(np.stack(all_ls), axis=0)
+
+        # Single SAAS model
+        if hasattr(model, 'median_lengthscale'):
+            return model.median_lengthscale.detach().cpu().numpy().flatten()
+
+        # Standard GP (MAP)
+        if hasattr(model, 'covar_module'):
+            if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
+                ls = model.covar_module.base_kernel.lengthscale
+                if ls is not None:
+                    return ls.detach().cpu().numpy().flatten()
+            elif hasattr(model.covar_module, 'lengthscale'):
+                ls = model.covar_module.lengthscale
+                if ls is not None:
+                    return ls.detach().cpu().numpy().flatten()
+    except (AttributeError, RuntimeError):
+        pass
+    return None
+
+
 def fit_gp_botorch(
     X: pd.DataFrame,
     Y: pd.DataFrame,
