@@ -97,10 +97,12 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 - **20 morphogen dimensions** (`MORPHOGEN_COLUMNS` in `config.py`): WNT, BMP, SHH, RA, FGF, Notch, EGF signaling + harvest time
 - **scArches/scPoli architecture surgery**: Transfer learning to map query organoid cells onto HNOCA reference atlas
 - **Two-tier fidelity scoring** (step 03): Tier 1 = brain region assignment, Tier 2 = subtype fidelity via cosine similarity to Braun fetal brain
-- **GP fitting**: BoTorch `SingleTaskGP` / `SingleTaskMultiFidelityGP` with Matérn 5/2 + ARD kernel
+- **GP fitting**: BoTorch `SingleTaskGP` / `SingleTaskMultiFidelityGP` with Matérn 5/2 + ARD kernel; `--saasbo` flag enables `SaasFullyBayesianSingleTaskGP` with half-Cauchy sparsity prior
+- **SAASBO**: Fully Bayesian GP via NUTS; wraps per-output models in `ModelListGP`; automatic variable selection in high-D morphogen space; `_extract_lengthscales` helper for diagnostics
+- **Soft fractions**: `compute_soft_cell_type_fractions` averages per-cell KNN probabilities instead of hard argmax; saved as `gp_training_labels_soft_*.csv`
 - **ILR transform**: Isometric log-ratio via Helmert basis for compositional Y data
 - **Multi-objective acquisition**: `qLogNoisyExpectedHypervolumeImprovement` or scalarized `qLogExpectedImprovement`
-- **CellRank 2 virtual data** (step 05): moscot OT maps on Azbukina temporal atlas → forward-project query cells → medium-fidelity (0.5) training points
+- **CellRank 2 virtual data** (step 05): moscot OT maps on Azbukina temporal atlas → forward-project query cells via `.push()` API → medium-fidelity (0.5) training points; falls back to manual transport composition or atlas average
 - **CellFlow virtual screening** (step 06): Protocol encoding (RDKit + ESM2) → generative model → low-fidelity (0.0) training points
 - **Multi-fidelity GP integration**: `merge_multi_fidelity_data()` in step 04 combines real (1.0) + CellRank2 (0.5) + CellFlow (0.0) data
 - **Visualization report**: Self-contained Plotly HTML report showing optimization state per round
