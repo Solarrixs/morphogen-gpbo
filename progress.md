@@ -1,3 +1,0 @@
-# Progress Log
-
-## Iteration Log
