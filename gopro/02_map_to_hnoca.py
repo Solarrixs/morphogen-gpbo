@@ -505,6 +505,21 @@ if __name__ == "__main__":
         label_key=f"predicted_{ANNOT_REGION}",
     )
 
+    # Compute soft cell type fractions (probability-averaged)
+    if ANNOT_LEVEL_2 in soft_probs:
+        soft_fractions = compute_soft_cell_type_fractions(
+            query.obs,
+            soft_probs[ANNOT_LEVEL_2],
+            condition_key="condition",
+        )
+        soft_fractions.to_csv(str(DATA_DIR / "gp_training_labels_soft_amin_kelley.csv"))
+        logger.info("Soft cell type fractions -> data/gp_training_labels_soft_amin_kelley.csv")
+
+        # Compare hard vs soft
+        diff = (fractions - soft_fractions.reindex_like(fractions).fillna(0)).abs()
+        logger.info("Hard vs soft fraction max diff: %.4f, mean diff: %.4f",
+                    diff.values.max(), diff.values.mean())
+
     # Save outputs
     logger.info("Saving outputs...")
 
