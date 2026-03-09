@@ -684,3 +684,87 @@ class TestSAASBO:
             saasbo_warmup=8, saasbo_num_samples=8, saasbo_thinning=4,
         )
         assert isinstance(model, SaasFullyBayesianSingleTaskGP)
+
+
+class TestSoftKNNFractions:
+    """Tests for soft probability output from KNN label transfer."""
+
+    @pytest.fixture
+    def knn_data(self):
+        np.random.seed(42)
+        n_ref, n_query, d = 100, 20, 10
+        ref_latent = np.random.randn(n_ref, d)
+        query_latent = np.random.randn(n_query, d)
+        ref_obs = pd.DataFrame({
+            "annot_level_2": np.random.choice(["TypeA", "TypeB", "TypeC"], n_ref),
+        }, index=[f"ref_{i}" for i in range(n_ref)])
+        query_obs = pd.DataFrame({
+            "condition": np.random.choice(["cond1", "cond2"], n_query),
+        }, index=[f"query_{i}" for i in range(n_query)])
+        return ref_latent, query_latent, ref_obs, query_obs
+
+    def test_returns_soft_probabilities(self, knn_data):
+        ref_latent, query_latent, ref_obs, query_obs = knn_data
+        results, soft_probs = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_2"], k=10,
+        )
+        assert "annot_level_2" in soft_probs
+        prob_df = soft_probs["annot_level_2"]
+        assert prob_df.shape == (20, 3)  # 20 query cells x 3 types
+        assert np.allclose(prob_df.sum(axis=1), 1.0, atol=1e-6)
+        assert (prob_df >= 0).all().all()
+
+    def test_hard_labels_match_soft_argmax(self, knn_data):
+        ref_latent, query_latent, ref_obs, query_obs = knn_data
+        results, soft_probs = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_2"], k=10,
+        )
+        prob_df = soft_probs["annot_level_2"]
+        hard = results["predicted_annot_level_2"].values
+        soft_argmax = prob_df.columns[prob_df.values.argmax(axis=1)]
+        assert np.array_equal(hard, soft_argmax)
+
+    def test_backward_compatible_results_df(self, knn_data):
+        ref_latent, query_latent, ref_obs, query_obs = knn_data
+        results, _ = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_2"], k=10,
+        )
+        assert "predicted_annot_level_2" in results.columns
+        assert "annot_level_2_confidence" in results.columns
+
+
+class TestComputeSoftCellTypeFractions:
+    """Tests for soft probability-based cell type fraction computation."""
+
+    def test_soft_fractions_sum_to_one(self):
+        np.random.seed(42)
+        n_cells = 50
+        obs = pd.DataFrame({
+            "condition": np.repeat(["condA", "condB"], n_cells // 2),
+        }, index=[f"cell_{i}" for i in range(n_cells)])
+        prob_df = pd.DataFrame(
+            np.random.dirichlet([1, 1, 1], size=n_cells),
+            columns=["TypeA", "TypeB", "TypeC"],
+            index=obs.index,
+        )
+        fracs = step02.compute_soft_cell_type_fractions(obs, prob_df, condition_key="condition")
+        assert np.allclose(fracs.sum(axis=1), 1.0, atol=1e-6)
+        assert fracs.shape == (2, 3)
+
+    def test_deterministic_cells_match_hard(self):
+        obs = pd.DataFrame({
+            "condition": ["A", "A", "B", "B"],
+        }, index=[f"c{i}" for i in range(4)])
+        prob_df = pd.DataFrame(
+            [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 0.0]],
+            columns=["X", "Y"],
+            index=obs.index,
+        )
+        fracs = step02.compute_soft_cell_type_fractions(obs, prob_df, condition_key="condition")
+        assert fracs.loc["A", "X"] == pytest.approx(0.5)
+        assert fracs.loc["A", "Y"] == pytest.approx(0.5)
+        assert fracs.loc["B", "X"] == pytest.approx(1.0)
+        assert fracs.loc["B", "Y"] == pytest.approx(0.0)

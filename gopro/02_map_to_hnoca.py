@@ -254,7 +254,7 @@ def transfer_labels_knn(
     label_columns: list[str],
     k: int = 50,
     class_balanced: bool = True,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """Transfer cell type labels from reference to query via KNN in latent space.
 
     Uses class-balanced KNN by default: each neighbor's vote is weighted by
@@ -272,11 +272,14 @@ def transfer_labels_knn(
             to correct for reference class imbalance.
 
     Returns:
-        DataFrame with transferred labels and confidence scores.
+        Tuple of:
+        - DataFrame with transferred labels and confidence scores.
+        - Dict mapping label_col -> DataFrame of soft probabilities (cells x types).
     """
     from sklearn.neighbors import NearestNeighbors
 
     results = pd.DataFrame(index=query_obs.index)
+    soft_probs = {}
 
     # Fit a single NearestNeighbors model (shared across label columns)
     logger.info("Fitting NearestNeighbors (k=%d) on %d reference cells...", k, len(ref_latent))
@@ -339,6 +342,15 @@ def transfer_labels_knn(
                        (np.arange(len(query_latent)), neighbor_label_idx[:, j]),
                        weights[:, j])
 
+        # Soft probabilities: normalize vote matrix to per-cell probability distribution
+        row_totals = vote_matrix.sum(axis=1, keepdims=True)
+        prob_matrix = vote_matrix / (row_totals + 1e-10)
+        soft_probs[label_col] = pd.DataFrame(
+            prob_matrix,
+            index=query_obs.index,
+            columns=[idx_to_class[i] for i in range(n_classes)],
+        )
+
         # Predict: class with highest vote
         predicted_idx = vote_matrix.argmax(axis=1)
         predicted = np.array([idx_to_class[i] for i in predicted_idx])
@@ -350,7 +362,7 @@ def transfer_labels_knn(
         results[f"predicted_{label_col}"] = predicted
         results[f"{label_col}_confidence"] = confidence
 
-    return results
+    return results, soft_probs
 
 
 def compute_cell_type_fractions(
@@ -436,7 +448,7 @@ if __name__ == "__main__":
     # Transfer labels
     logger.info("Transferring cell type labels...")
     label_cols = [ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3]
-    transferred = transfer_labels_knn(
+    transferred, soft_probs = transfer_labels_knn(
         ref_latent, query_latent,
         ref.obs, query.obs,
         label_columns=label_cols,
