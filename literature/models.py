@@ -6,6 +6,7 @@ from typing import Optional, List
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     Text,
@@ -102,3 +103,109 @@ class SearchRun(Base):
             f"<SearchRun id={self.id} source={self.source!r} "
             f"query={self.query[:30]!r} n_results={self.n_results}>"
         )
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph entities
+# ---------------------------------------------------------------------------
+
+
+class CellType(Base):
+    """Canonical cell type entity with aliases."""
+
+    __tablename__ = "cell_types"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canonical_name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    # JSON list stored as TEXT, e.g. '["RGC", "radial glia"]'
+    aliases: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    paper_links: Mapped[List["PaperCellType"]] = relationship(
+        "PaperCellType", back_populates="cell_type", cascade="all, delete-orphan"
+    )
+    dataset_links: Mapped[List["DatasetCellType"]] = relationship(
+        "DatasetCellType", back_populates="cell_type", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<CellType id={self.id} name={self.canonical_name!r}>"
+
+
+class Morphogen(Base):
+    """Canonical morphogen entity."""
+
+    __tablename__ = "morphogens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    pathway: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # JSON list stored as TEXT
+    aliases: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    paper_links: Mapped[List["PaperMorphogen"]] = relationship(
+        "PaperMorphogen", back_populates="morphogen", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<Morphogen id={self.id} name={self.name!r}>"
+
+
+class PaperCellType(Base):
+    """Association: paper mentions/studies this cell type."""
+
+    __tablename__ = "paper_cell_types"
+    __table_args__ = (
+        UniqueConstraint("paper_id", "cell_type_id", name="uq_paper_celltype"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    paper_id: Mapped[int] = mapped_column(Integer, ForeignKey("papers.id"), nullable=False)
+    cell_type_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("cell_types.id"), nullable=False
+    )
+    context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    paper: Mapped["Paper"] = relationship("Paper")
+    cell_type: Mapped["CellType"] = relationship("CellType", back_populates="paper_links")
+
+
+class PaperMorphogen(Base):
+    """Association: paper uses this morphogen."""
+
+    __tablename__ = "paper_morphogens"
+    __table_args__ = (
+        UniqueConstraint("paper_id", "morphogen_id", name="uq_paper_morphogen"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    paper_id: Mapped[int] = mapped_column(Integer, ForeignKey("papers.id"), nullable=False)
+    morphogen_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("morphogens.id"), nullable=False
+    )
+    concentration: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    paper: Mapped["Paper"] = relationship("Paper")
+    morphogen: Mapped["Morphogen"] = relationship("Morphogen", back_populates="paper_links")
+
+
+class DatasetCellType(Base):
+    """Association: dataset contains this cell type."""
+
+    __tablename__ = "dataset_cell_types"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "cell_type_id", name="uq_dataset_celltype"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dataset_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("datasets.id"), nullable=False
+    )
+    cell_type_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("cell_types.id"), nullable=False
+    )
+    fraction: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    dataset: Mapped["Dataset"] = relationship("Dataset")
+    cell_type: Mapped["CellType"] = relationship("CellType", back_populates="dataset_links")
