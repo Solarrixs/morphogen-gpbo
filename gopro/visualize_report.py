@@ -171,8 +171,9 @@ def compute_morphogen_pca_with_recommendations(
         morphogen_cols: Columns to use from both DataFrames.
 
     Returns:
-        Tuple of (training_coords, rec_coords, loadings, variance_explained_pct).
-        loadings has shape (n_components, n_features) with feature names in morphogen_cols.
+        Tuple of (training_coords, rec_coords, loadings, variance_explained_pct, active_cols).
+        loadings has shape (n_components, n_features); active_cols lists the non-zero-variance
+        column names used.
     """
     from sklearn.decomposition import PCA
     from sklearn.preprocessing import StandardScaler

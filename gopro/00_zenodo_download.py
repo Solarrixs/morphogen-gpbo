@@ -12,12 +12,11 @@ Usage:
 """
 
 import requests
-import hashlib
 import sys
 from pathlib import Path
 from urllib.parse import urljoin
 
-from gopro.config import PROJECT_DIR, DATA_DIR, get_logger
+from gopro.config import PROJECT_DIR, DATA_DIR, get_logger, md5_file
 
 logger = get_logger(__name__)
 
@@ -86,16 +85,7 @@ def list_files(record_id):
     return files
 
 
-def md5_file(filepath, chunk_size=8192 * 1024):
-    """Compute MD5 of a file without loading it all into memory."""
-    h = hashlib.md5()
-    with open(filepath, "rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
+# md5_file imported from gopro.config
 
 
 def download_file(url, output_path, expected_md5=None):

@@ -23,13 +23,12 @@ Usage:
 """
 
 import gzip
-import hashlib
 import shutil
 import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from gopro.config import DATA_DIR, get_logger
+from gopro.config import DATA_DIR, get_logger, md5_file
 
 logger = get_logger(__name__)
 
@@ -58,13 +57,7 @@ def format_size(nbytes: int) -> str:
     return f"{nbytes:.1f} PB"
 
 
-def md5_file(filepath: Path) -> str:
-    """Compute MD5 checksum without loading entire file into memory."""
-    h = hashlib.md5()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+# md5_file imported from gopro.config
 
 
 def get_remote_size(url: str) -> int | None:

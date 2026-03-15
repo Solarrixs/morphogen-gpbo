@@ -104,6 +104,29 @@ def get_logger(name: str) -> logging.Logger:
     logger.setLevel(getattr(logging, level, logging.INFO))
     return logger
 
+# --- File hashing ---
+
+def md5_file(path, chunk_size: int = 8 * 1024 * 1024) -> str:
+    """Compute MD5 hash of a file without loading it all into memory.
+
+    Args:
+        path: Path to the file.
+        chunk_size: Read buffer size in bytes (default 8 MiB).
+
+    Returns:
+        Hex-encoded MD5 digest string.
+    """
+    import hashlib
+    from pathlib import Path as _Path
+
+    path = _Path(path)
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 # --- Gruffi stress-filtering defaults ---
 GRUFFI_DEFAULT_THRESHOLD = 0.15
 GRUFFI_DEFAULT_RESOLUTION = 2.0
