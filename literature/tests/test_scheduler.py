@@ -150,3 +150,53 @@ class TestRunScrape:
         runs = session.query(SearchRun).all()
         assert len(runs) >= 1
         assert runs[0].source == "pubmed"
+
+
+class TestEndToEndSmoke:
+    def test_scrape_stores_and_status_works(self, db_session):
+        """Full pipeline: config → scrape (mocked) → DB → verify status."""
+        session, db_path = db_session
+        config = {
+            "db_path": str(db_path),
+            "ncbi_api_key": "",
+            "sources": {
+                "pubmed": {
+                    "enabled": True,
+                    "queries": ["brain organoid"],
+                    "max_results_per_query": 5,
+                    "date_range_days": 7,
+                },
+                "biorxiv": {"enabled": False},
+                "datasets": {
+                    "geo": {"enabled": False},
+                    "zenodo": {"enabled": False},
+                    "cellxgene": {"enabled": False},
+                },
+            },
+        }
+        mock_results = [
+            PaperResult(title="Paper 1", source="pubmed", doi="10.1038/p1",
+                       abstract="single-cell RNA-seq brain organoid"),
+            PaperResult(title="Paper 2", source="pubmed", doi="10.1038/p2",
+                       abstract="spatial transcriptomics MERFISH fetal brain"),
+        ]
+        with patch("literature.scheduler.PubMedScraper") as MockPubMed:
+            instance = MockPubMed.return_value
+            instance.search.return_value = mock_results
+            run_scrape(config, db_path=db_path)
+
+        papers = session.query(Paper).all()
+        assert len(papers) == 2
+
+        # Verify scRNA-seq detection
+        p1 = session.query(Paper).filter_by(doi="10.1038/p1").first()
+        assert p1.has_scrna_seq is True
+        assert p1.has_spatial is False
+
+        # Verify spatial detection
+        p2 = session.query(Paper).filter_by(doi="10.1038/p2").first()
+        assert p2.has_spatial is True
+
+        # Verify search run logged
+        runs = session.query(SearchRun).all()
+        assert len(runs) >= 1

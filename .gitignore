@@ -28,3 +28,8 @@ neural_organoid_atlas/
 .claude/worktrees/
 .hypothesis/
 .worktrees/
+
+# Literature scraping pipeline
+literature/papers.db
+literature/scrape.log
+literature/config.local.yaml
