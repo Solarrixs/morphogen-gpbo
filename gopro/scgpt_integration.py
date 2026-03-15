@@ -312,11 +312,11 @@ def embed_cells(
     adata_sub = adata[:, mask].copy()
     gene_ids = id_in_vocab[mask]
 
-    # Get count matrix as dense numpy
+    # Keep sparse if possible — _CellDataset handles sparse rows in __getitem__
     X = adata_sub.X
-    if sparse.issparse(X):
-        X = X.toarray()
-    count_matrix = np.asarray(X, dtype=np.float32)
+    if not sparse.issparse(X):
+        X = np.asarray(X, dtype=np.float32)
+    count_matrix = X
 
     pad_token = model_configs.get("pad_token", "<pad>")
     pad_value = model_configs.get("pad_value", -2)
@@ -458,8 +458,12 @@ def validate_annotations_scgpt(
         )
         adata.obsm[obsm_key] = embed_cells_result
 
-    # Build KNN graph on scGPT embeddings and cluster
-    adata_tmp = adata.copy()
+    # Build KNN graph on scGPT embeddings and cluster (minimal AnnData to save memory)
+    import anndata as ad
+    adata_tmp = ad.AnnData(
+        obs=adata.obs[[label_col]].copy(),
+        obsm={obsm_key: adata.obsm[obsm_key]},
+    )
     sc.pp.neighbors(adata_tmp, use_rep=obsm_key, n_neighbors=n_neighbors)
     sc.tl.leiden(adata_tmp, resolution=1.0, key_added="scgpt_leiden")
 

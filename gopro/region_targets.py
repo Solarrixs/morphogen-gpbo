@@ -12,7 +12,6 @@ rather than defining its own copies.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import anndata as ad
 import numpy as np

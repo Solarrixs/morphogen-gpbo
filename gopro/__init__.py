@@ -11,7 +11,6 @@ Usage::
 """
 
 import importlib.util
-import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -45,14 +44,7 @@ from gopro.datasets import (
     get_virtual_datasets,
     collect_fidelity_sources,
 )
-from gopro.region_targets import (
-    NAMED_REGION_PROFILES,
-    OFF_TARGET_LEVEL1,
-    HNOCA_TO_BRAUN_REGION,
-    build_hnoca_to_braun_label_map,
-    list_named_profiles,
-    build_custom_target,
-)
+# region_targets constants are lazily loaded below to avoid pulling in anndata
 
 # ---------------------------------------------------------------------------
 # Lazy imports for numeric-prefixed pipeline modules
@@ -82,7 +74,13 @@ _LAZY_IMPORTS: dict[str, str] = {
     "validate_mapped_adata": "validation.py",
     "validate_temporal_atlas": "validation.py",
     "validate_fidelity_report": "validation.py",
-    # region_targets.py (functions needing anndata)
+    # region_targets.py (lazy to avoid anndata import at gopro load time)
+    "NAMED_REGION_PROFILES": "region_targets.py",
+    "OFF_TARGET_LEVEL1": "region_targets.py",
+    "HNOCA_TO_BRAUN_REGION": "region_targets.py",
+    "build_hnoca_to_braun_label_map": "region_targets.py",
+    "list_named_profiles": "region_targets.py",
+    "build_custom_target": "region_targets.py",
     "discover_available_regions": "region_targets.py",
     "load_region_profile": "region_targets.py",
     "load_target_profile_csv": "region_targets.py",

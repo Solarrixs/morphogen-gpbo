@@ -485,22 +485,24 @@ def build_knowledge_graph(session: Session) -> Dict[str, Any]:
             - paper_morphogen_links: int
             - dataset_cell_type_links: int
     """
-    papers = session.execute(select(Paper)).scalars().all()
-    datasets = session.execute(select(Dataset)).scalars().all()
+    from sqlalchemy import func
+
+    n_papers = session.scalar(select(func.count(Paper.id))) or 0
+    n_datasets = session.scalar(select(func.count(Dataset.id))) or 0
     cell_types = session.execute(select(CellType)).scalars().all()
     morphogens = session.execute(select(Morphogen)).scalars().all()
-    pct_links = session.execute(select(PaperCellType)).scalars().all()
-    pm_links = session.execute(select(PaperMorphogen)).scalars().all()
-    dct_links = session.execute(select(DatasetCellType)).scalars().all()
+    n_pct = session.scalar(select(func.count(PaperCellType.id))) or 0
+    n_pm = session.scalar(select(func.count(PaperMorphogen.id))) or 0
+    n_dct = session.scalar(select(func.count(DatasetCellType.id))) or 0
 
     return {
-        "papers": len(list(papers)),
-        "datasets": len(list(datasets)),
+        "papers": n_papers,
+        "datasets": n_datasets,
         "cell_types": [ct.canonical_name for ct in cell_types],
         "morphogens": [m.name for m in morphogens],
-        "paper_cell_type_links": len(list(pct_links)),
-        "paper_morphogen_links": len(list(pm_links)),
-        "dataset_cell_type_links": len(list(dct_links)),
+        "paper_cell_type_links": n_pct,
+        "paper_morphogen_links": n_pm,
+        "dataset_cell_type_links": n_dct,
     }
 
 
@@ -514,47 +516,49 @@ def find_morphogen_fate_links(session: Session) -> List[Dict[str, Any]]:
         List of dicts with keys: morphogen, cell_type, papers (list of titles),
         paper_count.
     """
-    morphogens = list(session.execute(select(Morphogen)).scalars().all())
-    cell_types = list(session.execute(select(CellType)).scalars().all())
+    # Pre-fetch all associations in 2 queries instead of M*C queries
+    all_pm = list(session.execute(select(PaperMorphogen)).scalars().all())
+    all_pct = list(session.execute(select(PaperCellType)).scalars().all())
 
+    # Build lookup: morphogen_id -> set of paper_ids
+    morph_papers: Dict[int, set] = {}
+    for pm in all_pm:
+        morph_papers.setdefault(pm.morphogen_id, set()).add(pm.paper_id)
+
+    # Build lookup: cell_type_id -> set of paper_ids
+    ct_papers: Dict[int, set] = {}
+    for pct in all_pct:
+        ct_papers.setdefault(pct.cell_type_id, set()).add(pct.paper_id)
+
+    # Load entity names
+    morphogens = {m.id: m.name for m in session.execute(select(Morphogen)).scalars().all()}
+    cell_types = {c.id: c.canonical_name for c in session.execute(select(CellType)).scalars().all()}
+
+    # Find co-occurrences
     links: List[Dict[str, Any]] = []
-
-    for morph in morphogens:
-        # Papers linked to this morphogen
-        pm_rows = (
-            session.execute(
-                select(PaperMorphogen).where(PaperMorphogen.morphogen_id == morph.id)
-            )
-            .scalars()
-            .all()
-        )
-        morph_paper_ids = {row.paper_id for row in pm_rows}
-        if not morph_paper_ids:
-            continue
-
-        for ct in cell_types:
-            # Papers linked to this cell type
-            pct_rows = (
-                session.execute(
-                    select(PaperCellType).where(PaperCellType.cell_type_id == ct.id)
-                )
-                .scalars()
-                .all()
-            )
-            ct_paper_ids = {row.paper_id for row in pct_rows}
-
-            shared = morph_paper_ids & ct_paper_ids
+    all_paper_ids = set()
+    for m_id, m_pids in morph_papers.items():
+        for c_id, c_pids in ct_papers.items():
+            shared = m_pids & c_pids
             if shared:
-                shared_papers = [
-                    session.get(Paper, pid) for pid in shared
-                ]
+                all_paper_ids.update(shared)
                 links.append({
-                    "morphogen": morph.name,
-                    "cell_type": ct.canonical_name,
-                    "papers": [p.title for p in shared_papers if p],
+                    "morphogen": morphogens.get(m_id, "?"),
+                    "cell_type": cell_types.get(c_id, "?"),
+                    "_paper_ids": shared,
                     "paper_count": len(shared),
                 })
 
-    # Sort by paper_count descending
+    # Batch-fetch paper titles
+    papers_by_id = {}
+    if all_paper_ids:
+        papers = session.execute(
+            select(Paper).where(Paper.id.in_(all_paper_ids))
+        ).scalars().all()
+        papers_by_id = {p.id: p.title for p in papers}
+
+    for link in links:
+        link["papers"] = [papers_by_id.get(pid, "") for pid in link.pop("_paper_ids")]
+
     links.sort(key=lambda x: x["paper_count"], reverse=True)
     return links

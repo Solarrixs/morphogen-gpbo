@@ -21,17 +21,14 @@ Usage (Python)::
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from gopro.config import DATA_DIR, MODEL_DIR, get_logger
 from gopro.datasets import (
     DatasetConfig,
-    collect_fidelity_sources,
     get_dataset,
-    get_real_datasets,
-    get_virtual_datasets,
     load_dataset_registry,
 )
 
