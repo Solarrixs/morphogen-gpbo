@@ -29,6 +29,7 @@ class PubMedScraper(BaseScraper):
         date_from: Optional[str] = None,
     ) -> list[PaperResult]:
         """Search PubMed and return a list of PaperResult objects."""
+        from datetime import datetime, timezone
         search_kwargs: dict = {
             "db": "pubmed",
             "term": query,
@@ -37,6 +38,7 @@ class PubMedScraper(BaseScraper):
         }
         if date_from:
             search_kwargs["mindate"] = date_from
+            search_kwargs["maxdate"] = datetime.now(timezone.utc).strftime("%Y/%m/%d")
             search_kwargs["datetype"] = "pdat"
 
         handle = Entrez.esearch(**search_kwargs)
