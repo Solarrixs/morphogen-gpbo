@@ -1,0 +1,42 @@
+db_path: literature/papers.db
+ncbi_api_key: ${NCBI_API_KEY}
+
+sources:
+  pubmed:
+    enabled: true
+    queries:
+      - "brain organoid scRNA-seq"
+      - "neural organoid single-cell"
+      - "fetal brain atlas single cell"
+      - "spatial transcriptomics brain development"
+      - "cerebral organoid differentiation protocol"
+    max_results_per_query: 100
+    date_range_days: 7
+
+  biorxiv:
+    enabled: true
+    queries:
+      - "brain organoid single cell RNA sequencing"
+      - "neural organoid differentiation transcriptomics"
+      - "fetal brain single cell atlas development"
+      - "cerebral organoid protocol optimization"
+    server: biorxiv
+    date_range_days: 7
+
+  datasets:
+    geo:
+      enabled: true
+      queries:
+        - "brain organoid scRNA-seq"
+        - "neural organoid single cell"
+
+    zenodo:
+      enabled: true
+      queries:
+        - "brain organoid single cell transcriptomics"
+        - "fetal brain atlas scRNA-seq"
+        - "neural organoid cell type atlas"
+
+    cellxgene:
+      enabled: true
+      tissue_filter: brain
