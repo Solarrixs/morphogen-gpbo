@@ -2,6 +2,8 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from literature.scrapers.pubmed import PubMedScraper
+from literature.scrapers.biorxiv import BioRxivScraper
+from literature.scrapers.dataset_sources import GEOScraper, ZenodoScraper
 from literature.scrapers.base import PaperResult, detect_scrna_seq, detect_spatial
 
 MOCK_EFETCH_XML = """<?xml version="1.0"?>
@@ -67,3 +69,94 @@ class TestPubMedScraper:
             results = scraper.search("brain organoid", max_results=10)
         assert len(results) == 1
         assert results[0].source == "pubmed"
+
+
+# ---------------------------------------------------------------------------
+# bioRxiv scraper
+# ---------------------------------------------------------------------------
+
+MOCK_BIORXIV_RESPONSE = {
+    "messages": [{"status": "ok", "count": 2, "total": 2}],
+    "collection": [
+        {
+            "doi": "10.1101/2026.03.15.123456",
+            "title": "Neural organoid patterning screen",
+            "authors": "Smith, J.; Chen, L.",
+            "abstract": "We performed single-cell RNA-seq on neural organoids.",
+            "date": "2026-03-15",
+            "server": "biorxiv",
+            "category": "neuroscience",
+        },
+        {
+            "doi": "10.1101/2026.03.14.999999",
+            "title": "Unrelated protein folding paper",
+            "authors": "Jones, A.",
+            "abstract": "Protein structure prediction using deep learning.",
+            "date": "2026-03-14",
+            "server": "biorxiv",
+            "category": "bioinformatics",
+        },
+    ],
+}
+
+
+class TestBioRxivScraper:
+    def test_parse_and_filter(self):
+        scraper = BioRxivScraper()
+        with patch("literature.scrapers.biorxiv.requests.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200, json=lambda: MOCK_BIORXIV_RESPONSE)
+            mock_get.return_value.raise_for_status = lambda: None
+            results = scraper.search("neural organoid", max_results=10)
+        assert len(results) == 1  # Only the neural organoid paper matches
+        assert results[0].source == "biorxiv"
+        assert "10.1101" in results[0].doi
+
+
+# ---------------------------------------------------------------------------
+# Zenodo scraper
+# ---------------------------------------------------------------------------
+
+
+class TestZenodoScraper:
+    def test_parse_results(self):
+        scraper = ZenodoScraper()
+        mock_response = {
+            "hits": {"hits": [{
+                "doi": "10.5281/zenodo.12345",
+                "metadata": {"title": "Brain atlas h5ad", "description": "scRNA-seq atlas"},
+                "files": [{"key": "atlas.h5ad", "size": 1000000,
+                           "links": {"self": "https://zenodo.org/files/atlas.h5ad"}}],
+            }]}
+        }
+        with patch("literature.scrapers.dataset_sources.requests.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200, json=lambda: mock_response)
+            mock_get.return_value.raise_for_status = lambda: None
+            results = scraper.search("brain atlas h5ad")
+        assert len(results) >= 1
+        assert results[0].source == "zenodo"
+        assert results[0].format == "h5ad"
+
+
+# ---------------------------------------------------------------------------
+# GEO scraper
+# ---------------------------------------------------------------------------
+
+
+class TestGEOScraper:
+    def test_parse_results(self):
+        scraper = GEOScraper()
+        with patch("literature.scrapers.dataset_sources.Entrez") as mock_entrez:
+            mock_entrez.esearch.return_value = MagicMock()
+            mock_entrez.read.return_value = {"IdList": ["200233574"]}
+            mock_entrez.esummary.return_value = MagicMock()
+            # esummary returns a list of dicts
+            mock_summary = [{"Accession": "GSE233574", "title": "Brain organoid data",
+                            "summary": "scRNA-seq of brain organoids",
+                            "taxon": "Homo sapiens", "n_samples": "46"}]
+            mock_entrez.read.side_effect = [
+                {"IdList": ["200233574"]},
+                mock_summary,
+            ]
+            results = scraper.search("brain organoid")
+        assert len(results) >= 1
+        assert results[0].accession == "GSE233574"
