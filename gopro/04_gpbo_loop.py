@@ -108,21 +108,19 @@ def _compute_active_bounds(
         col_min = float(np.min(col_data))
         col_max = float(np.max(col_data))
 
-        # Skip zero-variance columns (no information for GP)
+        # Skip zero-variance columns (no information for GP).
+        # This includes log_harvest_day when all data is at a single timepoint —
+        # BoTorch's Normalize divides by (upper - lower), so equal bounds → NaN.
+        # The column is restored with its constant value after optimization (line ~690).
         if col_max == col_min:
-            if col == "log_harvest_day":
-                # Keep time dimension even if constant (single time point)
-                active_cols.append(col)
-                active_bounds[col] = (np.log(7), np.log(120))
-            else:
-                logger.info("Dropping zero-variance column: %s (value=%.6f)", col, col_max)
+            logger.info("Dropping zero-variance column: %s (value=%.6f)", col, col_max)
             continue
 
         # Bounds = training range + padding, clamped to literature max
-        padded_upper = col_max * (1.0 + padding)
+        padded_upper = col_max + padding * (col_max - col_min)
         lit_lo, lit_hi = MORPHOGEN_BOUNDS_LITERATURE.get(col, (0.0, padded_upper))
         upper = min(padded_upper, lit_hi)
-        lower = max(0.0, col_min)  # morphogen concentrations are non-negative
+        lower = 0.0 if col != "log_harvest_day" else col_min
 
         # Guarantee nonzero bound width for near-zero columns
         MIN_BOUND_WIDTH = 1e-6  # µM — minimum meaningful concentration range
@@ -204,6 +202,19 @@ def ilr_inverse(Z: np.ndarray, D: int) -> np.ndarray:
     return x / x.sum(axis=1, keepdims=True)
 
 
+def _helmert_basis_torch(D: int) -> torch.Tensor:
+    """Construct the Helmert ILR basis matrix as a torch tensor.
+
+    Used inside the differentiable ILR-inverse objective for scalarization.
+    """
+    V = torch.zeros(D, D - 1, dtype=DTYPE, device=DEVICE)
+    for j in range(D - 1):
+        V[:j + 1, j] = -1.0 / (j + 1)
+        V[j + 1, j] = 1.0
+        V[:, j] *= (float((j + 1) / (j + 2))) ** 0.5
+    return V
+
+
 def build_training_set(
     fractions_csv: Path,
     morphogen_csv: Path,
@@ -221,6 +232,9 @@ def build_training_set(
         X: (N_conditions, D_morphogens + 1_time + 1_fidelity)
         Y: (N_conditions, M_cell_types)
     """
+    from gopro.validation import validate_training_csvs
+    validate_training_csvs(fractions_csv, morphogen_csv)
+
     Y = pd.read_csv(str(fractions_csv), index_col=0)
     X = pd.read_csv(str(morphogen_csv), index_col=0)
 
@@ -231,7 +245,8 @@ def build_training_set(
     X = X.loc[common]
     Y = Y.loc[common]
 
-    # Add fidelity column
+    # Add fidelity column (copy to avoid mutating caller's DataFrame)
+    X = X.copy()
     X["fidelity"] = fidelity
 
     logger.info("X (morphogens): %s", X.shape)
@@ -425,6 +440,10 @@ def recommend_next_experiments(
     n_recommendations: int = 24,
     use_multi_objective: bool = False,
     ref_point: Optional[list[float]] = None,
+    use_ilr: bool = False,
+    n_composition_parts: int = 0,
+    cell_type_cols: Optional[list[str]] = None,
+    target_profile: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """Use acquisition function to recommend next experiments.
 
@@ -437,6 +456,12 @@ def recommend_next_experiments(
         n_recommendations: Number of conditions to recommend.
         use_multi_objective: Whether to use multi-objective optimization.
         ref_point: Reference point for hypervolume calculation.
+        use_ilr: Whether ILR transform was applied to Y.
+        n_composition_parts: Number of composition parts (D) for ILR inverse.
+        cell_type_cols: Names of cell type columns in Y.
+        target_profile: Optional target composition profile for region targeting.
+            When provided, scalarization uses cosine similarity to this target
+            instead of equal weighting.
 
     Returns:
         DataFrame with recommended morphogen concentrations and predictions.
@@ -466,7 +491,11 @@ def recommend_next_experiments(
             qLogNoisyExpectedHypervolumeImprovement,
         )
         if ref_point is None:
-            ref_point = [0.0] * train_Y.shape[1]
+            # Data-driven ref_point: below observed minimum per objective
+            y_min = train_Y.min(dim=0).values
+            y_max = train_Y.max(dim=0).values
+            margin = 0.1 * (y_max - y_min).clamp(min=1e-6)
+            ref_point = (y_min - margin).tolist()
         ref_point_tensor = torch.tensor(ref_point, dtype=DTYPE, device=DEVICE)
 
         acqf = qLogNoisyExpectedHypervolumeImprovement(
@@ -478,18 +507,59 @@ def recommend_next_experiments(
         # For multi-output models, use a scalarization posterior transform
         if train_Y.shape[1] > 1:
             from botorch.acquisition.objective import GenericMCObjective
-            from botorch.utils.transforms import normalize, standardize
 
-            # Default: maximize mean of all outputs (equal weight scalarization)
-            weights = torch.ones(train_Y.shape[1], dtype=DTYPE, device=DEVICE)
-            weights = weights / weights.sum()
+            if use_ilr and n_composition_parts > 0:
+                D = n_composition_parts
+                V_T = _helmert_basis_torch(D).T  # (D-1, D)
 
-            objective = GenericMCObjective(
-                lambda samples, X=None: (samples * weights).sum(dim=-1)
-            )
+                # Build target weights for composition-space scalarization
+                if target_profile is not None and cell_type_cols is not None:
+                    # Region targeting: weight by target profile (cosine similarity)
+                    target_vec = np.array([
+                        target_profile.get(ct, 0.0) for ct in cell_type_cols
+                    ])
+                    target_norm = np.linalg.norm(target_vec)
+                    if target_norm > 0:
+                        target_vec = target_vec / target_norm
+                    comp_weights = torch.tensor(
+                        target_vec, dtype=DTYPE, device=DEVICE
+                    )
+                    logger.info("Using target profile for scalarization (cosine similarity)")
+                else:
+                    # Equal weights in composition space = maximize mean cell type fraction.
+                    comp_weights = torch.ones(D, dtype=DTYPE, device=DEVICE) / D
+
+                def _composition_scalarization(samples, X=None):
+                    # samples: (..., D-1) in ILR space
+                    log_x = samples @ V_T  # (..., D)
+                    log_x = log_x - log_x.max(dim=-1, keepdim=True).values
+                    x = torch.exp(log_x)
+                    comp = x / x.sum(dim=-1, keepdim=True)  # (..., D)
+                    # When target_profile is set, comp_weights is the unit target
+                    # vector so this dot product is (unnormalized) cosine similarity
+                    # since comp is already normalized (sums to 1).
+                    return (comp * comp_weights).sum(dim=-1)
+
+                objective = GenericMCObjective(_composition_scalarization)
+
+                # Compute best_f in composition space from training data
+                train_Y_np = train_Y.cpu().numpy()
+                train_comp = ilr_inverse(train_Y_np, n_composition_parts)
+                comp_weights_np = comp_weights.cpu().numpy()
+                best_f = float((train_comp @ comp_weights_np).max())
+            else:
+                # Legacy ILR-space scalarization (when --no-ilr is used)
+                weights = torch.ones(train_Y.shape[1], dtype=DTYPE, device=DEVICE)
+                weights = weights / weights.sum()
+
+                objective = GenericMCObjective(
+                    lambda samples, X=None: (samples * weights).sum(dim=-1)
+                )
+                best_f = float((train_Y @ weights.unsqueeze(1)).max())
+
             acqf = qLogExpectedImprovement(
                 model=model,
-                best_f=(train_Y @ weights.unsqueeze(1)).max(),
+                best_f=best_f,
                 objective=objective,
             )
         else:
@@ -520,10 +590,17 @@ def recommend_next_experiments(
         columns=columns,
     )
 
-    # Add predictions
-    for i in range(pred_mean.shape[1]):
-        recommendations[f"predicted_y{i}_mean"] = pred_mean[:, i]
-        recommendations[f"predicted_y{i}_std"] = np.sqrt(pred_var[:, i])
+    # Add predictions: convert from ILR space back to composition space if applicable
+    if use_ilr and n_composition_parts > 0 and cell_type_cols is not None:
+        pred_compositions = ilr_inverse(pred_mean, n_composition_parts)
+        for i, ct_name in enumerate(cell_type_cols):
+            recommendations[f"predicted_{ct_name}"] = pred_compositions[:, i]
+        # Note: ILR-space std cannot be meaningfully inverse-transformed to
+        # composition space, so we omit per-cell-type std columns.
+    else:
+        for i in range(pred_mean.shape[1]):
+            recommendations[f"predicted_y{i}_mean"] = pred_mean[:, i]
+            recommendations[f"predicted_y{i}_std"] = np.sqrt(pred_var[:, i])
 
     recommendations["acquisition_value"] = acq_values.detach().cpu().numpy() if acq_values.dim() > 0 else acq_values.item()
 
@@ -537,15 +614,22 @@ def recommend_next_experiments(
 
 def merge_multi_fidelity_data(
     data_sources: list[tuple[Path, Path, float]],
+    cellflow_confidence_threshold: float = 0.3,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Merge training data from multiple fidelity sources.
 
     Combines real, CellRank 2 virtual, and CellFlow virtual data into
     a single multi-fidelity training set.
 
+    For CellFlow data (fidelity=0.0), if a screening report CSV with a
+    ``confidence`` column exists alongside the fractions CSV, points
+    below ``cellflow_confidence_threshold`` are filtered out.
+
     Args:
         data_sources: List of (fractions_csv, morphogen_csv, fidelity) tuples.
             Each tuple provides a data source at a given fidelity level.
+        cellflow_confidence_threshold: Minimum confidence for CellFlow
+            virtual points. Points below this are dropped (default 0.3).
 
     Returns:
         Tuple of merged (X, Y) DataFrames with consistent column alignment.
@@ -559,6 +643,33 @@ def merge_multi_fidelity_data(
             continue
 
         X, Y = build_training_set(fractions_csv, morphogen_csv, fidelity=fidelity)
+
+        # Filter low-confidence CellFlow virtual points
+        if fidelity == 0.0:
+            report_path = fractions_csv.parent / "cellflow_screening_report.csv"
+            if report_path.exists():
+                report = pd.read_csv(str(report_path))
+                if "confidence" in report.columns and "condition" in report.columns:
+                    report = report.set_index("condition")
+                    # Align report to X index
+                    common_idx = X.index.intersection(report.index)
+                    if len(common_idx) > 0:
+                        conf = report.loc[common_idx, "confidence"]
+                        keep_mask = conf >= cellflow_confidence_threshold
+                        n_before = len(X)
+                        keep_conditions = common_idx[keep_mask]
+                        # Also keep any conditions not in the report
+                        extra = X.index.difference(report.index)
+                        keep_all = keep_conditions.append(extra)
+                        X = X.loc[X.index.intersection(keep_all)]
+                        Y = Y.loc[Y.index.intersection(keep_all)]
+                        n_filtered = n_before - len(X)
+                        if n_filtered > 0:
+                            logger.info(
+                                "Filtered %d/%d CellFlow points below confidence threshold %.2f",
+                                n_filtered, n_before, cellflow_confidence_threshold,
+                            )
+
         all_X.append(X)
         all_Y.append(Y)
         logger.info("Loaded %d points at fidelity=%s", len(X), fidelity)
@@ -622,6 +733,7 @@ def run_gpbo_loop(
     use_ilr: bool = True,
     virtual_sources: Optional[list[tuple[Path, Path, float]]] = None,
     use_saasbo: bool = False,
+    target_profile: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -636,6 +748,9 @@ def run_gpbo_loop(
             tuples for multi-fidelity data. Real data is always included at
             fidelity=1.0. Virtual sources add CellRank2 (0.5) or CellFlow (0.0).
         use_saasbo: Use SAASBO (fully Bayesian GP with sparsity prior).
+        target_profile: Optional target cell type composition profile (Series).
+            When provided, the GP objective maximizes cosine similarity between
+            predicted composition and this target instead of equal weighting.
 
     Returns:
         DataFrame of recommended next experiments.
@@ -655,9 +770,10 @@ def run_gpbo_loop(
     else:
         X, Y = X_real, Y_real
 
-    # Compute active bounds from REAL data only (not virtual), to prevent
-    # GP from exploring far outside the experimentally tested range
-    active_bounds, active_cols = _compute_active_bounds(X_real, list(X.columns))
+    # Compute active bounds: use real data for morphogen ranges, but merged X
+    # when virtual sources exist so log_harvest_day variance is detected.
+    bounds_X = X if virtual_sources else X_real
+    active_bounds, active_cols = _compute_active_bounds(bounds_X, list(X.columns))
 
     # Filter X to active columns only
     X_active = X[active_cols]
@@ -677,6 +793,10 @@ def run_gpbo_loop(
         bounds=active_bounds,
         columns=list(X_active.columns),
         n_recommendations=n_recommendations,
+        use_ilr=use_ilr,
+        n_composition_parts=len(cell_type_cols),
+        cell_type_cols=cell_type_cols,
+        target_profile=target_profile,
     )
 
     # Restore dropped zero-variance columns as zeros
@@ -759,7 +879,24 @@ if __name__ == "__main__":
                         help="Path to SAG screen morphogens CSV")
     parser.add_argument("--saasbo", action="store_true",
                         help="Use SAASBO (fully Bayesian GP with sparsity prior)")
+    parser.add_argument("--target-region", type=str, default=None,
+                        help="Named region to optimize for (e.g., dorsal_telencephalon)")
+    parser.add_argument("--target-profile", type=str, default=None,
+                        help="Path to custom target profile CSV")
+    parser.add_argument("--list-regions", action="store_true",
+                        help="List available region profiles and exit")
     args = parser.parse_args()
+
+    # Handle --list-regions
+    if args.list_regions:
+        from gopro.region_targets import list_named_profiles
+        profiles_df = list_named_profiles()
+        print("\nAvailable region profiles:")
+        print("=" * 80)
+        for _, row in profiles_df.iterrows():
+            print(f"  {row['name']:<30s} {row['description']}")
+        print(f"\nUse: --target-region <name>")
+        raise SystemExit(0)
 
     fractions_path = Path(args.fractions) if args.fractions else DATA_DIR / "gp_training_labels_amin_kelley.csv"
     morphogen_path = Path(args.morphogens) if args.morphogens else DATA_DIR / "morphogen_matrix_amin_kelley.csv"
@@ -817,6 +954,35 @@ if __name__ == "__main__":
         virtual_sources.append((sag_frac, sag_morph, 1.0))
         logger.info("Including SAG secondary screen real data (fidelity=1.0)")
 
+    # Resolve target profile
+    target_profile = None
+    if args.target_region and args.target_profile:
+        logger.error("Cannot specify both --target-region and --target-profile")
+        raise SystemExit(1)
+
+    if args.target_region:
+        from gopro.region_targets import NAMED_REGION_PROFILES, load_region_profile
+        if args.target_region not in NAMED_REGION_PROFILES:
+            logger.error("Unknown region '%s'. Use --list-regions to see options.",
+                         args.target_region)
+            raise SystemExit(1)
+        # Try to load from reference atlas; fall back to a simple placeholder
+        ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
+        braun_path = DATA_DIR / "braun-et-al_minimal_for_mapping.h5ad"
+        for atlas_path in [ref_path, braun_path]:
+            if atlas_path.exists():
+                target_profile = load_region_profile(args.target_region, atlas_path)
+                break
+        if target_profile is None:
+            logger.error("No reference atlas found. Cannot load region profile.")
+            raise SystemExit(1)
+        logger.info("Targeting region: %s", args.target_region)
+
+    if args.target_profile:
+        from gopro.region_targets import load_target_profile_csv
+        target_profile = load_target_profile_csv(Path(args.target_profile))
+        logger.info("Using custom target profile from %s", args.target_profile)
+
     # Run GP-BO loop
     recs = run_gpbo_loop(
         fractions_csv=fractions_path,
@@ -827,6 +993,7 @@ if __name__ == "__main__":
         use_ilr=not args.no_ilr,
         virtual_sources=virtual_sources if virtual_sources else None,
         use_saasbo=args.saasbo,
+        target_profile=target_profile,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

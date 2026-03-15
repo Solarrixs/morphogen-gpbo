@@ -95,7 +95,7 @@ class TestBuildTrainingSet:
         assert (X["fidelity"] == 0.5).all()
 
     def test_mismatched_indices(self, tmp_path):
-        Y = pd.DataFrame({"ct": [0.5, 0.5]}, index=["cond_1", "cond_3"])
+        Y = pd.DataFrame({"ct_A": [0.5, 0.6], "ct_B": [0.5, 0.4]}, index=["cond_1", "cond_3"])
         X = pd.DataFrame({"morph": [1.0, 2.0]}, index=["cond_1", "cond_2"])
         Y.to_csv(tmp_path / "Y.csv")
         X.to_csv(tmp_path / "X.csv")
@@ -1209,3 +1209,53 @@ class TestComputeSoftCellTypeFractions:
         assert fracs.loc["A", "Y"] == pytest.approx(0.5)
         assert fracs.loc["B", "X"] == pytest.approx(1.0)
         assert fracs.loc["B", "Y"] == pytest.approx(0.0)
+
+
+class TestNormalizedEntropyWithTotalTypes:
+    """Tests for normalized_entropy with total_types parameter (Fix C)."""
+
+    def test_entropy_with_total_types(self):
+        """Entropy with total_types=8 on 4-element uniform array → ~0.5."""
+        p = np.array([0.25, 0.25, 0.25, 0.25])
+        # Without total_types: normalized by log2(4) = 2 → 1.0
+        h_old = step03.normalized_entropy(p)
+        assert h_old == pytest.approx(1.0, abs=1e-6)
+        # With total_types=8: normalized by log2(8) = 3 → 2/3
+        h_new = step03.normalized_entropy(p, total_types=8)
+        assert h_new == pytest.approx(2.0 / 3.0, abs=1e-3)
+
+    def test_entropy_without_total_types_backward_compatible(self):
+        """Without total_types, behavior is unchanged."""
+        p = np.array([0.5, 0.3, 0.2])
+        h1 = step03.normalized_entropy(p)
+        h2 = step03.normalized_entropy(p, total_types=None)
+        assert h1 == pytest.approx(h2)
+
+    def test_entropy_single_element(self):
+        p = np.array([1.0])
+        assert step03.normalized_entropy(p, total_types=10) == 0.0
+
+
+class TestBuildTrainingSetNoMutation:
+    """Test that build_training_set doesn't mutate input DataFrames (Fix E)."""
+
+    def test_original_dataframe_not_modified(self, tmp_path):
+        Y = pd.DataFrame({"ct_A": [0.6, 0.4], "ct_B": [0.4, 0.6]},
+                         index=["c1", "c2"])
+        X = pd.DataFrame({"CHIR99021_uM": [1.5, 3.0]}, index=["c1", "c2"])
+        Y.to_csv(tmp_path / "y.csv")
+        X.to_csv(tmp_path / "x.csv")
+
+        # Read original columns before
+        X_orig = pd.read_csv(tmp_path / "x.csv", index_col=0)
+        orig_cols = list(X_orig.columns)
+
+        X_result, Y_result = step04.build_training_set(
+            tmp_path / "y.csv", tmp_path / "x.csv", fidelity=1.0
+        )
+
+        # The returned X should have fidelity, but original file unchanged
+        assert "fidelity" in X_result.columns
+        # Re-read file to confirm it wasn't mutated on disk
+        X_check = pd.read_csv(tmp_path / "x.csv", index_col=0)
+        assert list(X_check.columns) == orig_cols

@@ -18,6 +18,9 @@ botorch
 gpytorch
 torch
 
+# Configuration
+pyyaml
+
 # Testing
 pytest
 hypothesis

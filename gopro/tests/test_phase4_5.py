@@ -852,6 +852,81 @@ class TestTransportMapFix:
         np.testing.assert_allclose(row_sums, 1.0, atol=1e-6)
 
 
+class TestLabelHarmonization:
+    def test_module_level_constant_exists(self):
+        """LABEL_HARMONIZATION is a dict at module level."""
+        assert hasattr(step05, 'LABEL_HARMONIZATION')
+        assert isinstance(step05.LABEL_HARMONIZATION, dict)
+
+    def test_harmonization_known_mapping(self):
+        """Known mappings are correct."""
+        assert step05.LABEL_HARMONIZATION["Excitatory neuron"] == "Cortical EN"
+        assert step05.LABEL_HARMONIZATION["Inhibitory neuron"] == "Cortical IN"
+
+
+class TestResolveTargetLabels:
+    def test_finds_preferred_label_key(self):
+        target_obs = pd.DataFrame({"predicted_annot_level_2": ["Neuron", "Glia", "NPC"]})
+        labels, fracs, col = step05._resolve_target_labels(target_obs, "predicted_annot_level_2")
+        assert col == "predicted_annot_level_2"
+        assert len(fracs) > 0
+
+    def test_falls_back_to_annot_level_2(self):
+        target_obs = pd.DataFrame({"annot_level_2": ["Neuron", "Glia"]})
+        labels, fracs, col = step05._resolve_target_labels(target_obs, "nonexistent")
+        assert col == "annot_level_2"
+
+    def test_raises_when_no_label_found(self):
+        target_obs = pd.DataFrame({"some_other_col": ["a", "b"]})
+        with pytest.raises(ValueError):
+            step05._resolve_target_labels(target_obs, "nonexistent")
+
+
+class TestEmbedQueryInAtlasPca:
+    def test_uses_existing_xpca(self):
+        import anndata as ad
+        query = ad.AnnData(X=np.random.rand(5, 10).astype(np.float32))
+        query.obsm["X_pca"] = np.random.rand(5, 20).astype(np.float32)
+        atlas = ad.AnnData(X=np.random.rand(10, 10).astype(np.float32))
+        atlas.obsm["X_pca"] = np.random.rand(10, 30).astype(np.float32)
+        source_mask = np.ones(10, dtype=bool)
+        source_pca = atlas.obsm["X_pca"]
+        q_emb, s_pca = step05._embed_query_in_atlas_pca(query, atlas, source_mask, source_pca)
+        assert q_emb.shape[1] == s_pca.shape[1]
+
+    def test_dimension_matching(self):
+        import anndata as ad
+        query = ad.AnnData(X=np.random.rand(5, 10).astype(np.float32))
+        query.obsm["X_pca"] = np.random.rand(5, 15).astype(np.float32)
+        atlas = ad.AnnData(X=np.random.rand(10, 10).astype(np.float32))
+        atlas.obsm["X_pca"] = np.random.rand(10, 30).astype(np.float32)
+        source_mask = np.ones(10, dtype=bool)
+        source_pca = atlas.obsm["X_pca"]
+        q_emb, s_pca = step05._embed_query_in_atlas_pca(query, atlas, source_mask, source_pca)
+        assert q_emb.shape[1] == s_pca.shape[1]
+        assert q_emb.shape[1] == 15  # min(15, 30)
+
+
+class TestProjectConditionTransport:
+    def test_returns_series_summing_to_one(self):
+        import scipy.sparse as sp_sparse
+        np.random.seed(42)
+        n_source, n_target = 10, 8
+        transport = sp_sparse.csr_matrix(np.random.dirichlet(np.ones(n_target), n_source))
+        local_idx_map = np.arange(n_source, dtype=np.intp)
+        neighbor_idx = np.array([[0, 1, 2], [3, 4, 5]])
+        weights_arr = np.array([[0.5, 0.3, 0.2], [0.4, 0.4, 0.2]])
+        cond_indices = np.array([0, 1])
+        target_labels_arr = np.array(["A", "A", "B", "B", "A", "B", "A", "B"])
+        target_ct_fracs = pd.Series({"A": 0.5, "B": 0.5})
+        result = step05._project_condition_transport(
+            transport, local_idx_map, neighbor_idx, weights_arr,
+            cond_indices, target_labels_arr, target_ct_fracs
+        )
+        assert isinstance(result, pd.Series)
+        assert abs(result.sum() - 1.0) < 1e-6
+
+
 class TestNewScriptsSyntax:
     """Verify new scripts parse correctly."""
 
@@ -864,3 +939,386 @@ class TestNewScriptsSyntax:
         import ast
         path = Path(__file__).parent.parent / "00c_build_temporal_atlas.py"
         ast.parse(path.read_text())
+
+
+# ==============================================================================
+# Bug Fix Regression Tests
+# ==============================================================================
+
+
+class TestLogHarvestDayBounds:
+    """Tests for harvest day bounds handling (Critical C1)."""
+
+    def test_harvest_day_dropped_when_constant(self):
+        """Constant log_harvest_day should be dropped as zero-variance."""
+        X = pd.DataFrame({
+            "CHIR99021_uM": [0.0, 3.0, 6.0],
+            "SAG_uM": [0.0, 0.25, 0.5],
+            "log_harvest_day": [np.log(72)] * 3,
+        })
+        bounds, active_cols = step04._compute_active_bounds(X, list(X.columns))
+        assert "log_harvest_day" not in active_cols
+
+    def test_harvest_day_kept_when_varying(self):
+        """Varying log_harvest_day should remain in active columns."""
+        X = pd.DataFrame({
+            "CHIR99021_uM": [0.0, 3.0, 6.0],
+            "SAG_uM": [0.0, 0.25, 0.5],
+            "log_harvest_day": [np.log(30), np.log(60), np.log(90)],
+        })
+        bounds, active_cols = step04._compute_active_bounds(X, list(X.columns))
+        assert "log_harvest_day" in active_cols
+        lo, hi = bounds["log_harvest_day"]
+        assert lo == pytest.approx(np.log(30))
+        assert hi > np.log(90)  # padded
+
+
+class TestBaseMediaInVirtualGrid:
+    """Tests for CellFlow base media column defaults (Fix A)."""
+
+    def test_base_media_in_virtual_grid(self):
+        """Base media columns should have nonzero values from _BASE_MEDIA."""
+        from gopro.morphogen_parser import _BASE_MEDIA
+
+        ranges = {"CHIR99021_uM": [1.5]}
+        grid = step06.generate_virtual_screen_grid(ranges, harvest_days=[21])
+
+        for col, expected_val in _BASE_MEDIA.items():
+            if col in grid.columns and expected_val > 0:
+                assert grid[col].iloc[0] == pytest.approx(expected_val), \
+                    f"{col} should be {expected_val}, got {grid[col].iloc[0]}"
+
+
+class TestRefPointBelowTrainingMin:
+    """Tests for data-driven ref_point (Critical C5)."""
+
+    def test_ref_point_below_training_min(self):
+        """ref_point should be below the minimum of each training Y dimension."""
+        import torch
+
+        np.random.seed(42)
+        train_Y = torch.tensor(
+            np.random.randn(20, 4), dtype=torch.double
+        )
+        y_min = train_Y.min(dim=0).values
+        y_max = train_Y.max(dim=0).values
+        margin = 0.1 * (y_max - y_min).clamp(min=1e-6)
+        ref_point = (y_min - margin).tolist()
+
+        for i in range(4):
+            assert ref_point[i] < float(y_min[i]), \
+                f"ref_point[{i}]={ref_point[i]} should be < y_min={float(y_min[i])}"
+
+
+# ==============================================================================
+# Phase 3C: Improved CellFlow Heuristic Tests
+# ==============================================================================
+
+
+class TestSigmoidResponse:
+    """Tests for the sigmoid dose-response function."""
+
+    def test_saturation_at_high_concentration(self):
+        """Output should approach 1.0 at very high concentrations."""
+        result = step06.sigmoid_response(1000.0, ec50=1.0)
+        assert result > 0.99, f"Expected >0.99 at high conc, got {result}"
+
+    def test_zero_at_zero(self):
+        """Output should be exactly 0.0 at zero concentration."""
+        result = step06.sigmoid_response(0.0, ec50=1.0)
+        assert result == 0.0
+
+    def test_half_max_at_ec50(self):
+        """Output should be ~0.5 at the EC50 concentration."""
+        result = step06.sigmoid_response(5.0, ec50=5.0)
+        assert abs(result - 0.5) < 1e-6
+
+    def test_hill_coefficient_steepness(self):
+        """Higher Hill coefficient should produce steeper curve."""
+        low_hill = step06.sigmoid_response(2.0, ec50=1.0, hill_coeff=1.0)
+        high_hill = step06.sigmoid_response(2.0, ec50=1.0, hill_coeff=3.0)
+        # At 2x EC50, higher Hill coeff should give higher response
+        assert high_hill > low_hill
+
+    def test_negative_ec50_returns_zero(self):
+        """Negative EC50 should return 0 (degenerate case)."""
+        result = step06.sigmoid_response(1.0, ec50=-1.0)
+        assert result == 0.0
+
+    def test_negative_concentration_returns_zero(self):
+        """Negative concentration should return 0."""
+        result = step06.sigmoid_response(-5.0, ec50=1.0)
+        assert result == 0.0
+
+
+class TestPathwayAntagonism:
+    """Tests for pathway agonist/antagonist cancellation."""
+
+    def test_wnt_agonist_antagonist_cancels(self):
+        """WNT agonist (CHIR) + WNT antagonist (IWP2) at similar doses should near-cancel."""
+        # Agonist only
+        row_agonist = pd.Series({"CHIR99021_uM": 3.0, "IWP2_uM": 0.0})
+        scaling_ago = step06._compute_pathway_antagonism(row_agonist)
+
+        # Agonist + antagonist at strong doses
+        row_both = pd.Series({"CHIR99021_uM": 3.0, "IWP2_uM": 5.0})
+        scaling_both = step06._compute_pathway_antagonism(row_both)
+
+        # With antagonist, WNT pathway net scaling should be reduced
+        assert scaling_both.get("WNT", 1.0) < scaling_ago.get("WNT", 1.0), \
+            "Adding WNT antagonist should reduce WNT pathway scaling"
+
+    def test_bmp_agonist_antagonist_cancels(self):
+        """BMP agonist (BMP4) + BMP antagonist (LDN) should partially cancel."""
+        row_both = pd.Series({"BMP4_uM": 0.002, "LDN193189_uM": 0.2})
+        scaling = step06._compute_pathway_antagonism(row_both)
+        # Net WNT scaling should be between 0 and 1
+        bmp_scale = scaling.get("BMP", 0.5)
+        assert 0.0 <= bmp_scale <= 1.0
+
+    def test_no_morphogens_empty_scaling(self):
+        """Empty row should return empty scaling dict."""
+        row_empty = pd.Series({"CHIR99021_uM": 0.0, "BMP4_uM": 0.0})
+        scaling = step06._compute_pathway_antagonism(row_empty)
+        assert len(scaling) == 0
+
+
+class TestDirichletPrior:
+    """Tests for Dirichlet prior from real data."""
+
+    def test_prior_from_real_data(self, tmp_path):
+        """Prior should approximate the mean of real training data."""
+        real_Y = pd.DataFrame({
+            "Neuron": [0.5, 0.3, 0.4],
+            "NPC": [0.3, 0.5, 0.4],
+            "Glia": [0.2, 0.2, 0.2],
+        }, index=["c1", "c2", "c3"])
+        csv_path = tmp_path / "real_fracs.csv"
+        real_Y.to_csv(csv_path)
+
+        prior = step06._load_dirichlet_prior(csv_path, ["Neuron", "NPC", "Glia"])
+        # Prior should be close to column means
+        assert abs(prior[0] - 0.4) < 0.05  # Neuron mean ~0.4
+        assert abs(prior[1] - 0.4) < 0.05  # NPC mean ~0.4
+        assert abs(prior[2] - 0.2) < 0.05  # Glia mean ~0.2
+        assert abs(prior.sum() - 1.0) < 1e-6
+
+    def test_prior_without_real_data(self):
+        """Without real data, prior should be uniform."""
+        cell_types = ["A", "B", "C", "D"]
+        prior = step06._load_dirichlet_prior(None, cell_types)
+        assert prior.shape == (4,)
+        np.testing.assert_allclose(prior, 0.25, atol=1e-6)
+
+    def test_prior_handles_missing_cell_types(self, tmp_path):
+        """Cell types not in real data should get small pseudo-count."""
+        real_Y = pd.DataFrame({
+            "Neuron": [0.5, 0.5],
+            "NPC": [0.5, 0.5],
+        }, index=["c1", "c2"])
+        csv_path = tmp_path / "real_fracs.csv"
+        real_Y.to_csv(csv_path)
+
+        prior = step06._load_dirichlet_prior(csv_path, ["Neuron", "NPC", "NewType"])
+        assert prior[2] > 0  # NewType gets pseudo-count
+        assert prior[2] < prior[0]  # But less than observed types
+        assert abs(prior.sum() - 1.0) < 1e-6
+
+
+class TestImprovedHeuristicRegionPatterns:
+    """Test that different morphogen combos produce distinct compositions."""
+
+    def test_region_specific_patterns(self):
+        """Different morphogen combinations should produce different compositions."""
+        protocols = pd.DataFrame({
+            "CHIR99021_uM": [6.0, 0.0, 0.0, 0.0],
+            "BMP4_uM": [0.0, 0.003, 0.0, 0.0],
+            "SAG_uM": [0.0, 0.0, 1.0, 0.0],
+            "DAPT_uM": [0.0, 0.0, 0.0, 5.0],
+            "IWP2_uM": [0.0, 0.0, 0.0, 0.0],
+            "LDN193189_uM": [0.0, 0.0, 0.0, 0.0],
+            "SB431542_uM": [0.0, 0.0, 0.0, 0.0],
+            "log_harvest_day": [math.log(72)] * 4,
+        }, index=["wnt_high", "bmp_high", "shh_high", "notch_inh"])
+
+        result = step06._predict_baseline(protocols)
+
+        # Each condition should produce a distinct composition
+        for i in range(4):
+            for j in range(i + 1, 4):
+                row_i = result.iloc[i].values
+                row_j = result.iloc[j].values
+                # Not identical (allowing small numerical tolerance)
+                assert not np.allclose(row_i, row_j, atol=0.01), \
+                    f"Conditions {result.index[i]} and {result.index[j]} " \
+                    f"should produce different compositions"
+
+    def test_wnt_high_boosts_neurons(self):
+        """High WNT (CHIR) should boost neuronal fraction vs baseline."""
+        baseline = pd.DataFrame({
+            "CHIR99021_uM": [0.0],
+            "log_harvest_day": [math.log(72)],
+        }, index=["baseline"])
+        wnt_high = pd.DataFrame({
+            "CHIR99021_uM": [9.0],
+            "log_harvest_day": [math.log(72)],
+        }, index=["wnt_high"])
+
+        res_base = step06._predict_baseline(baseline)
+        res_wnt = step06._predict_baseline(wnt_high)
+
+        assert res_wnt.loc["wnt_high", "Neuron"] > res_base.loc["baseline", "Neuron"]
+
+    def test_bmp_high_boosts_cp(self):
+        """High BMP should boost choroid plexus fraction."""
+        baseline = pd.DataFrame({
+            "BMP4_uM": [0.0],
+            "log_harvest_day": [math.log(72)],
+        }, index=["baseline"])
+        bmp_high = pd.DataFrame({
+            "BMP4_uM": [0.003],
+            "log_harvest_day": [math.log(72)],
+        }, index=["bmp_high"])
+
+        res_base = step06._predict_baseline(baseline)
+        res_bmp = step06._predict_baseline(bmp_high)
+
+        assert res_bmp.loc["bmp_high", "CP"] > res_base.loc["baseline", "CP"]
+
+
+class TestConfidenceFiltering:
+    """Test that merge_multi_fidelity_data filters low-confidence CellFlow points."""
+
+    def test_filters_below_threshold(self, tmp_path):
+        """CellFlow points below confidence threshold should be removed."""
+        np.random.seed(42)
+
+        # Real data (fidelity=1.0)
+        Y_real = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=5),
+            columns=["ct_A", "ct_B", "ct_C"],
+            index=[f"real_{i}" for i in range(5)],
+        )
+        X_real = pd.DataFrame({
+            "CHIR99021_uM": np.random.uniform(0, 6, 5),
+            "log_harvest_day": np.log(72) * np.ones(5),
+        }, index=Y_real.index)
+
+        # CellFlow data (fidelity=0.0) — 10 points
+        cf_conditions = [f"virtual_{i:05d}" for i in range(10)]
+        Y_cf = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=10),
+            columns=["ct_A", "ct_B", "ct_C"],
+            index=cf_conditions,
+        )
+        X_cf = pd.DataFrame({
+            "CHIR99021_uM": np.random.uniform(0, 6, 10),
+            "log_harvest_day": np.log(21) * np.ones(10),
+        }, index=cf_conditions)
+
+        # Screening report: 5 high confidence, 5 low confidence
+        report = pd.DataFrame({
+            "condition": cf_conditions,
+            "confidence": [0.8, 0.9, 0.7, 0.6, 0.5, 0.1, 0.05, 0.2, 0.15, 0.25],
+            "fidelity": 0.0,
+        })
+
+        # Save files
+        Y_real.to_csv(tmp_path / "real_fracs.csv")
+        X_real.to_csv(tmp_path / "real_morphs.csv")
+        Y_cf.to_csv(tmp_path / "cf_fracs.csv")
+        X_cf.to_csv(tmp_path / "cf_morphs.csv")
+        report.to_csv(tmp_path / "cellflow_screening_report.csv", index=False)
+
+        sources = [
+            (tmp_path / "real_fracs.csv", tmp_path / "real_morphs.csv", 1.0),
+            (tmp_path / "cf_fracs.csv", tmp_path / "cf_morphs.csv", 0.0),
+        ]
+
+        X, Y = step04.merge_multi_fidelity_data(
+            sources, cellflow_confidence_threshold=0.3
+        )
+
+        # Real data: 5 points. CellFlow: only 5 with confidence >= 0.3
+        n_real = int((X["fidelity"] == 1.0).sum())
+        n_cf = int((X["fidelity"] == 0.0).sum())
+        assert n_real == 5
+        assert n_cf == 5, f"Expected 5 CellFlow points after filtering, got {n_cf}"
+
+    def test_no_filtering_without_report(self, tmp_path):
+        """Without screening report, all CellFlow points should be kept."""
+        np.random.seed(42)
+
+        Y_real = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=3),
+            columns=["ct_A", "ct_B", "ct_C"],
+            index=[f"real_{i}" for i in range(3)],
+        )
+        X_real = pd.DataFrame({
+            "CHIR99021_uM": np.random.uniform(0, 6, 3),
+            "log_harvest_day": np.log(72) * np.ones(3),
+        }, index=Y_real.index)
+
+        Y_cf = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=5),
+            columns=["ct_A", "ct_B", "ct_C"],
+            index=[f"virtual_{i:05d}" for i in range(5)],
+        )
+        X_cf = pd.DataFrame({
+            "CHIR99021_uM": np.random.uniform(0, 6, 5),
+            "log_harvest_day": np.log(21) * np.ones(5),
+        }, index=Y_cf.index)
+
+        Y_real.to_csv(tmp_path / "real_fracs.csv")
+        X_real.to_csv(tmp_path / "real_morphs.csv")
+        Y_cf.to_csv(tmp_path / "cf_fracs.csv")
+        X_cf.to_csv(tmp_path / "cf_morphs.csv")
+        # No screening report file
+
+        sources = [
+            (tmp_path / "real_fracs.csv", tmp_path / "real_morphs.csv", 1.0),
+            (tmp_path / "cf_fracs.csv", tmp_path / "cf_morphs.csv", 0.0),
+        ]
+        X, Y = step04.merge_multi_fidelity_data(sources)
+        assert len(X) == 8  # all points kept
+
+
+class TestModelPathDiscovery:
+    """Test CellFlow model path discovery logic."""
+
+    def test_discovers_existing_model_dir(self, tmp_path, monkeypatch):
+        """Should find model at first existing candidate path."""
+        model_dir = tmp_path / "cellflow_model"
+        model_dir.mkdir()
+
+        monkeypatch.setattr(step06, "CELLFLOW_MODEL_PATHS", [
+            tmp_path / "nonexistent1",
+            model_dir,
+            tmp_path / "nonexistent2",
+        ])
+
+        result = step06.discover_cellflow_model()
+        assert result == model_dir
+
+    def test_returns_none_when_no_model(self, tmp_path, monkeypatch):
+        """Should return None when no candidate path exists."""
+        monkeypatch.setattr(step06, "CELLFLOW_MODEL_PATHS", [
+            tmp_path / "nonexistent1",
+            tmp_path / "nonexistent2",
+        ])
+
+        result = step06.discover_cellflow_model()
+        assert result is None
+
+    def test_discovers_model_file(self, tmp_path, monkeypatch):
+        """Should find model as a .pt file."""
+        model_file = tmp_path / "cellflow_model.pt"
+        model_file.touch()
+
+        monkeypatch.setattr(step06, "CELLFLOW_MODEL_PATHS", [
+            tmp_path / "nonexistent",
+            model_file,
+        ])
+
+        result = step06.discover_cellflow_model()
+        assert result == model_file

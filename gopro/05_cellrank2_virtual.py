@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import math
 import pickle
-import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -37,8 +36,6 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
-
-warnings.filterwarnings("ignore")
 
 from gopro.config import DATA_DIR, get_logger
 
@@ -57,6 +54,21 @@ FIDELITY_LEVEL = 0.5
 MOSCOT_EPSILON = 1e-3  # Entropic regularization
 MOSCOT_TAU_A = 0.94    # Unbalancedness parameter (source)
 MOSCOT_TAU_B = 0.94    # Unbalancedness parameter (target)
+
+# Label harmonization: map atlas-native cell type names to HNOCA level-2 vocabulary
+LABEL_HARMONIZATION: dict[str, str] = {
+    "Excitatory neuron": "Cortical EN",
+    "Inhibitory neuron": "Cortical IN",
+    "Radial glia": "Cortical RG",
+    "Intermediate progenitor": "Cortical IP",
+    "Astrocyte": "Astroglia",
+    "Oligodendrocyte precursor": "OPC",
+    "Oligodendrocyte": "OPC",
+    "Choroid plexus": "CP epithelial",
+    "Microglia": "Microglia",
+    "Endothelial": "Vascular endothelial",
+    "Fibroblast": "Mesenchymal",
+}
 
 
 def load_temporal_atlas(
@@ -111,6 +123,9 @@ def preprocess_for_moscot(
     Returns:
         Preprocessed AnnData with PCA in obsm and neighbors computed.
     """
+    # Copy to avoid mutating caller's AnnData (normalize/log1p are in-place)
+    adata = adata.copy()
+
     if "X_pca" not in adata.obsm:
         logger.info("Computing PCA...")
         sc.pp.normalize_total(adata, target_sum=1e4)
@@ -240,6 +255,311 @@ def compute_fate_probabilities(
     return estimator, fate_probs
 
 
+def _embed_query_in_atlas_pca(
+    query_adata: sc.AnnData,
+    atlas_adata: sc.AnnData,
+    source_mask: np.ndarray,
+    source_pca: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Embed query cells into the atlas PCA space.
+
+    Handles three cases:
+    1. Query already has X_pca — truncate to shared dimensions.
+    2. Atlas has PCA loadings (varm["PCs"]) — project query through them.
+    3. Fallback — compute joint PCA on source atlas + query cells.
+
+    Args:
+        query_adata: Query AnnData (may have X_pca in obsm).
+        atlas_adata: Full atlas AnnData (may have PCs in varm).
+        source_mask: Boolean mask for source timepoint cells in atlas.
+        source_pca: PCA coordinates for source atlas cells.
+
+    Returns:
+        (query_embedding, source_pca) with matched column dimensions.
+    """
+    if "X_pca" in query_adata.obsm:
+        query_embedding = query_adata.obsm["X_pca"]
+        min_dim = min(source_pca.shape[1], query_embedding.shape[1])
+        return query_embedding[:, :min_dim], source_pca[:, :min_dim]
+
+    # Re-embed query through atlas PCA loadings
+    logger.info("Projecting query cells into atlas PCA space...")
+    if "PCs" in atlas_adata.varm:
+        pca_loadings = atlas_adata.varm["PCs"]
+        hvg_mask = atlas_adata.var.get(
+            "highly_variable", pd.Series(True, index=atlas_adata.var_names)
+        )
+        hvg_genes = atlas_adata.var_names[hvg_mask]
+        shared_genes = query_adata.var_names.intersection(hvg_genes)
+        logger.info("Shared HVGs for PCA projection: %d / %d", len(shared_genes), len(hvg_genes))
+        if len(shared_genes) < 100:
+            logger.warning("Low gene overlap (%d) — projection quality may be poor", len(shared_genes))
+
+        query_subset = query_adata[:, shared_genes].copy()
+        sc.pp.normalize_total(query_subset, target_sum=1e4)
+        sc.pp.log1p(query_subset)
+
+        gene_idx = [list(hvg_genes).index(g) for g in shared_genes]
+        query_expr = (
+            query_subset.X.toarray()
+            if hasattr(query_subset.X, "toarray")
+            else np.asarray(query_subset.X)
+        )
+        query_embedding = query_expr @ pca_loadings[gene_idx, :]
+
+        min_dim = min(source_pca.shape[1], query_embedding.shape[1])
+        return query_embedding[:, :min_dim], source_pca[:, :min_dim]
+
+    # Fallback: compute joint PCA
+    logger.warning("No PCA loadings in atlas — computing joint PCA")
+    combined = ad.concat([atlas_adata[source_mask], query_adata], join="inner")
+    sc.pp.normalize_total(combined, target_sum=1e4)
+    sc.pp.log1p(combined)
+    sc.pp.highly_variable_genes(combined, n_top_genes=2000)
+    sc.pp.pca(combined, n_comps=30)
+    n_atlas = int(source_mask.sum())
+    return combined.obsm["X_pca"][n_atlas:], combined.obsm["X_pca"][:n_atlas]
+
+
+def _resolve_target_labels(
+    target_obs: pd.DataFrame,
+    label_key: str,
+) -> tuple[pd.Series, pd.Series, str]:
+    """Discover the best label column and harmonize to the target vocabulary.
+
+    Args:
+        target_obs: obs DataFrame for target timepoint atlas cells.
+        label_key: Preferred label column name.
+
+    Returns:
+        (target_labels, target_ct_fracs, target_label_col) where
+        target_labels is the (possibly harmonized) Series of labels,
+        target_ct_fracs is normalized value counts, and target_label_col
+        is the column that was found.
+
+    Raises:
+        ValueError: If no suitable label column is found.
+    """
+    target_label_col = None
+    for candidate in [label_key, "annot_level_2", "cell_type",
+                      "CellType", "celltype"]:
+        if candidate in target_obs.columns:
+            target_label_col = candidate
+            break
+
+    if target_label_col is None:
+        raise ValueError(
+            f"No cell type label column found. Tried: {label_key}, "
+            "annot_level_2, cell_type, CellType, celltype. "
+            f"Available: {list(target_obs.columns)}"
+        )
+
+    target_labels = target_obs[target_label_col]
+
+    # Harmonize labels if using a non-standard column
+    if target_label_col != label_key:
+        logger.info(
+            "Using atlas column '%s' — harmonizing to '%s' vocabulary",
+            target_label_col, label_key,
+        )
+        mapped = target_labels.map(LABEL_HARMONIZATION)
+        n_unmapped = mapped.isna().sum()
+        if n_unmapped > 0:
+            unmapped_labels = target_labels[mapped.isna()].unique()
+            logger.warning(
+                "%d cells (%d labels) unmapped: %s",
+                n_unmapped, len(unmapped_labels), list(unmapped_labels)[:10],
+            )
+            mapped = mapped.fillna(target_labels)  # keep unmapped as-is
+        target_labels = mapped
+
+    target_ct_fracs = target_labels.value_counts(normalize=True)
+    return target_labels, target_ct_fracs, target_label_col
+
+
+def _compose_transport_chain(
+    problem: object,
+    intermediate_tps: list[int],
+    n_target_atlas: int,
+    source_indices: np.ndarray,
+) -> tuple:
+    """Compose transport matrices along the timepoint chain.
+
+    Args:
+        problem: Solved moscot TemporalProblem.
+        intermediate_tps: Ordered timepoints from source to target.
+        n_target_atlas: Number of atlas cells at the target timepoint.
+        source_indices: Global indices of source cells in the atlas.
+
+    Returns:
+        (transport, local_idx_map, use_transport) where transport is a
+        sparse CSR matrix, local_idx_map maps global to local source
+        indices, and use_transport indicates success. Returns
+        (None, None, False) on failure.
+    """
+    tp_pairs = list(zip(intermediate_tps[:-1], intermediate_tps[1:]))
+    try:
+        transport = problem[(tp_pairs[0][0], tp_pairs[0][1])].solution.transport_matrix
+        if not sp.issparse(transport):
+            transport = sp.csr_matrix(transport)
+        elif not sp.isspmatrix_csr(transport):
+            transport = transport.tocsr()
+        for src_t, tgt_t in tp_pairs[1:]:
+            t_next = problem[(src_t, tgt_t)].solution.transport_matrix
+            if not sp.issparse(t_next):
+                t_next = sp.csr_matrix(t_next)
+            elif not sp.isspmatrix_csr(t_next):
+                t_next = t_next.tocsr()
+            transport = transport @ t_next
+
+        n_target_transport = transport.shape[1]
+        if n_target_transport != n_target_atlas:
+            logger.warning(
+                "Transport target dim (%d) != atlas target cells (%d) — "
+                "moscot may have subsampled. Using atlas average.",
+                n_target_transport, n_target_atlas,
+            )
+            return None, None, False
+
+        max_source_idx = int(source_indices.max()) + 1
+        local_idx_map = -np.ones(max_source_idx, dtype=np.intp)
+        local_idx_map[source_indices] = np.arange(len(source_indices))
+        return transport, local_idx_map, True
+    except (KeyError, AttributeError, IndexError) as e:
+        logger.warning(
+            "Transport composition failed (%s), using atlas average for all conditions",
+            e,
+        )
+        return None, None, False
+
+
+def _project_condition_push(
+    problem: object,
+    source_tp: int,
+    target_tp: int,
+    source_mask: np.ndarray,
+    neighbor_idx: np.ndarray,
+    weights: np.ndarray,
+    cond_indices: np.ndarray,
+    target_labels: pd.Series,
+    target_ct_fracs: pd.Series,
+    n_target_atlas: int,
+) -> pd.Series:
+    """Project a single condition via the moscot .push() API.
+
+    Args:
+        problem: Solved moscot TemporalProblem with .push() method.
+        source_tp: Source timepoint.
+        target_tp: Target timepoint.
+        source_mask: Boolean mask for source cells in atlas.
+        neighbor_idx: KNN neighbor indices (all query cells).
+        weights: KNN distance weights (all query cells).
+        cond_indices: Indices of query cells for this condition.
+        target_labels: Cell type labels at target timepoint.
+        target_ct_fracs: Atlas-average cell type fractions at target.
+        n_target_atlas: Number of atlas cells at target timepoint.
+
+    Returns:
+        Cell type fractions as pd.Series. Falls back to atlas average on error.
+    """
+    try:
+        n_source = int(source_mask.sum())
+        source_dist = np.zeros(n_source)
+        cond_nn = neighbor_idx[cond_indices]
+        cond_w = weights[cond_indices]
+        valid = cond_nn < n_source
+        np.add.at(source_dist, cond_nn[valid], cond_w[valid])
+        if source_dist.sum() > 0:
+            source_dist /= source_dist.sum()
+
+        target_dist = problem.push(
+            source_distribution=source_dist,
+            source=source_tp,
+            target=target_tp,
+        )
+        if hasattr(target_dist, 'values'):
+            target_dist = target_dist.values
+        target_dist = np.asarray(target_dist).ravel()
+
+        if target_dist.sum() > 0 and len(target_dist) == n_target_atlas:
+            target_dist /= target_dist.sum()
+            virtual_fracs = pd.Series(0.0, index=target_ct_fracs.index)
+            target_labels_vals = target_labels.values
+            for ct in virtual_fracs.index:
+                ct_mask = (target_labels_vals == ct)
+                virtual_fracs[ct] = target_dist[ct_mask].sum()
+            return virtual_fracs
+        else:
+            logger.warning(
+                "push() returned invalid dist, using atlas average"
+            )
+            return target_ct_fracs.copy()
+    except Exception as e:
+        logger.warning("push() failed (%s), using atlas average", e)
+        return target_ct_fracs.copy()
+
+
+def _project_condition_transport(
+    transport,
+    local_idx_map: np.ndarray,
+    neighbor_idx: np.ndarray,
+    weights: np.ndarray,
+    cond_indices: np.ndarray,
+    target_labels_arr: np.ndarray,
+    target_ct_fracs: pd.Series,
+) -> pd.Series:
+    """Project a single condition via manual transport matrix composition.
+
+    Args:
+        transport: Sparse CSR transport matrix (source x target).
+        local_idx_map: Mapping from global atlas index to local source index.
+        neighbor_idx: KNN neighbor indices (all query cells).
+        weights: KNN distance weights (all query cells).
+        cond_indices: Indices of query cells for this condition.
+        target_labels_arr: Cell type labels array at target timepoint.
+        target_ct_fracs: Atlas-average cell type fractions at target.
+
+    Returns:
+        Cell type fractions as pd.Series. Falls back to atlas average on error.
+    """
+    try:
+        cond_nn = neighbor_idx[cond_indices]
+        cond_w = weights[cond_indices]
+
+        flat_nn = cond_nn.ravel()
+        flat_w = cond_w.ravel()
+
+        in_range = flat_nn < len(local_idx_map)
+        flat_local = np.full_like(flat_nn, -1, dtype=np.intp)
+        flat_local[in_range] = local_idx_map[flat_nn[in_range]]
+        valid = (flat_local >= 0) & (flat_local < transport.shape[0])
+
+        if valid.any():
+            t_rows = transport[flat_local[valid], :]
+            w_valid = flat_w[valid]
+
+            W = sp.diags(w_valid)
+            weighted = W @ t_rows
+            target_dist = np.asarray(weighted.sum(axis=0)).ravel()
+
+            if target_dist.sum() > 0:
+                target_dist /= target_dist.sum()
+                virtual_fracs = pd.Series(0.0, index=target_ct_fracs.index)
+                for ct in virtual_fracs.index:
+                    ct_mask = (target_labels_arr == ct)
+                    virtual_fracs[ct] = target_dist[ct_mask].sum()
+                return virtual_fracs
+            else:
+                logger.warning("No valid transport, using atlas average")
+                return target_ct_fracs.copy()
+        else:
+            logger.warning("No valid neighbors, using atlas average")
+            return target_ct_fracs.copy()
+    except (KeyError, AttributeError, IndexError) as e:
+        logger.warning("Transport lookup failed (%s), using atlas average", e)
+        return target_ct_fracs.copy()
+
+
 def project_query_forward(
     query_adata: sc.AnnData,
     atlas_adata: sc.AnnData,
@@ -276,62 +596,20 @@ def project_query_forward(
     logger.info("Projecting %s query cells from Day %d to %s...",
                 f"{query_adata.n_obs:,}", query_timepoint, target_timepoints)
 
-    # Find nearest atlas cells at the source timepoint closest to query
-    # Use the atlas timepoint closest to but <= query_timepoint
+    # Find source timepoint: atlas timepoint closest to but <= query_timepoint
     atlas_timepoints = sorted(atlas_adata.obs["day"].unique())
     source_tp = max([t for t in atlas_timepoints if t <= query_timepoint],
                     default=atlas_timepoints[0])
     logger.info("Using atlas Day %s as source for transport", source_tp)
 
-    # Get source atlas cells
     source_mask = atlas_adata.obs["day"] == source_tp
     source_pca = atlas_adata[source_mask].obsm["X_pca"]
     source_indices = np.where(source_mask)[0]
 
-    # Project query cells into atlas PCA space
-    if "X_pca" in query_adata.obsm:
-        query_embedding = query_adata.obsm["X_pca"]
-        # Match dimensionality if needed
-        min_dim = min(source_pca.shape[1], query_embedding.shape[1])
-        source_pca = source_pca[:, :min_dim]
-        query_embedding = query_embedding[:, :min_dim]
-    else:
-        # Re-embed query through atlas PCA loadings
-        logger.info("Projecting query cells into atlas PCA space...")
-        if "PCs" in atlas_adata.varm:
-            pca_loadings = atlas_adata.varm["PCs"]
-            hvg_mask = atlas_adata.var.get("highly_variable", pd.Series(True, index=atlas_adata.var_names))
-            hvg_genes = atlas_adata.var_names[hvg_mask]
-            shared_genes = query_adata.var_names.intersection(hvg_genes)
-            logger.info("Shared HVGs for PCA projection: %d / %d", len(shared_genes), len(hvg_genes))
-            if len(shared_genes) < 100:
-                logger.warning("Low gene overlap (%d) — projection quality may be poor", len(shared_genes))
-
-            # Get query expression for shared genes, normalize
-            query_subset = query_adata[:, shared_genes].copy()
-            sc.pp.normalize_total(query_subset, target_sum=1e4)
-            sc.pp.log1p(query_subset)
-
-            # Project through atlas PCA loadings
-            gene_idx = [list(hvg_genes).index(g) for g in shared_genes]
-            query_expr = query_subset.X.toarray() if hasattr(query_subset.X, "toarray") else np.asarray(query_subset.X)
-            query_embedding = query_expr @ pca_loadings[gene_idx, :]
-
-            # Match dimensions
-            min_dim = min(source_pca.shape[1], query_embedding.shape[1])
-            source_pca = source_pca[:, :min_dim]
-            query_embedding = query_embedding[:, :min_dim]
-        else:
-            # Fallback: compute joint PCA
-            logger.warning("No PCA loadings in atlas — computing joint PCA")
-            combined = ad.concat([atlas_adata[source_mask], query_adata], join="inner")
-            sc.pp.normalize_total(combined, target_sum=1e4)
-            sc.pp.log1p(combined)
-            sc.pp.highly_variable_genes(combined, n_top_genes=2000)
-            sc.pp.pca(combined, n_comps=30)
-            n_atlas = int(source_mask.sum())
-            source_pca = combined.obsm["X_pca"][:n_atlas]
-            query_embedding = combined.obsm["X_pca"][n_atlas:]
+    # Embed query in atlas PCA space
+    query_embedding, source_pca = _embed_query_in_atlas_pca(
+        query_adata, atlas_adata, source_mask, source_pca
+    )
 
     # Find nearest atlas neighbors for each query cell
     logger.info("Finding nearest atlas neighbors for query cells...")
@@ -339,19 +617,15 @@ def project_query_forward(
     nn.fit(source_pca)
     distances, neighbor_idx = nn.kneighbors(query_embedding)
 
-    # Convert distances to weights (inverse distance)
     weights = 1.0 / (distances + 1e-10)
     weights = weights / weights.sum(axis=1, keepdims=True)
 
-    # For each target timepoint, use transport maps to predict cell types
     all_virtual_fractions = []
     conditions = query_adata.obs[condition_key].unique()
 
     for target_tp in target_timepoints:
-        # Find the transport chain: source_tp -> ... -> target_tp
         intermediate_tps = [t for t in atlas_timepoints
                            if source_tp <= t <= target_tp]
-
         if len(intermediate_tps) < 2:
             logger.warning("No transport path from Day %s to Day %s, skipping",
                           source_tp, target_tp)
@@ -360,195 +634,53 @@ def project_query_forward(
         logger.info("Projecting to Day %s (chain: %s)",
                     target_tp, " -> ".join(map(str, intermediate_tps)))
 
-        # Get target timepoint atlas cells and their labels
         target_mask = atlas_adata.obs["day"] == target_tp
         target_obs = atlas_adata[target_mask].obs
         n_target_atlas = int(target_mask.sum())
 
-        # Get cell type labels at target timepoint
-        # Use the annotation available in the atlas
-        target_label_col = None
-        for candidate in [label_key, "annot_level_2", "cell_type",
-                         "CellType", "celltype"]:
-            if candidate in target_obs.columns:
-                target_label_col = candidate
-                break
-
-        if target_label_col is None:
+        try:
+            target_labels, target_ct_fracs, _ = _resolve_target_labels(
+                target_obs, label_key
+            )
+        except ValueError:
             logger.warning("No cell type label column found at Day %s", target_tp)
             continue
 
-        target_labels = target_obs[target_label_col]
-
-        # Harmonize labels if using a non-standard column
-        if target_label_col != label_key:
-            LABEL_HARMONIZATION = {
-                "Excitatory neuron": "Cortical EN",
-                "Inhibitory neuron": "Cortical IN",
-                "Radial glia": "Cortical RG",
-                "Intermediate progenitor": "Cortical IP",
-                "Astrocyte": "Astroglia",
-                "Oligodendrocyte precursor": "OPC",
-                "Oligodendrocyte": "OPC",
-                "Choroid plexus": "CP epithelial",
-                "Microglia": "Microglia",
-                "Endothelial": "Vascular endothelial",
-                "Fibroblast": "Mesenchymal",
-            }
-            logger.info("Using atlas column '%s' — harmonizing to '%s' vocabulary", target_label_col, label_key)
-            mapped = target_labels.map(LABEL_HARMONIZATION)
-            n_unmapped = mapped.isna().sum()
-            if n_unmapped > 0:
-                unmapped_labels = target_labels[mapped.isna()].unique()
-                logger.warning("%d cells (%d labels) unmapped: %s", n_unmapped, len(unmapped_labels), list(unmapped_labels)[:10])
-                mapped = mapped.fillna(target_labels)  # keep unmapped as-is
-            target_labels = mapped
-
-        target_ct_fracs = target_labels.value_counts(normalize=True)
-
-        # Try moscot .push() API first (handles subsampling internally)
+        # Determine projection method
         use_push_api = hasattr(problem, 'push')
-
-        # Fallback: manual transport matrix composition (legacy path)
-        use_transport = False
+        transport, local_idx_map, use_transport = None, None, False
         if not use_push_api:
-            tp_pairs = list(zip(intermediate_tps[:-1], intermediate_tps[1:]))
-            try:
-                transport = problem[(tp_pairs[0][0], tp_pairs[0][1])].solution.transport_matrix
-                if not sp.issparse(transport):
-                    transport = sp.csr_matrix(transport)
-                elif not sp.isspmatrix_csr(transport):
-                    transport = transport.tocsr()
-                for src_t, tgt_t in tp_pairs[1:]:
-                    t_next = problem[(src_t, tgt_t)].solution.transport_matrix
-                    if not sp.issparse(t_next):
-                        t_next = sp.csr_matrix(t_next)
-                    elif not sp.isspmatrix_csr(t_next):
-                        t_next = t_next.tocsr()
-                    transport = transport @ t_next  # sparse @ sparse = sparse
+            transport, local_idx_map, use_transport = _compose_transport_chain(
+                problem, intermediate_tps, n_target_atlas, source_indices
+            )
+            if use_transport:
+                target_labels_arr = target_labels.values
 
-                # Dimension check: transport target dim must match atlas target cells
-                n_target_transport = transport.shape[1]
-                if n_target_transport != n_target_atlas:
-                    logger.warning(
-                        "Transport target dim (%d) != atlas target cells (%d) at Day %s — "
-                        "moscot may have subsampled. Using atlas average.",
-                        n_target_transport, n_target_atlas, target_tp,
-                    )
-                else:
-                    use_transport = True
-                    max_source_idx = int(source_indices.max()) + 1
-                    local_idx_map = -np.ones(max_source_idx, dtype=np.intp)
-                    local_idx_map[source_indices] = np.arange(len(source_indices))
-                    target_labels_arr = target_labels.values
-            except (KeyError, AttributeError, IndexError) as e:
-                logger.warning(
-                    "Transport composition failed at Day %s (%s), using atlas average for all conditions",
-                    target_tp, e,
-                )
-
-        # For each condition, compute predicted cell type fractions
         for cond in conditions:
             cond_mask = query_adata.obs[condition_key] == cond
             cond_indices = np.where(cond_mask)[0]
-            n_cells = len(cond_indices)
-
-            if n_cells == 0:
+            if len(cond_indices) == 0:
                 continue
 
-            virtual_key = f"{cond}_day{target_tp}"
-
             if use_push_api:
-                # moscot .push() API — handles subsampling internally
-                try:
-                    # Build condition-specific source distribution from KNN weights
-                    n_source = int(source_mask.sum())
-                    source_dist = np.zeros(n_source)
-                    cond_nn = neighbor_idx[cond_indices]
-                    cond_w = weights[cond_indices]
-                    for j in range(cond_nn.shape[1]):
-                        for ci in range(len(cond_indices)):
-                            nn_idx = cond_nn[ci, j]
-                            if nn_idx < n_source:
-                                source_dist[nn_idx] += cond_w[ci, j]
-                    if source_dist.sum() > 0:
-                        source_dist /= source_dist.sum()
-
-                    target_dist = problem.push(
-                        source_distribution=source_dist,
-                        source=source_tp,
-                        target=target_tp,
-                    )
-                    if hasattr(target_dist, 'values'):
-                        target_dist = target_dist.values
-                    target_dist = np.asarray(target_dist).ravel()
-
-                    if target_dist.sum() > 0 and len(target_dist) == n_target_atlas:
-                        target_dist /= target_dist.sum()
-                        virtual_fracs = pd.Series(0.0, index=target_ct_fracs.index)
-                        target_labels_vals = target_labels.values
-                        for ct in virtual_fracs.index:
-                            ct_mask = (target_labels_vals == ct)
-                            virtual_fracs[ct] = target_dist[ct_mask].sum()
-                    else:
-                        logger.warning("push() returned invalid dist for '%s' Day %s, using atlas average", cond, target_tp)
-                        virtual_fracs = target_ct_fracs.copy()
-                except Exception as e:
-                    logger.warning("push() failed for '%s' Day %s (%s), using atlas average", cond, target_tp, e)
-                    virtual_fracs = target_ct_fracs.copy()
-
+                virtual_fracs = _project_condition_push(
+                    problem, source_tp, target_tp, source_mask,
+                    neighbor_idx, weights, cond_indices,
+                    target_labels, target_ct_fracs, n_target_atlas,
+                )
             elif use_transport:
-                # Manual transport matrix composition (vectorized)
-                try:
-                    cond_nn = neighbor_idx[cond_indices]   # [n_cond_cells, k]
-                    cond_w = weights[cond_indices]          # [n_cond_cells, k]
-
-                    # Vectorized mapping of global neighbor indices to local source indices
-                    flat_nn = cond_nn.ravel()
-                    flat_w = cond_w.ravel()
-
-                    # Map to local indices; out-of-range -> -1
-                    in_range = flat_nn < len(local_idx_map)
-                    flat_local = np.full_like(flat_nn, -1, dtype=np.intp)
-                    flat_local[in_range] = local_idx_map[flat_nn[in_range]]
-                    valid = (flat_local >= 0) & (flat_local < transport.shape[0])
-
-                    if valid.any():
-                        # Gather transport rows for valid neighbors (sparse row indexing)
-                        t_rows = transport[flat_local[valid], :]  # CSR supports row fancy indexing
-                        w_valid = flat_w[valid]
-
-                        # Weight and sum: W @ t_rows where W is diagonal
-                        W = sp.diags(w_valid)
-                        weighted = W @ t_rows
-                        target_dist = np.asarray(weighted.sum(axis=0)).ravel()
-
-                        if target_dist.sum() > 0:
-                            target_dist /= target_dist.sum()
-
-                            # Compute cell type fractions from weighted target distribution
-                            virtual_fracs = pd.Series(0.0, index=target_ct_fracs.index)
-                            for ct in virtual_fracs.index:
-                                ct_mask = (target_labels_arr == ct)
-                                virtual_fracs[ct] = target_dist[ct_mask].sum()
-                        else:
-                            logger.warning("No valid transport for condition '%s' at Day %s, using atlas average", cond, target_tp)
-                            virtual_fracs = target_ct_fracs.copy()
-                    else:
-                        logger.warning("No valid neighbors for condition '%s' at Day %s, using atlas average", cond, target_tp)
-                        virtual_fracs = target_ct_fracs.copy()
-                except (KeyError, AttributeError, IndexError) as e:
-                    logger.warning("Transport lookup failed for condition '%s' at Day %s (%s), using atlas average", cond, target_tp, e)
-                    virtual_fracs = target_ct_fracs.copy()
+                virtual_fracs = _project_condition_transport(
+                    transport, local_idx_map, neighbor_idx, weights,
+                    cond_indices, target_labels_arr, target_ct_fracs,
+                )
             else:
-                # Fallback: atlas-wide average
                 virtual_fracs = target_ct_fracs.copy()
 
             all_virtual_fractions.append({
-                "virtual_condition": virtual_key,
+                "virtual_condition": f"{cond}_day{target_tp}",
                 "original_condition": cond,
                 "target_day": target_tp,
-                "n_source_cells": n_cells,
+                "n_source_cells": len(cond_indices),
                 **{ct: frac for ct, frac in virtual_fracs.items()},
             })
 
@@ -559,12 +691,10 @@ def project_query_forward(
     result = pd.DataFrame(all_virtual_fractions)
     result = result.set_index("virtual_condition")
 
-    # Fill NaN cell type columns with 0
     ct_cols = [c for c in result.columns
                if c not in ["original_condition", "target_day", "n_source_cells"]]
     result[ct_cols] = result[ct_cols].fillna(0.0)
 
-    # Normalize rows to sum to 1
     row_sums = result[ct_cols].sum(axis=1)
     result[ct_cols] = result[ct_cols].div(row_sums, axis=0)
 
@@ -750,6 +880,11 @@ def main() -> None:
             logger.error("%s not found at %s", name, path)
             logger.error("See data/README.md for download instructions.")
             return
+
+    # Validate inputs before expensive computation
+    from gopro.validation import validate_temporal_atlas, validate_mapped_adata
+    validate_temporal_atlas(atlas_path, time_key="day")
+    validate_mapped_adata(query_path)
 
     # -----------------------------------------------------------------------
     # Step 1: Load temporal atlas

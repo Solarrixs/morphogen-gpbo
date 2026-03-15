@@ -23,15 +23,12 @@ Outputs:
 
 from __future__ import annotations
 
-import warnings
 import scanpy as sc
 import pandas as pd
 import numpy as np
 from scipy import sparse
 from pathlib import Path
 from typing import Optional
-
-warnings.filterwarnings("ignore")
 
 from gopro.config import (
     DATA_DIR, MODEL_DIR,
@@ -443,6 +440,112 @@ def compute_soft_cell_type_fractions(
     return fractions
 
 
+def run_mapping_pipeline(
+    query_path: Path,
+    ref_path: Path,
+    model_dir: Path,
+    output_prefix: str = "amin_kelley",
+    condition_key: str = "condition",
+    batch_key: str = "sample",
+    n_epochs: int = 500,
+    run_gruffi: bool = True,
+    gruffi_threshold: float = 0.15,
+) -> tuple[sc.AnnData, pd.DataFrame, pd.DataFrame]:
+    """Run the full mapping pipeline: load, filter, map, transfer labels, compute fractions.
+
+    Args:
+        query_path: Path to input h5ad file.
+        ref_path: Path to HNOCA reference h5ad.
+        model_dir: Path to scPoli model parameters directory.
+        output_prefix: Prefix for output files.
+        condition_key: obs column identifying experimental conditions.
+        batch_key: obs column identifying batch/sample.
+        n_epochs: Number of scPoli training epochs.
+        run_gruffi: Whether to run Gruffi stress filtering.
+        gruffi_threshold: Gruffi stress score threshold.
+
+    Returns:
+        Tuple of (mapped_adata, fractions_df, region_fractions_df).
+    """
+    # Load data
+    logger.info("Loading HNOCA minimal reference...")
+    ref = sc.read_h5ad(str(ref_path))
+    logger.info("Reference: %s", ref.shape)
+
+    logger.info("Loading query data from %s...", query_path.name)
+    query = sc.read_h5ad(str(query_path))
+    logger.info("Query: %s", query.shape)
+
+    # Filter to quality cells
+    query = filter_quality_cells(query)
+
+    # Gruffi stress filtering (optional)
+    if run_gruffi:
+        from gopro.gruffi_qc import filter_stressed_cells
+        query = filter_stressed_cells(
+            query,
+            threshold=gruffi_threshold,
+            condition_key=condition_key,
+        )
+
+    # Prepare query
+    query = prepare_query_for_scpoli(query, ref, batch_column=batch_key)
+
+    # Map to HNOCA via scPoli
+    query_latent, ref_latent = map_to_hnoca_scpoli(
+        query, ref, model_dir,
+        n_epochs=n_epochs,
+        batch_size=1024,
+    )
+
+    # Store latent in query
+    query.obsm["X_scpoli"] = query_latent
+
+    # Transfer labels
+    logger.info("Transferring cell type labels...")
+    label_cols = [ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3]
+    transferred, soft_probs = transfer_labels_knn(
+        ref_latent, query_latent,
+        ref.obs, query.obs,
+        label_columns=label_cols,
+        k=50,
+    )
+
+    # Add transferred labels to query
+    for col in transferred.columns:
+        query.obs[col] = transferred[col].values
+
+    # Compute cell type fractions for GP training
+    fractions = compute_cell_type_fractions(
+        query.obs,
+        condition_key=condition_key,
+        label_key=f"predicted_{ANNOT_LEVEL_2}",
+    )
+
+    # Also compute region fractions
+    region_fractions = compute_cell_type_fractions(
+        query.obs,
+        condition_key=condition_key,
+        label_key=f"predicted_{ANNOT_REGION}",
+    )
+
+    # Compute soft cell type fractions (probability-averaged)
+    if ANNOT_LEVEL_2 in soft_probs:
+        soft_fractions = compute_soft_cell_type_fractions(
+            query.obs,
+            soft_probs[ANNOT_LEVEL_2],
+            condition_key=condition_key,
+        )
+        query.uns["soft_fractions"] = soft_fractions
+
+        # Compare hard vs soft
+        diff = (fractions - soft_fractions.reindex_like(fractions).fillna(0)).abs()
+        logger.info("Hard vs soft fraction max diff: %.4f, mean diff: %.4f",
+                    diff.values.max(), diff.values.mean())
+
+    return query, fractions, region_fractions
+
+
 if __name__ == "__main__":
     import time
     import argparse
@@ -467,94 +570,26 @@ if __name__ == "__main__":
     # Resolve paths
     query_path = Path(args.input) if args.input else DATA_DIR / "amin_kelley_2024.h5ad"
     output_prefix = args.output_prefix or "amin_kelley"
-
     ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
 
     for path, name in [(ref_path, "HNOCA reference"), (query_path, "Query data")]:
         if not path.exists():
             logger.error("%s not found at %s", name, path)
             raise SystemExit(1)
-
     if not MODEL_DIR.exists():
         logger.error("scPoli model not found at %s", MODEL_DIR)
         raise SystemExit(1)
 
-    # Load data
-    logger.info("Loading HNOCA minimal reference...")
-    ref = sc.read_h5ad(str(ref_path))
-    logger.info("Reference: %s", ref.shape)
-
-    logger.info("Loading query data from %s...", query_path.name)
-    query = sc.read_h5ad(str(query_path))
-    logger.info("Query: %s", query.shape)
-
-    # Filter to quality cells
-    query = filter_quality_cells(query)
-
-    # Gruffi stress filtering (optional)
-    if not args.no_gruffi:
-        from gopro.gruffi_qc import filter_stressed_cells
-        query = filter_stressed_cells(
-            query,
-            threshold=args.gruffi_threshold,
-            condition_key=args.condition_key,
-        )
-
-    # Prepare query
-    query = prepare_query_for_scpoli(query, ref, batch_column=args.batch_key)
-
-    # Map to HNOCA via scPoli
-    query_latent, ref_latent = map_to_hnoca_scpoli(
-        query, ref, MODEL_DIR,
-        n_epochs=500,
-        batch_size=1024,
-    )
-
-    # Store latent in query
-    query.obsm["X_scpoli"] = query_latent
-
-    # Transfer labels
-    logger.info("Transferring cell type labels...")
-    label_cols = [ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3]
-    transferred, soft_probs = transfer_labels_knn(
-        ref_latent, query_latent,
-        ref.obs, query.obs,
-        label_columns=label_cols,
-        k=50,
-    )
-
-    # Add transferred labels to query
-    for col in transferred.columns:
-        query.obs[col] = transferred[col].values
-
-    # Compute cell type fractions for GP training
-    fractions = compute_cell_type_fractions(
-        query.obs,
+    query, fractions, region_fractions = run_mapping_pipeline(
+        query_path=query_path,
+        ref_path=ref_path,
+        model_dir=MODEL_DIR,
+        output_prefix=output_prefix,
         condition_key=args.condition_key,
-        label_key=f"predicted_{ANNOT_LEVEL_2}",
+        batch_key=args.batch_key,
+        run_gruffi=not args.no_gruffi,
+        gruffi_threshold=args.gruffi_threshold,
     )
-
-    # Also compute region fractions
-    region_fractions = compute_cell_type_fractions(
-        query.obs,
-        condition_key=args.condition_key,
-        label_key=f"predicted_{ANNOT_REGION}",
-    )
-
-    # Compute soft cell type fractions (probability-averaged)
-    if ANNOT_LEVEL_2 in soft_probs:
-        soft_fractions = compute_soft_cell_type_fractions(
-            query.obs,
-            soft_probs[ANNOT_LEVEL_2],
-            condition_key="condition",
-        )
-        soft_fractions.to_csv(str(DATA_DIR / "gp_training_labels_soft_amin_kelley.csv"))
-        logger.info("Soft cell type fractions -> data/gp_training_labels_soft_amin_kelley.csv")
-
-        # Compare hard vs soft
-        diff = (fractions - soft_fractions.reindex_like(fractions).fillna(0)).abs()
-        logger.info("Hard vs soft fraction max diff: %.4f, mean diff: %.4f",
-                    diff.values.max(), diff.values.mean())
 
     # Save outputs
     logger.info("Saving outputs...")
@@ -564,6 +599,13 @@ if __name__ == "__main__":
 
     region_fractions.to_csv(str(DATA_DIR / f"gp_training_regions_{output_prefix}.csv"))
     logger.info("Region fractions -> data/gp_training_regions_%s.csv", output_prefix)
+
+    # Save soft fractions if computed
+    if "soft_fractions" in query.uns:
+        query.uns["soft_fractions"].to_csv(
+            str(DATA_DIR / f"gp_training_labels_soft_{output_prefix}.csv")
+        )
+        logger.info("Soft cell type fractions -> data/gp_training_labels_soft_%s.csv", output_prefix)
 
     output_path = DATA_DIR / f"{output_prefix}_mapped.h5ad"
     query.write(str(output_path), compression="gzip")
@@ -576,6 +618,7 @@ if __name__ == "__main__":
     logger.info("--- MAPPING SUMMARY ---")
     logger.info("Cells mapped: %d", query.n_obs)
     logger.info("Conditions: %d", query.obs[args.condition_key].nunique())
+    label_cols = [ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3]
     for label_col in label_cols:
         pred_col = f"predicted_{label_col}"
         if pred_col in query.obs.columns:

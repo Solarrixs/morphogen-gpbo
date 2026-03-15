@@ -28,14 +28,11 @@ from __future__ import annotations
 
 import itertools
 import math
-import warnings
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-
-warnings.filterwarnings("ignore")
 
 from gopro.config import (
     DATA_DIR,
@@ -44,11 +41,19 @@ from gopro.config import (
     nM_to_uM,
     ng_mL_to_uM,
 )
+from gopro.morphogen_parser import _BASE_MEDIA
 
 logger = get_logger(__name__)
 
 # Low fidelity level for CellFlow virtual data
 FIDELITY_LEVEL = 0.0
+
+# Candidate paths for pre-trained CellFlow model
+CELLFLOW_MODEL_PATHS = [
+    DATA_DIR / "cellflow_model",
+    DATA_DIR / "cellflow_model.pt",
+    DATA_DIR / "patterning_screen" / "cellflow_model",
+]
 
 # Morphogen identity mapping for protocol encoding
 # Maps morphogen column names to (molecule_type, canonical_name) pairs
@@ -214,7 +219,7 @@ def generate_virtual_screen_grid(
         elif col in morphogen_ranges:
             grid_dims[col] = morphogen_ranges[col]
         else:
-            grid_dims[col] = [0.0]  # Not varied
+            grid_dims[col] = [_BASE_MEDIA.get(col, 0.0)]  # Use base media defaults
 
     # Generate combinations
     keys = list(grid_dims.keys())
@@ -249,6 +254,22 @@ def generate_virtual_screen_grid(
     return grid
 
 
+def discover_cellflow_model() -> Optional[Path]:
+    """Search candidate paths for a pre-trained CellFlow model.
+
+    Checks ``CELLFLOW_MODEL_PATHS`` in order and returns the first
+    path that exists, or ``None`` if no model is found.
+
+    Returns:
+        Path to CellFlow model directory/file, or None.
+    """
+    for candidate in CELLFLOW_MODEL_PATHS:
+        if candidate.exists():
+            logger.info("Found pre-trained CellFlow model at %s", candidate)
+            return candidate
+    return None
+
+
 def predict_cellflow(
     protocols: pd.DataFrame,
     model_path: Optional[Path] = None,
@@ -261,15 +282,24 @@ def predict_cellflow(
     Uses the CellFlow generative model to predict single-cell
     distributions, then aggregates to cell type fractions.
 
+    If ``model_path`` is None, automatically searches
+    ``CELLFLOW_MODEL_PATHS`` for a pre-trained model.
+
     Args:
         protocols: DataFrame of morphogen concentration vectors.
         model_path: Path to pre-trained CellFlow model.
         batch_size: Number of protocols to predict at once.
         n_cells_per_condition: Number of virtual cells to generate.
+        real_fractions_csv: Path to real training fractions CSV for
+            cell type vocabulary alignment (used by heuristic fallback).
 
     Returns:
         DataFrame with predicted cell type fractions per protocol.
     """
+    # Auto-discover model if not explicitly provided
+    if model_path is None:
+        model_path = discover_cellflow_model()
+
     try:
         import cellflow
         HAS_CELLFLOW = True
@@ -281,7 +311,16 @@ def predict_cellflow(
             protocols, model_path, batch_size, n_cells_per_condition
         )
     else:
-        logger.info("CellFlow not available or no model found. Using baseline prediction.")
+        if not HAS_CELLFLOW:
+            logger.info("CellFlow package not installed. Falling back to heuristic predictor.")
+        elif model_path is None:
+            logger.info(
+                "No pre-trained CellFlow model found. Searched: %s. "
+                "Falling back to heuristic predictor.",
+                [str(p) for p in CELLFLOW_MODEL_PATHS],
+            )
+        else:
+            logger.info("CellFlow model path does not exist: %s. Falling back to heuristic.", model_path)
         return _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
 
 
@@ -362,25 +401,251 @@ def _predict_with_cellflow(
     return result
 
 
+def sigmoid_response(concentration: float, ec50: float, hill_coeff: float = 1.0) -> float:
+    """Compute sigmoid (Hill) dose-response curve.
+
+    Models the saturating effect of a morphogen at increasing concentration.
+    Returns a value in [0, 1] where 0 = no effect, 1 = maximal effect.
+
+    Args:
+        concentration: Morphogen concentration (same units as ec50).
+        ec50: Half-maximal effective concentration.
+        hill_coeff: Hill coefficient controlling steepness (default 1.0).
+
+    Returns:
+        Fractional response in [0, 1].
+    """
+    if concentration <= 0 or ec50 <= 0:
+        return 0.0
+    return float(
+        concentration ** hill_coeff
+        / (ec50 ** hill_coeff + concentration ** hill_coeff)
+    )
+
+
+# Morphogen-pathway lookup table mapping each morphogen to its signaling
+# pathway, agonist/antagonist direction, EC50 (µM), Hill coefficient,
+# and expected effects on cell type composition.
+# EC50 values are approximate midpoints of published dose-response ranges.
+MORPHOGEN_PATHWAY_MAP: dict[str, dict] = {
+    "CHIR99021_uM": {
+        "pathway": "WNT", "direction": "agonist", "ec50": 3.0, "hill": 1.5,
+        "effects": {
+            "Neuron": +0.15, "NPC": -0.05, "IP": +0.05,
+            "Neuroepithelium": -0.10, "Glioblast": +0.03,
+        },
+    },
+    "IWP2_uM": {
+        "pathway": "WNT", "direction": "antagonist", "ec50": 2.5, "hill": 1.0,
+        "effects": {
+            "NPC": +0.15, "Neuroepithelium": +0.10, "Neuron": -0.05,
+        },
+    },
+    "XAV939_uM": {
+        "pathway": "WNT", "direction": "antagonist", "ec50": 5.0, "hill": 1.0,
+        "effects": {
+            "NPC": +0.10, "Neuroepithelium": +0.08, "Neuron": -0.03,
+        },
+    },
+    "BMP4_uM": {
+        "pathway": "BMP", "direction": "agonist", "ec50": 0.001, "hill": 1.2,
+        "effects": {
+            "CP": +0.15, "MC": +0.05, "Neuroepithelium": -0.05, "NPC": -0.05,
+        },
+    },
+    "BMP7_uM": {
+        "pathway": "BMP", "direction": "agonist", "ec50": 0.002, "hill": 1.0,
+        "effects": {
+            "CP": +0.10, "MC": +0.03, "NPC": -0.03,
+        },
+    },
+    "LDN193189_uM": {
+        "pathway": "BMP", "direction": "antagonist", "ec50": 0.1, "hill": 1.5,
+        "effects": {
+            "Neuroepithelium": +0.12, "NPC": +0.05, "PSC": -0.03, "MC": -0.05,
+        },
+    },
+    "Dorsomorphin_uM": {
+        "pathway": "BMP", "direction": "antagonist", "ec50": 2.0, "hill": 1.0,
+        "effects": {
+            "Neuroepithelium": +0.08, "MC": -0.03,
+        },
+    },
+    "SHH_uM": {
+        "pathway": "SHH", "direction": "agonist", "ec50": 0.005, "hill": 1.2,
+        "effects": {
+            "Neuron": +0.10, "IP": +0.05, "NPC": +0.03,
+        },
+    },
+    "SAG_uM": {
+        "pathway": "SHH", "direction": "agonist", "ec50": 0.5, "hill": 1.0,
+        "effects": {
+            "Neuron": +0.10, "IP": +0.05, "NPC": +0.03,
+        },
+    },
+    "purmorphamine_uM": {
+        "pathway": "SHH", "direction": "agonist", "ec50": 1.0, "hill": 1.0,
+        "effects": {
+            "Neuron": +0.08, "IP": +0.04,
+        },
+    },
+    "cyclopamine_uM": {
+        "pathway": "SHH", "direction": "antagonist", "ec50": 5.0, "hill": 1.0,
+        "effects": {
+            "Neuron": -0.05, "IP": -0.03, "NPC": +0.03,
+        },
+    },
+    "RA_uM": {
+        "pathway": "RA", "direction": "agonist", "ec50": 0.1, "hill": 1.0,
+        "effects": {
+            "Neuron": +0.10, "IP": +0.05, "NPC": -0.03,
+        },
+    },
+    "FGF2_uM": {
+        "pathway": "FGF", "direction": "agonist", "ec50": 0.001, "hill": 1.0,
+        "effects": {
+            "NPC": +0.05, "Glioblast": +0.08, "Astrocyte": +0.03,
+        },
+    },
+    "FGF4_uM": {
+        "pathway": "FGF", "direction": "agonist", "ec50": 0.002, "hill": 1.0,
+        "effects": {
+            "NPC": +0.05, "Glioblast": +0.06,
+        },
+    },
+    "FGF8_uM": {
+        "pathway": "FGF", "direction": "agonist", "ec50": 0.003, "hill": 1.2,
+        "effects": {
+            "Glioblast": +0.08, "NPC": +0.05, "Neuron": +0.03,
+        },
+    },
+    "SB431542_uM": {
+        "pathway": "TGFb", "direction": "antagonist", "ec50": 5.0, "hill": 1.5,
+        "effects": {
+            "Neuroepithelium": +0.12, "NPC": +0.05, "PSC": -0.03, "MC": -0.03,
+        },
+    },
+    "ActivinA_uM": {
+        "pathway": "TGFb", "direction": "agonist", "ec50": 0.001, "hill": 1.0,
+        "effects": {
+            "PSC": +0.05, "MC": +0.03, "Neuroepithelium": -0.05,
+        },
+    },
+    "DAPT_uM": {
+        "pathway": "Notch", "direction": "antagonist", "ec50": 5.0, "hill": 1.0,
+        "effects": {
+            "Neuron": +0.15, "NPC": -0.08, "IP": +0.05,
+        },
+    },
+    "EGF_uM": {
+        "pathway": "EGF", "direction": "agonist", "ec50": 0.003, "hill": 1.0,
+        "effects": {
+            "NPC": +0.05, "Glioblast": +0.05, "OPC": +0.03,
+        },
+    },
+}
+
+
+def _compute_pathway_antagonism(
+    row: pd.Series,
+) -> dict[str, float]:
+    """Compute net agonist/antagonist balance per pathway.
+
+    When both an agonist and antagonist for the same pathway are present,
+    their effects partially cancel. Returns a per-pathway scaling factor
+    in [0, 1] where 0 = fully cancelled, 1 = no antagonism.
+
+    Args:
+        row: A single protocol's morphogen concentrations.
+
+    Returns:
+        Dict mapping pathway name to net scaling factor.
+    """
+    # Accumulate agonist and antagonist sigmoid responses per pathway
+    pathway_agonist: dict[str, float] = {}
+    pathway_antagonist: dict[str, float] = {}
+
+    for morph_col, info in MORPHOGEN_PATHWAY_MAP.items():
+        conc = float(row.get(morph_col, 0.0))
+        if conc <= 0:
+            continue
+        response = sigmoid_response(conc, info["ec50"], info.get("hill", 1.0))
+        pathway = info["pathway"]
+        if info["direction"] == "agonist":
+            pathway_agonist[pathway] = pathway_agonist.get(pathway, 0.0) + response
+        else:
+            pathway_antagonist[pathway] = pathway_antagonist.get(pathway, 0.0) + response
+
+    # Compute net scaling: agonist signal is reduced by antagonist presence
+    all_pathways = set(pathway_agonist.keys()) | set(pathway_antagonist.keys())
+    scaling = {}
+    for pw in all_pathways:
+        ago = pathway_agonist.get(pw, 0.0)
+        ant = pathway_antagonist.get(pw, 0.0)
+        if ago + ant > 0:
+            # Net effect: agonist fraction minus antagonist cancellation
+            # Both agonists and antagonists are kept but with reduced magnitude
+            scaling[pw] = max(0.0, (ago - ant) / (ago + ant))
+        else:
+            scaling[pw] = 1.0
+    return scaling
+
+
+def _load_dirichlet_prior(
+    real_fractions_csv: Optional[Path],
+    cell_types: list[str],
+) -> np.ndarray:
+    """Load a Dirichlet prior from real training data.
+
+    If real training fractions are available, the mean composition across
+    all conditions is used as the prior (more informative than uniform).
+    Otherwise falls back to a uniform prior.
+
+    Args:
+        real_fractions_csv: Path to real training fractions CSV.
+        cell_types: List of cell type names to align to.
+
+    Returns:
+        1-D array of shape (len(cell_types),) summing to 1.0.
+    """
+    if real_fractions_csv is not None and real_fractions_csv.exists():
+        real_Y = pd.read_csv(str(real_fractions_csv), index_col=0)
+        # Compute mean composition across all real conditions
+        prior = np.zeros(len(cell_types))
+        for i, ct in enumerate(cell_types):
+            if ct in real_Y.columns:
+                prior[i] = float(real_Y[ct].mean())
+            else:
+                prior[i] = 0.01  # small pseudo-count for unseen types
+        # Ensure positive and normalized
+        prior = np.maximum(prior, 0.01)
+        prior = prior / prior.sum()
+        return prior
+    else:
+        # Uniform Dirichlet prior
+        return np.ones(len(cell_types)) / len(cell_types)
+
+
 def _predict_baseline(
     protocols: pd.DataFrame,
     real_fractions_csv: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Baseline prediction when CellFlow is not available.
 
-    Uses a heuristic model based on known morphogen-to-fate mappings
-    from literature. This is a placeholder that produces reasonable
-    but approximate cell type fractions.
+    Uses a heuristic model based on:
+    1. Dirichlet prior from real training data (or uniform fallback)
+    2. Morphogen-pathway lookup table with sigmoid dose-response curves
+    3. Pathway antagonism (agonist + inhibitor partially cancel)
 
     Args:
         protocols: Morphogen concentration vectors.
         real_fractions_csv: Path to real training fractions CSV. If provided,
-            cell type vocabulary is loaded from its columns to match real data.
+            cell type vocabulary and Dirichlet prior are loaded from it.
 
     Returns:
         Predicted cell type fractions (heuristic).
     """
-    logger.info("Using heuristic baseline predictor...")
+    logger.info("Using heuristic baseline predictor (sigmoid dose-response)...")
 
     # Load cell type vocabulary from real training data if available
     if real_fractions_csv is not None and real_fractions_csv.exists():
@@ -395,81 +660,47 @@ def _predict_baseline(
         ]
         logger.warning("No real training data — using level-1 fallback cell types")
 
+    # Load Dirichlet prior
+    prior = _load_dirichlet_prior(real_fractions_csv, CELL_TYPES)
+
     results = []
     for cond_name, row in protocols.iterrows():
-        # Start with a base composition
-        frac_dict = {ct: 0.05 for ct in CELL_TYPES}
+        # Start with prior composition (data-driven or uniform)
+        frac_arr = prior.copy()
 
-        # WNT signaling (CHIR) -> caudalizes; IWP2 -> anteriorizes
-        chir = row.get("CHIR99021_uM", 0)
-        iwp2 = row.get("IWP2_uM", 0)
-        if chir > 2.0:
-            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.2
-        if iwp2 > 0:
-            if "NPC" in frac_dict:
-                frac_dict["NPC"] += 0.15
-            elif len(CELL_TYPES) > 1:
-                frac_dict[CELL_TYPES[1]] = frac_dict.get(CELL_TYPES[1], 0.05) + 0.15
-            if "Neuroepithelium" in frac_dict:
-                frac_dict["Neuroepithelium"] += 0.1
-            elif len(CELL_TYPES) > 3:
-                frac_dict[CELL_TYPES[3]] = frac_dict.get(CELL_TYPES[3], 0.05) + 0.1
+        # Compute pathway antagonism scaling
+        pw_scaling = _compute_pathway_antagonism(row)
 
-        # SHH pathway -> ventral fates
-        shh = row.get("SHH_uM", 0) + row.get("SAG_uM", 0)
-        if shh > 0:
-            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.1 * min(shh / 0.05, 1)
-            if "IP" in frac_dict:
-                frac_dict["IP"] += 0.05
-            elif len(CELL_TYPES) > 2:
-                frac_dict[CELL_TYPES[2]] = frac_dict.get(CELL_TYPES[2], 0.05) + 0.05
+        # Apply morphogen effects via sigmoid dose-response
+        for morph_col, info in MORPHOGEN_PATHWAY_MAP.items():
+            conc = float(row.get(morph_col, 0.0))
+            if conc <= 0:
+                continue
 
-        # BMP -> dorsal / choroid plexus
-        bmp = row.get("BMP4_uM", 0) + row.get("BMP7_uM", 0)
-        if bmp > 0:
-            if "CP" in frac_dict:
-                frac_dict["CP"] += 0.15 * min(bmp / 0.003, 1)
-            if "MC" in frac_dict:
-                frac_dict["MC"] += 0.05
+            response = sigmoid_response(conc, info["ec50"], info.get("hill", 1.0))
 
-        # FGF -> proliferation / gliogenesis
-        fgf = (row.get("FGF2_uM", 0) + row.get("FGF4_uM", 0)
-               + row.get("FGF8_uM", 0))
-        if fgf > 0:
-            if "Glioblast" in frac_dict:
-                frac_dict["Glioblast"] += 0.1 * min(fgf / 0.005, 1)
-            if "NPC" in frac_dict:
-                frac_dict["NPC"] += 0.05
+            # Scale by pathway antagonism
+            pathway = info["pathway"]
+            pw_scale = pw_scaling.get(pathway, 1.0)
 
-        # LDN/SB -> dual SMAD inhibition -> neural induction
-        ldn = row.get("LDN193189_uM", 0)
-        sb = row.get("SB431542_uM", 0)
-        if ldn > 0 or sb > 0:
-            if "Neuroepithelium" in frac_dict:
-                frac_dict["Neuroepithelium"] += 0.15
-            if "PSC" in frac_dict:
-                frac_dict["PSC"] = max(frac_dict["PSC"] - 0.03, 0.01)
-            if "MC" in frac_dict:
-                frac_dict["MC"] = max(frac_dict["MC"] - 0.03, 0.01)
+            # For antagonists, the antagonism scaling represents how much
+            # the antagonist "wins" — invert for antagonist-specific effects
+            if info["direction"] == "antagonist":
+                effective_response = response * (1.0 - pw_scale)
+            else:
+                effective_response = response * pw_scale
 
-        # RA -> caudal / hindbrain
-        ra = row.get("RA_uM", 0)
-        if ra > 0:
-            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.1 * min(ra / 0.5, 1)
-            if "IP" in frac_dict:
-                frac_dict["IP"] += 0.05
+            # Apply per-cell-type effects
+            for ct, effect_magnitude in info["effects"].items():
+                if ct in CELL_TYPES:
+                    idx = CELL_TYPES.index(ct)
+                    frac_arr[idx] += effect_magnitude * effective_response
 
-        # DAPT -> Notch inhibition -> neuronal differentiation
-        dapt = row.get("DAPT_uM", 0)
-        if dapt > 0:
-            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.15
-            if "NPC" in frac_dict:
-                frac_dict["NPC"] = max(frac_dict["NPC"] - 0.05, 0.01)
-
-        # Normalize
-        fracs = np.array([max(frac_dict[ct], 0.01) for ct in CELL_TYPES])
-        fracs = fracs / fracs.sum()
-        results.append(dict(zip(CELL_TYPES, fracs)))
+        # Ensure all values positive (floor at 0.01)
+        frac_arr = np.maximum(frac_arr, 0.01)
+        # Normalize to sum to 1
+        frac_arr = frac_arr / frac_arr.sum()
+        results.append(dict(zip(CELL_TYPES, frac_arr)))
 
     result = pd.DataFrame(results, index=protocols.index)
     return result
@@ -553,6 +784,11 @@ def run_virtual_screen(
     Returns:
         Tuple of (virtual_morphogens, virtual_fractions, quality_report).
     """
+    # Validate real fractions CSV if provided
+    if real_fractions_csv is not None and real_fractions_csv.exists():
+        from gopro.validation import validate_training_csvs
+        validate_training_csvs(real_fractions_csv, real_morphogen_csv)
+
     # Generate protocol grid
     protocols = generate_virtual_screen_grid(
         morphogen_ranges,

@@ -188,6 +188,11 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 - BoTorch uses CPU (MPS doesn't support float64 required by GP fitting)
 - scPoli model expects `snapseed_pca_rss_level_*` column names (mapped from `annot_level_*`)
 
+## Skill Activation
+
+- **superpowers:systematic-debugging** — when tests fail, unexpected behavior occurs, or results look wrong. Investigate root cause systematically before proposing fixes.
+- **superpowers:verification-before-completion** — before claiming any task is done or committing. Run tests (`python -m pytest gopro/tests/ -v`) and confirm output before asserting success.
+
 ## Known Issues
 
 - **Low test coverage**: `02_map_to_hnoca.py` (16%) and `05_cellrank2_virtual.py` (18%) have critical untested code paths.

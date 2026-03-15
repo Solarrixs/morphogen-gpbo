@@ -22,7 +22,6 @@ Outputs:
 from __future__ import annotations
 
 import time
-import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -30,25 +29,19 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
-warnings.filterwarnings("ignore")
 
 from gopro.config import (
     DATA_DIR,
     ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3,
     get_logger,
 )
+from gopro.region_targets import (
+    OFF_TARGET_LEVEL1,
+    HNOCA_TO_BRAUN_REGION,
+    build_hnoca_to_braun_label_map,
+)
 
 logger = get_logger(__name__)
-
-# Cell classes considered off-target for brain organoids.
-# These are HNOCA level-1 labels that do not correspond to neural lineage.
-OFF_TARGET_LEVEL1: set[str] = {
-    "PSC",            # Pluripotent stem cells (undifferentiated)
-    "MC",             # Mesenchymal cells
-    "EC",             # Endothelial cells
-    "Microglia",      # Immune — not generated in standard protocols
-    "NC Derivatives", # Neural crest derivatives (PNS, not CNS)
-}
 
 # Braun fetal brain CellClass values considered neural
 BRAUN_NEURAL_CLASSES: set[str] = {
@@ -58,21 +51,6 @@ BRAUN_NEURAL_CLASSES: set[str] = {
     "Radial glia",
     "Glioblast",
     "Oligo",
-}
-
-# Mapping from HNOCA annot_region_rev2 to Braun SummarizedRegion.
-# Used to align organoid region labels with fetal reference regions.
-HNOCA_TO_BRAUN_REGION: dict[str, str] = {
-    "Dorsal telencephalon": "Dorsal telencephalon",
-    "Ventral telencephalon": "Ventral telencephalon",
-    "Hypothalamus": "Hypothalamus",
-    "Thalamus": "Thalamus",
-    "Dorsal midbrain": "Dorsal midbrain",
-    "Ventral midbrain": "Ventral midbrain",
-    "Cerebellum": "Cerebellum",
-    "Pons": "Pons",
-    "Medulla": "Medulla",
-    # "Unspecific" has no direct Braun counterpart — handled separately
 }
 
 
@@ -265,13 +243,17 @@ def shannon_entropy(fractions: np.ndarray) -> float:
     return float(-np.sum(p * np.log2(p)))
 
 
-def normalized_entropy(fractions: np.ndarray) -> float:
+def normalized_entropy(fractions: np.ndarray, total_types: int | None = None) -> float:
     """Compute Shannon entropy normalized to [0, 1].
 
-    Normalized by log2(n_nonzero) so that maximum diversity = 1.0.
+    Normalized by log2(total_types) when provided, otherwise log2(n_nonzero).
+    Using total_types ensures consistent normalization across conditions with
+    different numbers of detected cell types.
 
     Args:
         fractions: Array of non-negative values summing to ~1.
+        total_types: Total number of possible cell types for normalization.
+            If None, uses the number of nonzero elements in fractions.
 
     Returns:
         Normalized entropy in [0, 1].
@@ -280,7 +262,10 @@ def normalized_entropy(fractions: np.ndarray) -> float:
     if len(p) <= 1:
         return 0.0
     h = -np.sum(p * np.log2(p))
-    h_max = np.log2(len(p))
+    n = total_types if total_types is not None else len(p)
+    if n <= 1:
+        return 0.0
+    h_max = np.log2(n)
     return float(h / h_max)
 
 
@@ -429,6 +414,7 @@ def score_all_conditions(
     condition_key: str = "condition",
     hnoca_level3_profiles: Optional[pd.DataFrame] = None,
     label_map: Optional[dict[str, str]] = None,
+    target_profile: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """Compute full fidelity report for all conditions in the query data.
 
@@ -443,6 +429,11 @@ def score_all_conditions(
     - rss_score: cosine similarity to best region profile
     - composite_fidelity: weighted combination of all scores [0, 1]
 
+    When ``target_profile`` is provided, the RSS score is computed as cosine
+    similarity between each condition's composition and the target profile
+    (instead of searching across all reference regions). The ``rss_best_region``
+    column will report "custom_target" in this case.
+
     Args:
         query_adata: Mapped AnnData with HNOCA-transferred labels in obs.
         braun_profiles: Fetal brain composition profiles (fallback for RSS).
@@ -450,6 +441,10 @@ def score_all_conditions(
         hnoca_level3_profiles: HNOCA region profiles at level-3 granularity.
             If provided, used for RSS instead of braun_profiles (much better
             region discrimination).
+        label_map: Mapping from HNOCA labels to Braun CellClass.
+        target_profile: Optional target cell type composition profile.
+            When provided, RSS is computed against this single profile instead
+            of searching all reference regions.
 
     Returns:
         DataFrame with one row per condition, sorted by composite_fidelity
@@ -461,8 +456,29 @@ def score_all_conditions(
     pred_level3 = f"predicted_{ANNOT_LEVEL_3}"
     pred_region = f"predicted_{ANNOT_REGION}"
 
-    # Determine which profiles and label level to use for RSS
-    if hnoca_level3_profiles is not None and pred_level3 in obs.columns:
+    # When a target profile is provided, score against it directly
+    use_target_profile = target_profile is not None
+
+    if use_target_profile:
+        logger.info("Scoring against custom target profile (%d cell types)",
+                     len(target_profile))
+        # Wrap target profile as a single-row DataFrame for compute_rss
+        target_as_df = pd.DataFrame([target_profile], index=["custom_target"])
+        rss_profiles = target_as_df
+        # Use the label level that best matches the target profile's index
+        rss_label_key = pred_level2  # default to level-2
+        # Check overlap with different label levels
+        for candidate_key, candidate_col in [
+            (pred_level3, ANNOT_LEVEL_3),
+            (pred_level2, ANNOT_LEVEL_2),
+            (pred_level1, ANNOT_LEVEL_1),
+        ]:
+            if candidate_key in obs.columns:
+                overlap = set(target_profile.index) & set(obs[candidate_key].unique())
+                if len(overlap) > 0:
+                    rss_label_key = candidate_key
+                    break
+    elif hnoca_level3_profiles is not None and pred_level3 in obs.columns:
         rss_profiles = hnoca_level3_profiles
         rss_label_key = pred_level3
         logger.info("Using HNOCA level-3 profiles for RSS (region-specific cell types)")
@@ -473,6 +489,9 @@ def score_all_conditions(
 
     conditions = obs[condition_key].unique()
     logger.info("Scoring %d conditions...", len(conditions))
+
+    # Total unique cell types across all conditions for consistent entropy normalization
+    total_cell_types = obs[pred_level2].nunique()
 
     results: list[dict] = []
 
@@ -497,11 +516,11 @@ def score_all_conditions(
         # Entropy
         frac_array = ct_fracs.values
         h = shannon_entropy(frac_array)
-        h_norm = normalized_entropy(frac_array)
+        h_norm = normalized_entropy(frac_array, total_types=total_cell_types)
 
-        # RSS: cosine similarity to region profiles
+        # RSS: cosine similarity to region profiles (or target profile)
         rss_fracs = subset[rss_label_key].value_counts(normalize=True)
-        if label_map is not None and rss_label_key == pred_level1:
+        if label_map is not None and rss_label_key == pred_level1 and not use_target_profile:
             rss_fracs = align_composition_to_braun(rss_fracs, label_map)
         rss_region, rss_score = compute_rss(rss_fracs, rss_profiles)
 
@@ -634,34 +653,6 @@ def build_hnoca_region_profiles_level3(
     return profiles
 
 
-def build_hnoca_to_braun_label_map() -> dict[str, str]:
-    """Build a mapping from HNOCA level-1 labels to Braun CellClass labels.
-
-    The two atlases use different cell type naming schemes. This mapping
-    allows cosine similarity comparison between organoid (HNOCA-labeled)
-    and fetal (Braun-labeled) composition vectors.
-
-    Returns:
-        Dict mapping HNOCA annot_level_1 values to Braun CellClass values.
-    """
-    return {
-        # HNOCA level 1  →  Braun CellClass
-        "Neuron": "Neuron",
-        "NPC": "Radial glia",         # Neural progenitors ~ radial glia
-        "IP": "Neuronal IPC",         # Intermediate progenitors
-        "Neuroepithelium": "Radial glia",
-        "Glioblast": "Glioblast",
-        "Astrocyte": "Glioblast",     # Braun doesn't separate astrocytes
-        "OPC": "Oligo",
-        "CP": "Neuron",              # Choroid plexus — neural origin
-        "NC Derivatives": "Neural crest",
-        "MC": "Fibroblast",          # Mesenchymal ~ fibroblast in Braun
-        "EC": "Vascular",
-        "Microglia": "Immune",
-        "PSC": "Radial glia",        # Map PSC to closest, but flagged off-target
-    }
-
-
 def align_composition_to_braun(
     hnoca_fracs: pd.Series,
     label_map: dict[str, str],
@@ -689,44 +680,42 @@ def align_composition_to_braun(
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    """Run the full fidelity scoring pipeline."""
-    start = time.time()
+def run_fidelity_scoring(
+    mapped_path: Path,
+    braun_path: Path,
+    ref_path: Optional[Path] = None,
+    condition_key: str = "condition",
+) -> tuple[pd.DataFrame, sc.AnnData]:
+    """Run the full fidelity scoring pipeline without writing files.
 
-    # -----------------------------------------------------------------------
-    # Check prerequisites
-    # -----------------------------------------------------------------------
-    braun_path = DATA_DIR / "braun-et-al_minimal_for_mapping.h5ad"
-    mapped_path = DATA_DIR / "amin_kelley_mapped.h5ad"
+    Args:
+        mapped_path: Path to mapped query h5ad (from step 02).
+        braun_path: Path to Braun fetal brain reference h5ad.
+        ref_path: Path to HNOCA reference h5ad (for level-3 RSS). Optional.
+        condition_key: Column identifying experimental conditions.
 
-    for path, name, hint in [
-        (braun_path, "Braun fetal brain reference", "Run: python 00_zenodo_download.py"),
-        (mapped_path, "Mapped query data", "Run step 02 first: python 02_map_to_hnoca.py"),
-    ]:
-        if not path.exists():
-            logger.error("%s not found at %s", name, path)
-            logger.error("%s", hint)
-            raise SystemExit(1)
+    Returns:
+        Tuple of (fidelity_report_df, annotated_adata).
+    """
+    # Validate mapped h5ad BEFORE loading expensive Braun data
+    from gopro.validation import validate_mapped_adata
+    validate_mapped_adata(mapped_path, condition_key=condition_key)
 
-    # -----------------------------------------------------------------------
     # Step 1: Extract Braun fetal brain reference profiles
-    # -----------------------------------------------------------------------
     logger.info("--- STEP 1: Extract Braun fetal brain reference profiles ---")
 
     braun_profiles = extract_braun_region_profiles(
         braun_path,
-        cache_path=DATA_DIR / "braun_reference_profiles.csv",
+        cache_path=braun_path.parent / "braun_reference_profiles.csv",
     )
 
     # Also extract detailed CellType profiles for reporting
-    braun_celltype_profiles = extract_braun_celltype_profiles(
+    extract_braun_celltype_profiles(
         braun_path,
-        cache_path=DATA_DIR / "braun_reference_celltype_profiles.csv",
+        cache_path=braun_path.parent / "braun_reference_celltype_profiles.csv",
     )
 
-    # -----------------------------------------------------------------------
     # Step 2: Load mapped query data
-    # -----------------------------------------------------------------------
     logger.info("--- STEP 2: Load mapped query data ---")
 
     logger.info("Loading mapped query data...")
@@ -741,46 +730,40 @@ def main() -> None:
     required_cols = [pred_level1, pred_level2, pred_region]
     missing = [c for c in required_cols if c not in query.obs.columns]
     if missing:
-        logger.error("Missing predicted label columns: %s", missing)
-        logger.error("These should have been added by step 02 (map_to_hnoca.py).")
-        logger.error("Available obs columns: %s", list(query.obs.columns))
-        raise SystemExit(1)
+        raise ValueError(
+            f"Missing predicted label columns: {missing}. "
+            f"These should have been added by step 02. "
+            f"Available: {list(query.obs.columns)}"
+        )
 
     # Detect condition column
-    condition_key = "condition"
     if condition_key not in query.obs.columns:
-        # Try alternative names
         for alt in ["sample", "protocol", "well", "batch"]:
             if alt in query.obs.columns:
                 condition_key = alt
                 break
         else:
-            logger.error("No condition column found. Available: %s", list(query.obs.columns))
-            raise SystemExit(1)
+            raise ValueError(
+                f"No condition column found. Available: {list(query.obs.columns)}"
+            )
     logger.info("Using condition column: '%s' (%d unique conditions)",
                 condition_key, query.obs[condition_key].nunique())
 
-    # -----------------------------------------------------------------------
     # Step 3: Build region profiles for RSS scoring
-    # -----------------------------------------------------------------------
     logger.info("--- STEP 3: Build region profiles for RSS ---")
 
-    # Build HNOCA-based level-3 profiles (region-specific cell types)
-    ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
     hnoca_l3_profiles = None
-    if ref_path.exists():
+    if ref_path is not None and ref_path.exists():
         hnoca_l3_profiles = build_hnoca_region_profiles_level3(
             ref_path,
-            cache_path=DATA_DIR / "hnoca_region_profiles_level3.csv",
+            cache_path=ref_path.parent / "hnoca_region_profiles_level3.csv",
         )
     else:
         logger.warning("HNOCA reference not found — falling back to Braun CellClass RSS")
 
     label_map = build_hnoca_to_braun_label_map()
 
-    # -----------------------------------------------------------------------
     # Step 4: Score all conditions
-    # -----------------------------------------------------------------------
     logger.info("--- STEP 4: Compute fidelity scores ---")
 
     report = score_all_conditions(
@@ -791,39 +774,58 @@ def main() -> None:
         label_map=label_map,
     )
 
-    # -----------------------------------------------------------------------
     # Step 5: Assign cell-level fidelity scores
-    # -----------------------------------------------------------------------
     logger.info("--- STEP 5: Assign cell-level fidelity scores ---")
 
     query = assign_cell_level_fidelity(query, report, condition_key=condition_key)
     logger.info("Added fidelity columns to %s cells", f"{query.n_obs:,}")
 
-    # -----------------------------------------------------------------------
-    # Step 6: Save outputs
-    # -----------------------------------------------------------------------
-    logger.info("--- STEP 6: Save outputs ---")
+    return report, query
 
-    # Save fidelity report
+
+def main() -> None:
+    """Run the full fidelity scoring pipeline."""
+    start = time.time()
+
+    # Check prerequisites
+    braun_path = DATA_DIR / "braun-et-al_minimal_for_mapping.h5ad"
+    mapped_path = DATA_DIR / "amin_kelley_mapped.h5ad"
+
+    for path, name, hint in [
+        (braun_path, "Braun fetal brain reference", "Run: python 00_zenodo_download.py"),
+        (mapped_path, "Mapped query data", "Run step 02 first: python 02_map_to_hnoca.py"),
+    ]:
+        if not path.exists():
+            logger.error("%s not found at %s", name, path)
+            logger.error("%s", hint)
+            raise SystemExit(1)
+
+    ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
+
+    report, query = run_fidelity_scoring(
+        mapped_path=mapped_path,
+        braun_path=braun_path,
+        ref_path=ref_path if ref_path.exists() else None,
+    )
+
+    # Save outputs
+    logger.info("--- Saving outputs ---")
+
     report_path = DATA_DIR / "fidelity_report.csv"
     report.to_csv(str(report_path))
     logger.info("Fidelity report -> %s", report_path)
 
-    # Save annotated AnnData
     output_path = DATA_DIR / "amin_kelley_fidelity.h5ad"
     query.write(str(output_path), compression="gzip")
     logger.info("Annotated data -> %s", output_path)
 
-    # -----------------------------------------------------------------------
     # Summary
-    # -----------------------------------------------------------------------
     elapsed = time.time() - start
     logger.info("--- FIDELITY SCORING SUMMARY ---")
     logger.info("Cells scored: %s", f"{query.n_obs:,}")
     logger.info("Conditions: %d", len(report))
     logger.info("Time elapsed: %.1fs", elapsed)
 
-    # Top and bottom conditions
     logger.info("Top 5 conditions by composite fidelity:")
     for cond, row in report.head(5).iterrows():
         logger.info("  %s  fidelity=%.3f  rss=%.3f  region=%s  off_target=%.1f%%",
