@@ -10,3 +10,4 @@
 | 3 | `5a264b9` | PASS | ralph/production-readiness-phase2 | FBaxis_rank regionalization — A-P axis targeting, 11 new tests (521 total) |
 | 3 | `af2d0ec` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 3 issues in FBaxis_rank: magic string, zero-row semantics, registry sync |
 | 3 | `80643a8` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 3 issues in FBaxis_rank: magic string, zero-row semantics, registry sync |
+| final | `1de4b09` | verified | ralph/production-readiness-phase2 | Bug hunter verified |
