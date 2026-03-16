@@ -695,23 +695,23 @@ class TestSAGScreenFiltering:
 class TestCrossScreenQC:
     """Tests for cross-screen condition QC validation."""
 
-    def test_cosine_similarity_identical(self):
-        """Identical fractions should have cosine similarity = 1.0."""
+    def test_similarity_identical(self):
+        """Identical fractions should have Aitchison similarity = 1.0."""
         from gopro.qc_cross_screen import compute_cross_screen_similarity
         fracs_a = pd.DataFrame({"NPC": [0.5], "Neuron": [0.5]}, index=["SAG250"])
         fracs_b = pd.DataFrame({"NPC": [0.5], "Neuron": [0.5]}, index=["SAG_250nM"])
         mapping = {"SAG250": "SAG_250nM"}
         result = compute_cross_screen_similarity(fracs_a, fracs_b, mapping)
-        assert result["SAG250"]["cosine_similarity"] == pytest.approx(1.0)
+        assert result["SAG250"]["similarity"] == pytest.approx(1.0)
 
-    def test_cosine_similarity_orthogonal(self):
-        """Orthogonal fractions should have cosine similarity = 0.0."""
+    def test_similarity_dissimilar(self):
+        """Opposite fractions should have very low Aitchison similarity."""
         from gopro.qc_cross_screen import compute_cross_screen_similarity
         fracs_a = pd.DataFrame({"NPC": [1.0], "Neuron": [0.0]}, index=["cond_a"])
         fracs_b = pd.DataFrame({"NPC": [0.0], "Neuron": [1.0]}, index=["cond_b"])
         mapping = {"cond_a": "cond_b"}
         result = compute_cross_screen_similarity(fracs_a, fracs_b, mapping)
-        assert result["cond_a"]["cosine_similarity"] == pytest.approx(0.0)
+        assert result["cond_a"]["similarity"] < 0.01  # Near zero for opposite compositions
 
     def test_flag_low_similarity(self):
         """Should flag conditions with similarity < threshold."""
@@ -1259,3 +1259,165 @@ class TestBuildTrainingSetNoMutation:
         # Re-read file to confirm it wasn't mutated on disk
         X_check = pd.read_csv(tmp_path / "x.csv", index_col=0)
         assert list(X_check.columns) == orig_cols
+
+
+class TestFidelityCosts:
+    """Tests for FIDELITY_COSTS configuration (Idea #3)."""
+
+    def test_fidelity_costs_defined(self):
+        """FIDELITY_COSTS has expected keys for all fidelity levels."""
+        from gopro.config import FIDELITY_COSTS
+        assert 1.0 in FIDELITY_COSTS
+        assert 0.5 in FIDELITY_COSTS
+        assert 0.0 in FIDELITY_COSTS
+
+    def test_fidelity_costs_ordering(self):
+        """Higher fidelity data should cost more."""
+        from gopro.config import FIDELITY_COSTS
+        assert FIDELITY_COSTS[1.0] > FIDELITY_COSTS[0.5]
+        assert FIDELITY_COSTS[0.5] > FIDELITY_COSTS[0.0]
+
+    def test_fidelity_costs_real_is_one(self):
+        """Real experiment cost ratio is 1.0 (baseline)."""
+        from gopro.config import FIDELITY_COSTS
+        assert FIDELITY_COSTS[1.0] == 1.0
+
+    def test_fidelity_costs_imported_in_gpbo(self):
+        """FIDELITY_COSTS is accessible from 04_gpbo_loop module."""
+        assert hasattr(step04, "FIDELITY_COSTS")
+        assert step04.FIDELITY_COSTS[1.0] == 1.0
+
+
+class TestSelectReplicateConditions:
+    """Tests for _select_replicate_conditions (Idea #7)."""
+
+    @pytest.fixture
+    def sample_training_data(self):
+        """Create sample training data for replicate tests."""
+        np.random.seed(42)
+        n = 10
+        X = pd.DataFrame({
+            "CHIR99021_uM": np.random.uniform(0, 12, n),
+            "SAG_uM": np.random.uniform(0, 2, n),
+            "fidelity": 1.0,
+        }, index=[f"cond_{i}" for i in range(n)])
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(4), size=n),
+            columns=["Neuron", "NPC", "Glia", "Other"],
+            index=X.index,
+        )
+        return X, Y
+
+    def test_select_replicate_conditions_count(self, sample_training_data):
+        """Returns correct number of replicates."""
+        X, Y = sample_training_data
+        result = step04._select_replicate_conditions(
+            X, Y, n_replicates=3, strategy="high_value",
+        )
+        assert len(result) == 3
+
+    def test_select_replicate_conditions_high_value(self, sample_training_data):
+        """high_value strategy picks conditions with highest mean Y."""
+        X, Y = sample_training_data
+        result = step04._select_replicate_conditions(
+            X, Y, n_replicates=2, strategy="high_value",
+        )
+        # The selected conditions should be among the top-2 by mean Y
+        mean_scores = Y.mean(axis=1)
+        top2 = mean_scores.nlargest(2).index
+        assert set(result.index) == set(top2)
+
+    def test_select_replicate_conditions_random(self, sample_training_data):
+        """random strategy returns correct count."""
+        X, Y = sample_training_data
+        result = step04._select_replicate_conditions(
+            X, Y, n_replicates=2, strategy="random",
+        )
+        assert len(result) == 2
+
+    def test_select_replicate_conditions_no_fidelity_column(self, sample_training_data):
+        """Output does not include fidelity column."""
+        X, Y = sample_training_data
+        result = step04._select_replicate_conditions(
+            X, Y, n_replicates=2, strategy="high_value",
+        )
+        assert "fidelity" not in result.columns
+
+    def test_select_replicate_conditions_zero(self, sample_training_data):
+        """n_replicates=0 returns empty DataFrame."""
+        X, Y = sample_training_data
+        result = step04._select_replicate_conditions(
+            X, Y, n_replicates=0, strategy="high_value",
+        )
+        assert len(result) == 0
+
+    def test_select_replicate_conditions_exceeds_available(self, sample_training_data):
+        """n_replicates > n_available is clamped."""
+        X, Y = sample_training_data
+        result = step04._select_replicate_conditions(
+            X, Y, n_replicates=100, strategy="random",
+        )
+        assert len(result) == len(X)
+
+    def test_select_replicate_conditions_high_variance_fallback(self, sample_training_data):
+        """high_variance without model falls back to high_value."""
+        X, Y = sample_training_data
+        # No model provided -> should fallback
+        result = step04._select_replicate_conditions(
+            X, Y, n_replicates=2, strategy="high_variance",
+            model=None, active_cols=None,
+        )
+        assert len(result) == 2
+
+    def test_unknown_strategy_raises(self, sample_training_data):
+        """Unknown strategy raises ValueError."""
+        X, Y = sample_training_data
+        with pytest.raises(ValueError, match="Unknown replicate strategy"):
+            step04._select_replicate_conditions(
+                X, Y, n_replicates=2, strategy="nonexistent",
+            )
+
+
+class TestEstimateNoiseFromReplicates:
+    """Tests for _estimate_noise_from_replicates (Idea #7)."""
+
+    def test_estimate_noise_basic(self):
+        """Noise estimate from synthetic replicates is reasonable."""
+        Y = pd.DataFrame({
+            "ct_A": [0.5, 0.52, 0.3, 0.31, 0.8],
+            "ct_B": [0.5, 0.48, 0.7, 0.69, 0.2],
+        })
+        groups = {
+            "group1": [0, 1],  # cond with ~0.5/0.5
+            "group2": [2, 3],  # cond with ~0.3/0.7
+        }
+        noise = step04._estimate_noise_from_replicates(Y, groups)
+        assert noise > 0
+        # Noise should be small since replicates are close
+        assert noise < 0.01
+
+    def test_estimate_noise_no_groups(self):
+        """No replicate groups returns 0.0."""
+        Y = pd.DataFrame({"ct_A": [0.5], "ct_B": [0.5]})
+        noise = step04._estimate_noise_from_replicates(Y, {})
+        assert noise == 0.0
+
+    def test_estimate_noise_single_member_groups(self):
+        """Groups with only 1 member are ignored."""
+        Y = pd.DataFrame({
+            "ct_A": [0.5, 0.3],
+            "ct_B": [0.5, 0.7],
+        })
+        groups = {"g1": [0], "g2": [1]}
+        noise = step04._estimate_noise_from_replicates(Y, groups)
+        assert noise == 0.0
+
+    def test_estimate_noise_high_variance(self):
+        """High variance replicates yield higher noise estimate."""
+        Y = pd.DataFrame({
+            "ct_A": [0.2, 0.8, 0.5, 0.5],
+            "ct_B": [0.8, 0.2, 0.5, 0.5],
+        })
+        groups = {"g1": [0, 1]}  # very different -> high var
+        noise = step04._estimate_noise_from_replicates(Y, groups)
+        assert noise > 0.05

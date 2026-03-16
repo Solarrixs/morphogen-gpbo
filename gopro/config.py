@@ -127,6 +127,17 @@ def md5_file(path, chunk_size: int = 8 * 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+# --- Fidelity correlation thresholds ---
+FIDELITY_CORRELATION_THRESHOLD = 0.3  # Below this, fall back to single-fidelity GP
+
+# --- Cost ratios for fidelity levels (relative to real experiment = 1.0) ---
+# Real scRNA-seq: ~$2,000 + 72 days; CellRank2: ~2 hours compute; CellFlow: ~10 min
+FIDELITY_COSTS: dict[float, float] = {
+    1.0: 1.0,     # real experiment
+    0.5: 0.005,   # CellRank2 forward projection
+    0.0: 0.001,   # CellFlow generative prediction
+}
+
 # --- Gruffi stress-filtering defaults ---
 GRUFFI_DEFAULT_THRESHOLD = 0.15
 GRUFFI_DEFAULT_RESOLUTION = 2.0

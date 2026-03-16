@@ -138,7 +138,7 @@ class TestGPBOIntegration:
                 assert recs[col].max() <= hi + 0.01, f"{col} above upper bound"
 
     def test_predictions_are_finite(self, synthetic_data):
-        """Test that GP predictions are all finite."""
+        """Test that GP predictions are all finite (excluding replicates)."""
         x_path, y_path = synthetic_data
         recs = step04.run_gpbo_loop(
             fractions_csv=y_path,
@@ -146,12 +146,14 @@ class TestGPBOIntegration:
             n_recommendations=6,
             round_num=1,
         )
-        pred_cols = [c for c in recs.columns if "predicted" in c]
+        # Filter out replicate rows which have NaN predictions by design
+        novel = recs[~recs.get("is_replicate", False)] if "is_replicate" in recs.columns else recs
+        pred_cols = [c for c in novel.columns if "predicted" in c]
         for col in pred_cols:
-            assert np.all(np.isfinite(recs[col])), f"Non-finite values in {col}"
+            assert np.all(np.isfinite(novel[col])), f"Non-finite values in {col}"
 
     def test_uncertainty_non_negative(self, synthetic_data):
-        """Test that GP uncertainty (std) is non-negative."""
+        """Test that GP uncertainty (std) is non-negative (excluding replicates)."""
         x_path, y_path = synthetic_data
         recs = step04.run_gpbo_loop(
             fractions_csv=y_path,
@@ -159,9 +161,11 @@ class TestGPBOIntegration:
             n_recommendations=6,
             round_num=1,
         )
-        std_cols = [c for c in recs.columns if "_std" in c]
+        # Filter out replicate rows which have NaN predictions by design
+        novel = recs[~recs.get("is_replicate", False)] if "is_replicate" in recs.columns else recs
+        std_cols = [c for c in novel.columns if "_std" in c]
         for col in std_cols:
-            assert (recs[col] >= 0).all(), f"Negative uncertainty in {col}"
+            assert (novel[col] >= 0).all(), f"Negative uncertainty in {col}"
 
 
 class TestCellTypeFractionsIntegration:

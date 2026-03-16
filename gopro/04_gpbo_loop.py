@@ -20,6 +20,7 @@ Outputs:
 
 from __future__ import annotations
 
+import math
 import numpy as np
 import pandas as pd
 import torch
@@ -28,6 +29,8 @@ from typing import Optional
 
 from gopro.config import (
     DATA_DIR,
+    FIDELITY_CORRELATION_THRESHOLD,
+    FIDELITY_COSTS,
     MORPHOGEN_COLUMNS,
     PROTEIN_MW_KDA,
     nM_to_uM,
@@ -145,6 +148,44 @@ def _compute_active_bounds(
     return active_bounds, active_cols
 
 
+def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
+    """Set a dimensionality-scaled log-normal prior on kernel lengthscales.
+
+    Following Hvarfner et al. (ICML 2024, arXiv:2402.02229), a log-normal
+    prior with mode scaled by sqrt(d) prevents vanishing gradients during
+    MLE in high-dimensional BO.  This improves exploration in our ~8D
+    active morphogen space.
+
+    Args:
+        model: BoTorch SingleTaskGP or SingleTaskMultiFidelityGP.
+        d: Number of input dimensions.
+    """
+    from gpytorch.priors import LogNormalPrior
+
+    # Mode of LogNormal(loc, scale) = exp(loc - scale^2).
+    # We want mode ~ sqrt(d), so loc = log(sqrt(d)) + scale^2.
+    scale = 1.0
+    loc = math.log(math.sqrt(d)) + scale ** 2
+    prior = LogNormalPrior(loc=loc, scale=scale)
+
+    if hasattr(model, "covar_module"):
+        kernel = model.covar_module
+        base = getattr(kernel, "base_kernel", kernel)
+        if hasattr(base, "lengthscale"):
+            try:
+                base.register_prior(
+                    "lengthscale_prior", prior, lambda m: m.lengthscale,
+                    lambda m, v: m._set_lengthscale(v),
+                )
+                logger.info(
+                    "Set dim-scaled LogNormal lengthscale prior (d=%d, loc=%.2f)", d, loc
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not set lengthscale prior (d=%d): %s", d, exc
+                )
+
+
 def _helmert_basis(D: int) -> np.ndarray:
     """Construct the Helmert ILR basis matrix.
 
@@ -162,11 +203,55 @@ def _helmert_basis(D: int) -> np.ndarray:
     return V
 
 
+def _multiplicative_replacement(Y: np.ndarray, delta: float | None = None) -> np.ndarray:
+    """Replace zeros in compositional data using multiplicative replacement.
+
+    Following Martin-Fernandez et al. (Statistical Modelling 2015), zeros
+    are replaced with a small value *delta* and non-zero entries are scaled
+    down proportionally so each row still sums to 1.  This avoids the
+    extreme log-ratios produced by naive additive pseudo-counts (e.g. 1e-10).
+
+    Args:
+        Y: Array of shape (N, D) with rows summing to ~1. May contain zeros.
+        delta: Replacement value for zeros.  If None, defaults to
+            ``0.65 / (D * 100)`` which gives ~3.8e-4 for 17 cell types.
+
+    Returns:
+        Array of shape (N, D) with no zeros, rows summing to 1.
+    """
+    D = Y.shape[1]
+    if delta is None:
+        delta = 0.65 / (D * 100)
+
+    Y_out = Y.copy()
+    for i in range(Y_out.shape[0]):
+        row = Y_out[i]
+        zeros = row <= 0
+        n_zeros = int(zeros.sum())
+        if n_zeros == 0:
+            continue
+        if n_zeros == D:
+            # All zeros: fall back to uniform
+            Y_out[i] = 1.0 / D
+            continue
+        # Multiplicative replacement: zeros get delta, non-zeros are
+        # scaled down so the row still sums to 1.
+        total_replacement = n_zeros * delta
+        nonzero_sum = row[~zeros].sum()
+        row[zeros] = delta
+        row[~zeros] *= (1.0 - total_replacement) / nonzero_sum
+
+    return Y_out
+
+
 def ilr_transform(Y: np.ndarray) -> np.ndarray:
     """Isometric log-ratio transform for compositional data.
 
     Transforms D-part compositions to (D-1)-dimensional real space,
     removing the sum-to-one constraint that violates GP assumptions.
+
+    Uses multiplicative replacement for zeros (Martin-Fernandez et al.
+    2015) instead of a naive additive pseudo-count.
 
     Args:
         Y: Array of shape (N, D) with rows summing to 1.
@@ -175,8 +260,7 @@ def ilr_transform(Y: np.ndarray) -> np.ndarray:
         Array of shape (N, D-1) in ILR space.
     """
     D = Y.shape[1]
-    Y_safe = Y + 1e-10
-    Y_safe = Y_safe / Y_safe.sum(axis=1, keepdims=True)
+    Y_safe = _multiplicative_replacement(Y)
     log_Y = np.log(Y_safe)
 
     V = _helmert_basis(D)
@@ -303,6 +387,7 @@ def fit_gp_botorch(
     saasbo_warmup: int = 256,
     saasbo_num_samples: int = 128,
     saasbo_thinning: int = 16,
+    warm_start_state: Optional[dict] = None,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
 
@@ -363,6 +448,8 @@ def fit_gp_botorch(
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
+        # Skip lengthscale prior for multi-fidelity GP — its kernel structure
+        # wraps lengthscales in a way incompatible with register_prior closures
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
         fit_gpytorch_mll(mll)
     elif use_saasbo:
@@ -412,6 +499,14 @@ def fit_gp_botorch(
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
+        _set_dim_scaled_lengthscale_prior(model, train_X.shape[1])
+        # Warm-start: load hyperparameters from previous round
+        if warm_start_state is not None:
+            try:
+                model.load_state_dict(warm_start_state, strict=False)
+                logger.info("Warm-started GP from previous round hyperparameters")
+            except Exception as exc:
+                logger.warning("Could not warm-start GP: %s", exc)
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
         fit_gpytorch_mll(mll)
 
@@ -444,6 +539,7 @@ def recommend_next_experiments(
     n_composition_parts: int = 0,
     cell_type_cols: Optional[list[str]] = None,
     target_profile: Optional[pd.Series] = None,
+    n_duplicates: int = 0,
 ) -> pd.DataFrame:
     """Use acquisition function to recommend next experiments.
 
@@ -462,6 +558,10 @@ def recommend_next_experiments(
         target_profile: Optional target composition profile for region targeting.
             When provided, scalarization uses cosine similarity to this target
             instead of equal weighting.
+        n_duplicates: Number of within-batch QC duplicate slots. The top-scoring
+            new conditions are duplicated to enable observation noise estimation
+            from the same round (complements n_replicates in run_gpbo_loop which
+            re-runs conditions from prior rounds).
 
     Returns:
         DataFrame with recommended morphogen concentrations and predictions.
@@ -568,15 +668,33 @@ def recommend_next_experiments(
                 best_f=train_Y.max(),
             )
 
+    # Reserve slots for QC duplicates
+    n_unique = n_recommendations - n_duplicates
+    if n_unique < 1:
+        raise ValueError(
+            f"n_duplicates ({n_duplicates}) must be less than "
+            f"n_recommendations ({n_recommendations})"
+        )
+
     # Optimize acquisition function
-    logger.info("Optimizing acquisition function for %d candidates...", n_recommendations)
+    logger.info("Optimizing acquisition function for %d candidates...", n_unique)
     candidates, acq_values = optimize_acqf(
         acq_function=acqf,
         bounds=bounds_tensor,
-        q=n_recommendations,
-        num_restarts=5,
-        raw_samples=512,
+        q=n_unique,
+        num_restarts=10,
+        raw_samples=1024,
     )
+
+    # Append QC duplicates: copy the top-scoring unique conditions
+    if n_duplicates > 0:
+        logger.info("Adding %d QC duplicate(s) for noise estimation", n_duplicates)
+        # Top conditions by acquisition value are first in the batch
+        dup_indices = list(range(min(n_duplicates, n_unique)))
+        dup_candidates = candidates[dup_indices]
+        candidates = torch.cat([candidates, dup_candidates], dim=0)
+        dup_acq = acq_values[dup_indices] if acq_values.dim() > 0 else acq_values
+        acq_values = torch.cat([acq_values, dup_acq], dim=0) if acq_values.dim() > 0 else acq_values
 
     # Get predictions at recommended points
     with torch.no_grad():
@@ -589,6 +707,10 @@ def recommend_next_experiments(
         candidates.cpu().numpy(),
         columns=columns,
     )
+
+    # Mark QC duplicates
+    is_duplicate = [False] * n_unique + [True] * n_duplicates
+    recommendations["is_qc_duplicate"] = is_duplicate[:len(recommendations)]
 
     # Add predictions: convert from ILR space back to composition space if applicable
     if use_ilr and n_composition_parts > 0 and cell_type_cols is not None:
@@ -610,6 +732,136 @@ def recommend_next_experiments(
     recommendations.index.name = "well"
 
     return recommendations
+
+
+def validate_fidelity_correlation(
+    real_fractions: pd.DataFrame,
+    virtual_fractions: pd.DataFrame,
+    fidelity_label: str = "virtual",
+    method: str = "spearman",
+) -> dict:
+    """Validate cross-fidelity correlation for overlapping conditions.
+
+    For conditions present in both real and virtual data, computes:
+    1. Per-cell-type correlation (Pearson and Spearman)
+    2. Overall correlation across all cell types
+
+    Returns dict with:
+        - overall_correlation: float (Spearman across all cell types)
+        - per_cell_type: dict[str, float] (per-type Spearman)
+        - recommendation: str ("use_mfbo" | "single_fidelity" | "skip_mfbo_use_cheap")
+        - details: str (human-readable explanation)
+        - n_overlap: int (number of overlapping conditions)
+
+    Decision gate (per McDonald et al. 2025):
+        - correlation > 0.9 everywhere: skip MF-BO, just use cheap fidelity as pre-filter
+        - correlation < 0.3 everywhere: skip MF-BO, use single-fidelity GP on real data only
+        - correlation 0.3-0.9: MF-BO is appropriate
+    """
+    from scipy.stats import spearmanr, pearsonr
+
+    real_fractions = real_fractions.copy()
+    virtual_fractions = virtual_fractions.copy()
+
+    # Find overlapping conditions
+    overlap = real_fractions.index.intersection(virtual_fractions.index)
+    if len(overlap) == 0:
+        logger.warning(
+            "No overlapping conditions between real and %s data — "
+            "cannot validate fidelity correlation",
+            fidelity_label,
+        )
+        return {
+            "overall_correlation": float("nan"),
+            "per_cell_type": {},
+            "recommendation": "use_mfbo",
+            "details": (
+                f"No overlapping conditions between real and {fidelity_label} data. "
+                "Cannot validate correlation; defaulting to MF-BO."
+            ),
+            "n_overlap": 0,
+        }
+
+    # Align columns (union of cell types)
+    all_cols = sorted(set(real_fractions.columns) | set(virtual_fractions.columns))
+    for col in all_cols:
+        if col not in real_fractions.columns:
+            real_fractions[col] = 0.0
+        if col not in virtual_fractions.columns:
+            virtual_fractions[col] = 0.0
+
+    real_overlap = real_fractions.loc[overlap, all_cols]
+    virtual_overlap = virtual_fractions.loc[overlap, all_cols]
+
+    # Per-cell-type correlation
+    per_cell_type = {}
+    for col in all_cols:
+        r_vals = real_overlap[col].values
+        v_vals = virtual_overlap[col].values
+        # Skip constant columns (no variance -> correlation undefined)
+        if np.std(r_vals) < 1e-12 or np.std(v_vals) < 1e-12:
+            continue
+        if method == "spearman":
+            corr, _ = spearmanr(r_vals, v_vals)
+        else:
+            corr, _ = pearsonr(r_vals, v_vals)
+        per_cell_type[col] = float(corr)
+
+    # Overall correlation: flatten all cell types into one vector
+    r_flat = real_overlap.values.flatten()
+    v_flat = virtual_overlap.values.flatten()
+
+    if np.std(r_flat) < 1e-12 or np.std(v_flat) < 1e-12:
+        overall_corr = float("nan")
+    else:
+        if method == "spearman":
+            overall_corr, _ = spearmanr(r_flat, v_flat)
+        else:
+            overall_corr, _ = pearsonr(r_flat, v_flat)
+        overall_corr = float(overall_corr)
+
+    # Decision gate
+    if math.isnan(overall_corr):
+        recommendation = "use_mfbo"
+        details = (
+            "Overall correlation is NaN (constant data). "
+            f"Defaulting to MF-BO for {fidelity_label} data."
+        )
+    elif overall_corr > 0.9:
+        recommendation = "skip_mfbo_use_cheap"
+        details = (
+            f"Cross-fidelity correlation with {fidelity_label} is very high "
+            f"({overall_corr:.3f} > 0.9). MF-BO adds overhead without benefit — "
+            f"consider using {fidelity_label} data as a cheap pre-filter instead."
+        )
+    elif overall_corr < FIDELITY_CORRELATION_THRESHOLD:
+        recommendation = "single_fidelity"
+        details = (
+            f"Cross-fidelity correlation with {fidelity_label} is too low "
+            f"({overall_corr:.3f} < {FIDELITY_CORRELATION_THRESHOLD}). "
+            f"MF-BO would be counterproductive — dropping {fidelity_label} data "
+            f"and using single-fidelity GP on real data only."
+        )
+    else:
+        recommendation = "use_mfbo"
+        details = (
+            f"Cross-fidelity correlation with {fidelity_label} is moderate "
+            f"({overall_corr:.3f}), within [0.3, 0.9]. MF-BO is appropriate."
+        )
+
+    logger.info(
+        "Fidelity validation (%s): overall_corr=%.3f, recommendation=%s",
+        fidelity_label, overall_corr, recommendation,
+    )
+    logger.info("  %s", details)
+
+    return {
+        "overall_correlation": overall_corr,
+        "per_cell_type": per_cell_type,
+        "recommendation": recommendation,
+        "details": details,
+        "n_overlap": len(overlap),
+    }
 
 
 def merge_multi_fidelity_data(
@@ -717,12 +969,137 @@ def merge_multi_fidelity_data(
     logger.info("  Y: %s", merged_Y.shape)
 
     fidelity_counts = merged_X["fidelity"].value_counts().sort_index(ascending=False)
+    total_cost = 0.0
     for fid, count in fidelity_counts.items():
         label = {1.0: "real", 0.5: "CellRank2", 0.0: "CellFlow"}.get(fid, f"fid={fid}")
-        logger.info("  %s: %d points", label, count)
+        cost_per = FIDELITY_COSTS.get(fid, 1.0)
+        level_cost = count * cost_per
+        total_cost += level_cost
+        logger.info("  %s: %d points (cost ratio %.3f, equivalent cost %.2f)",
+                     label, count, cost_per, level_cost)
+    logger.info("  Total equivalent cost: %.2f real-experiment units", total_cost)
 
     return merged_X, merged_Y
 
+
+
+
+def _select_replicate_conditions(
+    train_X: pd.DataFrame,
+    train_Y: pd.DataFrame,
+    n_replicates: int = 2,
+    strategy: str = "high_variance",
+    model=None,
+    active_cols: Optional[list[str]] = None,
+) -> pd.DataFrame:
+    """Select conditions to replicate in the next round.
+
+    Strategies:
+      - ``high_variance``: Replicate conditions with highest GP posterior
+        variance.  Requires *model* and *active_cols*.
+      - ``high_value``: Replicate the best-performing conditions (highest
+        mean Y across cell types).
+      - ``random``: Random selection from existing conditions.
+
+    Args:
+        train_X: Training morphogen matrix (with fidelity column).
+        train_Y: Training cell type fraction matrix.
+        n_replicates: Number of replicate conditions to select.
+        strategy: Selection strategy name.
+        model: Fitted BoTorch GP model (required for ``high_variance``).
+        active_cols: Active column names used in model fitting.
+
+    Returns:
+        DataFrame of replicate morphogen conditions (*n_replicates* rows).
+        Columns match *train_X* (without fidelity).
+    """
+    if n_replicates <= 0:
+        return pd.DataFrame(columns=[c for c in train_X.columns if c != "fidelity"])
+
+    n_available = len(train_X)
+    n_replicates = min(n_replicates, n_available)
+
+    morph_cols = [c for c in train_X.columns if c != "fidelity"]
+
+    if strategy == "high_variance" and model is not None and active_cols is not None:
+        X_active = train_X[active_cols].copy()
+        X_tensor = torch.tensor(X_active.values, dtype=DTYPE, device=DEVICE)
+        with torch.no_grad():
+            posterior = model.posterior(X_tensor)
+            variances = posterior.variance.cpu().numpy()
+        mean_var = variances.mean(axis=1)
+        top_indices = np.argsort(mean_var)[-n_replicates:][::-1]
+        selected = train_X.iloc[top_indices][morph_cols].copy()
+    elif strategy == "high_value":
+        mean_scores = train_Y.mean(axis=1)
+        top_indices = mean_scores.nlargest(n_replicates).index
+        selected = train_X.loc[top_indices, morph_cols].copy()
+    elif strategy == "random":
+        rng = np.random.default_rng(42)
+        chosen = rng.choice(n_available, size=n_replicates, replace=False)
+        selected = train_X.iloc[chosen][morph_cols].copy()
+    else:
+        if strategy == "high_variance":
+            logger.warning(
+                "Model not available for high_variance strategy, "
+                "falling back to high_value",
+            )
+            return _select_replicate_conditions(
+                train_X,
+                train_Y,
+                n_replicates,
+                strategy="high_value",
+            )
+        raise ValueError(f"Unknown replicate strategy: {strategy}")
+
+    logger.info(
+        "Selected %d replicate conditions (strategy=%s): %s",
+        n_replicates,
+        strategy,
+        list(selected.index),
+    )
+    return selected
+
+
+def _estimate_noise_from_replicates(
+    train_Y: pd.DataFrame,
+    replicate_groups: dict[str, list[int]],
+) -> float:
+    """Estimate observation noise from replicate variance.
+
+    For each group of replicate conditions, computes the within-group
+    variance across cell type fractions.  The noise estimate is the
+    pooled mean variance across all groups and cell types.
+
+    Args:
+        train_Y: Cell type fraction matrix (conditions x cell types).
+        replicate_groups: Mapping from group label to list of row indices
+            in *train_Y* that are replicates of each other.
+
+    Returns:
+        Noise level (variance) suitable for FixedNoiseGP.  Returns 0.0
+        if no replicate groups have more than one member.
+    """
+    group_variances: list[float] = []
+
+    for _label, indices in replicate_groups.items():
+        if len(indices) < 2:
+            continue
+        group_data = train_Y.iloc[indices].values
+        var_per_ct = np.var(group_data, axis=0, ddof=1)
+        group_variances.append(float(np.mean(var_per_ct)))
+
+    if not group_variances:
+        logger.info("No replicate groups with 2+ members; cannot estimate noise")
+        return 0.0
+
+    noise = float(np.mean(group_variances))
+    logger.info(
+        "Estimated observation noise from %d replicate groups: %.6f",
+        len(group_variances),
+        noise,
+    )
+    return noise
 
 def run_gpbo_loop(
     fractions_csv: Path,
@@ -734,6 +1111,8 @@ def run_gpbo_loop(
     virtual_sources: Optional[list[tuple[Path, Path, float]]] = None,
     use_saasbo: bool = False,
     target_profile: Optional[pd.Series] = None,
+    n_replicates: int = 2,
+    replicate_strategy: str = "high_variance",
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -751,6 +1130,10 @@ def run_gpbo_loop(
         target_profile: Optional target cell type composition profile (Series).
             When provided, the GP objective maximizes cosine similarity between
             predicted composition and this target instead of equal weighting.
+        n_replicates: Number of plate wells reserved for replicate experiments.
+            Set to 0 to disable replicates. (default: 2)
+        replicate_strategy: Strategy for selecting replicates. One of
+            "high_variance", "high_value", or "random". (default: "high_variance")
 
     Returns:
         DataFrame of recommended next experiments.
@@ -764,9 +1147,36 @@ def run_gpbo_loop(
     X_real, Y_real = build_training_set(fractions_csv, morphogen_csv)
 
     if virtual_sources:
-        # Multi-fidelity: combine real + virtual data
-        all_sources = [(fractions_csv, morphogen_csv, 1.0)] + virtual_sources
-        X, Y = merge_multi_fidelity_data(all_sources)
+        # Cross-fidelity correlation validation gate
+        # Validate each virtual source against real data before merging
+        validated_virtual = []
+        for v_frac_csv, v_morph_csv, v_fidelity in virtual_sources:
+            if not v_frac_csv.exists():
+                continue
+            # Only validate non-real fidelity sources
+            if v_fidelity < 1.0:
+                v_Y = pd.read_csv(str(v_frac_csv), index_col=0)
+                fid_label = {0.5: "CellRank2", 0.0: "CellFlow"}.get(
+                    v_fidelity, f"fidelity={v_fidelity}"
+                )
+                val_result = validate_fidelity_correlation(
+                    Y_real, v_Y, fidelity_label=fid_label,
+                )
+                if val_result["recommendation"] == "single_fidelity":
+                    logger.warning(
+                        "Dropping %s data: cross-fidelity correlation too low (%.3f)",
+                        fid_label, val_result["overall_correlation"],
+                    )
+                    continue
+            validated_virtual.append((v_frac_csv, v_morph_csv, v_fidelity))
+
+        if validated_virtual:
+            all_sources = [(fractions_csv, morphogen_csv, 1.0)] + validated_virtual
+            X, Y = merge_multi_fidelity_data(all_sources)
+        else:
+            logger.info("All virtual sources dropped by fidelity validation; "
+                        "using single-fidelity GP on real data only")
+            X, Y = X_real, Y_real
     else:
         X, Y = X_real, Y_real
 
@@ -779,20 +1189,41 @@ def run_gpbo_loop(
     X_active = X[active_cols]
     logger.info("Active X shape: %s (from %s)", X_active.shape, X.shape)
 
+    # Load warm-start state from previous round if available
+    warm_start_path = DATA_DIR / f"gp_state_round{round_num - 1}.pt"
+    warm_start_state = None
+    if warm_start_path.exists():
+        try:
+            warm_start_state = torch.load(warm_start_path, weights_only=True)
+            logger.info("Found warm-start state from round %d", round_num - 1)
+        except Exception as exc:
+            logger.warning("Could not load warm-start state: %s", exc)
+
     # Fit GP on active dimensions only
     model, train_X, train_Y, cell_type_cols = fit_gp_botorch(
         X_active, Y,
         target_cell_types=target_cell_types,
         use_ilr=use_ilr,
         use_saasbo=use_saasbo,
+        warm_start_state=warm_start_state,
     )
 
+    # Save GP state for warm-starting future rounds
+    state_save_path = DATA_DIR / f"gp_state_round{round_num}.pt"
+    try:
+        torch.save(model.state_dict(), state_save_path)
+        logger.info("Saved GP state to %s", state_save_path)
+    except Exception as exc:
+        logger.warning("Could not save GP state: %s", exc)
+
     # Recommend next experiments (in active dimensions)
+    # Reserve wells for replicates if requested
+    n_novel = max(1, n_recommendations - n_replicates)
     recommendations = recommend_next_experiments(
         model, train_X, train_Y,
         bounds=active_bounds,
         columns=list(X_active.columns),
-        n_recommendations=n_recommendations,
+        n_recommendations=n_novel,
         use_ilr=use_ilr,
         n_composition_parts=len(cell_type_cols),
         cell_type_cols=cell_type_cols,
@@ -809,6 +1240,40 @@ def run_gpbo_loop(
     final_morph_cols = [c for c in X.columns if c in recommendations.columns]
     pred_cols = [c for c in recommendations.columns if c not in X.columns]
     recommendations = recommendations[final_morph_cols + pred_cols]
+
+    # Append replicate conditions
+    if n_replicates > 0:
+        replicates = _select_replicate_conditions(
+            X, Y,
+            n_replicates=n_replicates,
+            strategy=replicate_strategy,
+            model=model,
+            active_cols=active_cols,
+        )
+        # Mark novel vs replicate rows
+        recommendations["is_replicate"] = False
+        rep_df = replicates.copy()
+        # Add missing columns (predictions, etc.) as NaN for replicates
+        for col in recommendations.columns:
+            if col not in rep_df.columns:
+                rep_df[col] = np.nan
+        rep_df["is_replicate"] = True
+        # Reorder rep_df columns to match recommendations
+        rep_df = rep_df[recommendations.columns]
+        recommendations = pd.concat([recommendations, rep_df], ignore_index=True)
+
+        # Re-label wells for the full plate
+        wells = [f"{chr(65 + i // 6)}{i % 6 + 1}" for i in range(len(recommendations))]
+        recommendations.index = wells[:len(recommendations)]
+        recommendations.index.name = "well"
+
+        n_reps_actual = int(recommendations["is_replicate"].sum())
+        logger.info(
+            "Plate map: %d novel + %d replicate = %d total",
+            len(recommendations) - n_reps_actual,
+            n_reps_actual,
+            len(recommendations),
+        )
 
     # Save outputs
     output_path = DATA_DIR / f"gp_recommendations_round{round_num}.csv"
@@ -859,6 +1324,8 @@ if __name__ == "__main__":
                         help="Cell types to optimize for (default: all)")
     parser.add_argument("--n-recommendations", type=int, default=24,
                         help="Number of experiments to recommend (default: 24)")
+    parser.add_argument("--n-duplicates", type=int, default=2,
+                        help="Number of QC duplicate slots for noise estimation (default: 2)")
     parser.add_argument("--round", type=int, default=1,
                         help="Optimization round number (default: 1)")
     parser.add_argument("--no-ilr", action="store_true",
@@ -885,6 +1352,13 @@ if __name__ == "__main__":
                         help="Path to custom target profile CSV")
     parser.add_argument("--list-regions", action="store_true",
                         help="List available region profiles and exit")
+    parser.add_argument("--n-replicates", type=int, default=2,
+                        help="Number of wells reserved for replicate experiments (default: 2)")
+    parser.add_argument("--replicate-strategy", type=str, default="high_variance",
+                        choices=["high_variance", "high_value", "random"],
+                        help="Strategy for selecting replicate conditions (default: high_variance)")
+    parser.add_argument("--validate-fidelity", action="store_true",
+                        help="Validate cross-fidelity correlation and print recommendation, then exit")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -896,6 +1370,43 @@ if __name__ == "__main__":
         for _, row in profiles_df.iterrows():
             print(f"  {row['name']:<30s} {row['description']}")
         print(f"\nUse: --target-region <name>")
+        raise SystemExit(0)
+
+    # Handle --validate-fidelity
+    if args.validate_fidelity:
+        fractions_path = Path(args.fractions) if args.fractions else DATA_DIR / "gp_training_labels_amin_kelley.csv"
+        morphogen_path = Path(args.morphogens) if args.morphogens else DATA_DIR / "morphogen_matrix_amin_kelley.csv"
+        if not fractions_path.exists():
+            logger.error("Fractions CSV not found: %s", fractions_path)
+            raise SystemExit(1)
+        Y_real = pd.read_csv(str(fractions_path), index_col=0)
+
+        # Validate each virtual source
+        virtual_pairs = []
+        cr2_frac = Path(args.cellrank2_fractions) if args.cellrank2_fractions else DATA_DIR / "cellrank2_virtual_fractions.csv"
+        if cr2_frac.exists():
+            virtual_pairs.append((cr2_frac, 0.5, "CellRank2"))
+        cf_frac = Path(args.cellflow_fractions) if args.cellflow_fractions else DATA_DIR / "cellflow_virtual_fractions_200.csv"
+        if cf_frac.exists():
+            virtual_pairs.append((cf_frac, 0.0, "CellFlow"))
+
+        if not virtual_pairs:
+            print("No virtual data sources found to validate.")
+            raise SystemExit(0)
+
+        import json
+        for v_frac, v_fid, v_label in virtual_pairs:
+            v_Y = pd.read_csv(str(v_frac), index_col=0)
+            result = validate_fidelity_correlation(Y_real, v_Y, fidelity_label=v_label)
+            print(f"\n=== {v_label} (fidelity={v_fid}) ===")
+            print(f"  Overlapping conditions: {result['n_overlap']}")
+            print(f"  Overall correlation: {result['overall_correlation']:.4f}")
+            print(f"  Recommendation: {result['recommendation']}")
+            print(f"  Details: {result['details']}")
+            if result["per_cell_type"]:
+                print(f"  Per-cell-type correlations:")
+                for ct, corr in sorted(result["per_cell_type"].items(), key=lambda x: x[1]):
+                    print(f"    {ct}: {corr:.4f}")
         raise SystemExit(0)
 
     fractions_path = Path(args.fractions) if args.fractions else DATA_DIR / "gp_training_labels_amin_kelley.csv"
@@ -994,6 +1505,8 @@ if __name__ == "__main__":
         virtual_sources=virtual_sources if virtual_sources else None,
         use_saasbo=args.saasbo,
         target_profile=target_profile,
+        n_replicates=args.n_replicates,
+        replicate_strategy=args.replicate_strategy,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
