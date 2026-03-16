@@ -87,6 +87,9 @@ _LAZY_IMPORTS: dict[str, str] = {
     "discover_available_regions": "region_targets.py",
     "load_region_profile": "region_targets.py",
     "load_target_profile_csv": "region_targets.py",
+    "BRAIN_REGION_AP_POSITIONS": "region_targets.py",
+    "compute_fbaxis_rank": "region_targets.py",
+    "build_ap_target_profile": "region_targets.py",
 }
 
 _GOPRO_DIR = Path(__file__).parent

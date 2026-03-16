@@ -475,3 +475,103 @@ class TestDynamicLabelMap:
         })
         label_map = build_hnoca_to_braun_label_map(hnoca_obs=hnoca)
         assert label_map == _STATIC_HNOCA_TO_BRAUN
+
+
+class TestFBaxisRank:
+    """Tests for FBaxis_rank continuous A-P regionalization."""
+
+    def test_ap_positions_cover_all_named_regions(self):
+        """All 9 HNOCA regions should have A-P positions."""
+        from gopro.region_targets import BRAIN_REGION_AP_POSITIONS, HNOCA_TO_BRAUN_REGION
+        for region in HNOCA_TO_BRAUN_REGION:
+            assert region in BRAIN_REGION_AP_POSITIONS, f"Missing A-P position for {region}"
+
+    def test_ap_positions_monotonic_ordering(self):
+        """Forebrain < midbrain < hindbrain on the A-P axis."""
+        from gopro.region_targets import BRAIN_REGION_AP_POSITIONS
+        assert BRAIN_REGION_AP_POSITIONS["Dorsal telencephalon"] < BRAIN_REGION_AP_POSITIONS["Dorsal midbrain"]
+        assert BRAIN_REGION_AP_POSITIONS["Dorsal midbrain"] < BRAIN_REGION_AP_POSITIONS["Cerebellum"]
+        assert BRAIN_REGION_AP_POSITIONS["Cerebellum"] < BRAIN_REGION_AP_POSITIONS["Medulla"]
+
+    def test_compute_fbaxis_rank_from_region_fractions(self):
+        """Weighted A-P score from region fraction vectors."""
+        from gopro.region_targets import compute_fbaxis_rank, BRAIN_REGION_AP_POSITIONS
+        # Condition purely in Dorsal telencephalon → score = 0.0
+        region_fracs = pd.DataFrame({
+            "Dorsal telencephalon": [1.0, 0.0],
+            "Medulla": [0.0, 1.0],
+        }, index=["forebrain_cond", "hindbrain_cond"])
+        scores = compute_fbaxis_rank(pd.DataFrame(), region_fractions=region_fracs)
+        assert scores["forebrain_cond"] == pytest.approx(0.0)
+        assert scores["hindbrain_cond"] == pytest.approx(1.0)
+
+    def test_compute_fbaxis_rank_mixed_regions(self):
+        """Mixed region fractions give intermediate A-P score."""
+        from gopro.region_targets import compute_fbaxis_rank
+        region_fracs = pd.DataFrame({
+            "Dorsal telencephalon": [0.5],
+            "Medulla": [0.5],
+        }, index=["mixed"])
+        scores = compute_fbaxis_rank(pd.DataFrame(), region_fractions=region_fracs)
+        assert 0.0 < scores["mixed"] < 1.0
+        assert scores["mixed"] == pytest.approx(0.5)  # (0.0 + 1.0) / 2
+
+    def test_compute_fbaxis_rank_dominant_region_fallback(self):
+        """Falls back to dominant_region column when region_fractions not given."""
+        from gopro.region_targets import compute_fbaxis_rank, BRAIN_REGION_AP_POSITIONS
+        df = pd.DataFrame({
+            "dominant_region": ["Dorsal telencephalon", "Medulla", "Cerebellum"],
+        }, index=["c1", "c2", "c3"])
+        scores = compute_fbaxis_rank(df)
+        assert scores["c1"] == pytest.approx(BRAIN_REGION_AP_POSITIONS["Dorsal telencephalon"])
+        assert scores["c2"] == pytest.approx(BRAIN_REGION_AP_POSITIONS["Medulla"])
+        assert scores["c3"] == pytest.approx(BRAIN_REGION_AP_POSITIONS["Cerebellum"])
+
+    def test_compute_fbaxis_rank_unmapped_region(self):
+        """Unmapped regions get 0.5 (midpoint) with a warning."""
+        from gopro.region_targets import compute_fbaxis_rank
+        df = pd.DataFrame({
+            "dominant_region": ["UnknownRegion"],
+        }, index=["c1"])
+        scores = compute_fbaxis_rank(df)
+        assert scores["c1"] == pytest.approx(0.5)
+
+    def test_compute_fbaxis_rank_no_region_col_raises(self):
+        """Should raise ValueError when no region info is available."""
+        from gopro.region_targets import compute_fbaxis_rank
+        df = pd.DataFrame({"cell_type_A": [0.5]}, index=["c1"])
+        with pytest.raises(ValueError, match="dominant_region"):
+            compute_fbaxis_rank(df)
+
+    def test_build_ap_target_profile_sums_to_one(self):
+        """Target profile from A-P position should sum to 1."""
+        from gopro.region_targets import build_ap_target_profile
+        for fbaxis in [0.0, 0.3, 0.5, 0.7, 1.0]:
+            profile = build_ap_target_profile(fbaxis)
+            assert profile.sum() == pytest.approx(1.0)
+
+    def test_build_ap_target_profile_peaks_at_target(self):
+        """Profile should peak at the region closest to target_fbaxis."""
+        from gopro.region_targets import build_ap_target_profile, BRAIN_REGION_AP_POSITIONS
+        # Target 0.0 → should peak at Dorsal telencephalon
+        profile = build_ap_target_profile(0.0)
+        assert profile.idxmax() == "Dorsal telencephalon"
+        # Target 1.0 → should peak at Medulla
+        profile = build_ap_target_profile(1.0)
+        assert profile.idxmax() == "Medulla"
+
+    def test_build_ap_target_profile_out_of_range_raises(self):
+        """Target outside [0, 1] should raise ValueError."""
+        from gopro.region_targets import build_ap_target_profile
+        with pytest.raises(ValueError, match="must be in"):
+            build_ap_target_profile(-0.1)
+        with pytest.raises(ValueError, match="must be in"):
+            build_ap_target_profile(1.5)
+
+    def test_build_ap_target_profile_invalid_width_raises(self):
+        """Zero or negative width should raise ValueError."""
+        from gopro.region_targets import build_ap_target_profile
+        with pytest.raises(ValueError, match="width must be positive"):
+            build_ap_target_profile(0.5, width=0)
+        with pytest.raises(ValueError, match="width must be positive"):
+            build_ap_target_profile(0.5, width=-0.1)

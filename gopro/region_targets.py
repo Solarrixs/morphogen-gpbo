@@ -565,3 +565,136 @@ def load_target_profile_csv(path: Path) -> pd.Series:
         raise ValueError(f"Profile fractions sum to {total}, expected positive")
 
     return series / total
+
+
+# ---------------------------------------------------------------------------
+# FBaxis_rank: continuous anterior-posterior regionalization
+# ---------------------------------------------------------------------------
+
+# Anterior-posterior positions for HNOCA brain regions.
+# Scale: 0.0 = most anterior (forebrain), 1.0 = most posterior (hindbrain).
+# Based on developmental neuroanatomy (prosomeric model):
+#   Forebrain (prosencephalon): telencephalon, hypothalamus, thalamus
+#   Midbrain (mesencephalon): dorsal/ventral midbrain
+#   Hindbrain (rhombencephalon): cerebellum, pons, medulla
+BRAIN_REGION_AP_POSITIONS: dict[str, float] = {
+    "Dorsal telencephalon": 0.0,
+    "Ventral telencephalon": 0.1,
+    "Hypothalamus": 0.2,
+    "Thalamus": 0.3,
+    "Dorsal midbrain": 0.5,
+    "Ventral midbrain": 0.5,
+    "Cerebellum": 0.7,
+    "Pons": 0.85,
+    "Medulla": 1.0,
+}
+
+
+def compute_fbaxis_rank(
+    cell_type_fractions: pd.DataFrame,
+    region_fractions: pd.DataFrame | None = None,
+    region_col: str = "dominant_region",
+) -> pd.Series:
+    """Compute FBaxis_rank: a continuous A-P axis score for each condition.
+
+    The score is a weighted average of brain region A-P positions, weighted
+    by the fraction of cells assigned to each region. A score near 0 means
+    the condition produces mostly anterior (forebrain) cell types; near 1
+    means mostly posterior (hindbrain) cell types.
+
+    There are two modes of operation:
+
+    1. **Region fractions provided** (``region_fractions`` is a DataFrame):
+       Each row is a condition, columns are region names, values are fractions.
+       The A-P score is the dot product of region fractions with
+       ``BRAIN_REGION_AP_POSITIONS``.
+
+    2. **Region fractions not provided** (``region_fractions`` is None):
+       Uses ``region_col`` from ``cell_type_fractions`` if it exists as a
+       column. In this case, each condition is assigned the A-P position of
+       its dominant region.
+
+    Args:
+        cell_type_fractions: DataFrame with conditions as rows. If
+            ``region_fractions`` is None, must contain ``region_col``.
+        region_fractions: Optional DataFrame with conditions as rows and
+            region names as columns, values being the fraction of cells
+            per region. If provided, computes weighted A-P score.
+        region_col: Column name for dominant region assignment (used only
+            when ``region_fractions`` is None).
+
+    Returns:
+        Series indexed by condition with FBaxis_rank values in [0, 1].
+    """
+    if region_fractions is not None:
+        # Weighted A-P score from region fraction vectors
+        ap_positions = pd.Series(BRAIN_REGION_AP_POSITIONS)
+        # Align columns to known regions
+        shared_regions = region_fractions.columns.intersection(ap_positions.index)
+        if len(shared_regions) == 0:
+            raise ValueError(
+                "No overlap between region_fractions columns and "
+                f"BRAIN_REGION_AP_POSITIONS keys. "
+                f"Got columns: {list(region_fractions.columns)}"
+            )
+        aligned_fracs = region_fractions[shared_regions]
+        aligned_pos = ap_positions[shared_regions]
+        # Normalize rows so they sum to 1 over the shared regions
+        row_sums = aligned_fracs.sum(axis=1)
+        row_sums = row_sums.replace(0, 1.0)  # avoid division by zero
+        normalized = aligned_fracs.div(row_sums, axis=0)
+        scores = normalized.dot(aligned_pos)
+        return scores.rename("fbaxis_rank")
+
+    # Fallback: use dominant region column
+    if region_col not in cell_type_fractions.columns:
+        raise ValueError(
+            f"Column '{region_col}' not found in cell_type_fractions and "
+            f"region_fractions not provided. Cannot compute FBaxis_rank."
+        )
+    dominant = cell_type_fractions[region_col]
+    scores = dominant.map(BRAIN_REGION_AP_POSITIONS)
+    # Unmapped regions get NaN — fill with 0.5 (midpoint) and warn
+    n_unmapped = scores.isna().sum()
+    if n_unmapped > 0:
+        unmapped_regions = dominant[scores.isna()].unique().tolist()
+        logger.warning(
+            "%d conditions have unmapped regions for A-P scoring: %s. "
+            "Assigning midpoint (0.5).",
+            n_unmapped, unmapped_regions,
+        )
+        scores = scores.fillna(0.5)
+    return scores.rename("fbaxis_rank")
+
+
+def build_ap_target_profile(
+    target_fbaxis: float,
+    width: float = 0.15,
+) -> pd.Series:
+    """Build a target profile that favors regions near a target A-P position.
+
+    Creates a Gaussian-weighted profile over brain regions centered at
+    ``target_fbaxis``, which can be used as a ``target_profile`` for the
+    GP-BO acquisition function.
+
+    Args:
+        target_fbaxis: Target position on the A-P axis (0=anterior, 1=posterior).
+        width: Gaussian width (sigma). Smaller values create sharper
+            region preference. Default 0.15 covers ~2 adjacent regions.
+
+    Returns:
+        Series of region weights (sums to 1.0), indexed by region name.
+    """
+    if not 0.0 <= target_fbaxis <= 1.0:
+        raise ValueError(
+            f"target_fbaxis must be in [0, 1], got {target_fbaxis}"
+        )
+    if width <= 0:
+        raise ValueError(f"width must be positive, got {width}")
+
+    positions = pd.Series(BRAIN_REGION_AP_POSITIONS)
+    # Gaussian weighting centered on target
+    weights = np.exp(-0.5 * ((positions - target_fbaxis) / width) ** 2)
+    # Normalize to sum to 1
+    weights = weights / weights.sum()
+    return weights

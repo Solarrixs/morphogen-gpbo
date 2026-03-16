@@ -1852,9 +1852,12 @@ if __name__ == "__main__":
                         help="Use Targeted Variance Reduction (fit per-fidelity GPs, "
                              "select by lowest cost-scaled variance)")
     parser.add_argument("--target-region", type=str, default=None,
-                        help="Named region to optimize for (e.g., dorsal_telencephalon)")
+                        help="Named region to optimize for (e.g., dorsal_telencephalon, ap_axis)")
     parser.add_argument("--target-profile", type=str, default=None,
                         help="Path to custom target profile CSV")
+    parser.add_argument("--target-fbaxis", type=float, default=None,
+                        help="Target A-P axis position (0=anterior/forebrain, 1=posterior/hindbrain). "
+                             "Used with --target-region ap_axis")
     parser.add_argument("--list-regions", action="store_true",
                         help="List available region profiles and exit")
     parser.add_argument("--n-replicates", type=int, default=2,
@@ -1880,7 +1883,9 @@ if __name__ == "__main__":
         print("=" * 80)
         for _, row in profiles_df.iterrows():
             print(f"  {row['name']:<30s} {row['description']}")
+        print(f"\n  {'ap_axis':<30s} Continuous A-P axis targeting (use with --target-fbaxis)")
         print(f"\nUse: --target-region <name>")
+        print(f"  or: --target-region ap_axis --target-fbaxis 0.7  (for hindbrain)")
         raise SystemExit(0)
 
     # Handle --validate-fidelity
@@ -1983,22 +1988,30 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     if args.target_region:
-        from gopro.region_targets import NAMED_REGION_PROFILES, load_region_profile
-        if args.target_region not in NAMED_REGION_PROFILES:
-            logger.error("Unknown region '%s'. Use --list-regions to see options.",
-                         args.target_region)
-            raise SystemExit(1)
-        # Try to load from reference atlas; fall back to a simple placeholder
-        ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
-        braun_path = DATA_DIR / "braun-et-al_minimal_for_mapping.h5ad"
-        for atlas_path in [ref_path, braun_path]:
-            if atlas_path.exists():
-                target_profile = load_region_profile(args.target_region, atlas_path)
-                break
-        if target_profile is None:
-            logger.error("No reference atlas found. Cannot load region profile.")
-            raise SystemExit(1)
-        logger.info("Targeting region: %s", args.target_region)
+        if args.target_region == "ap_axis":
+            from gopro.region_targets import build_ap_target_profile
+            if args.target_fbaxis is None:
+                logger.error("--target-region ap_axis requires --target-fbaxis (0=anterior, 1=posterior)")
+                raise SystemExit(1)
+            target_profile = build_ap_target_profile(args.target_fbaxis)
+            logger.info("Targeting A-P axis position: %.2f", args.target_fbaxis)
+        else:
+            from gopro.region_targets import NAMED_REGION_PROFILES, load_region_profile
+            if args.target_region not in NAMED_REGION_PROFILES:
+                logger.error("Unknown region '%s'. Use --list-regions to see options.",
+                             args.target_region)
+                raise SystemExit(1)
+            # Try to load from reference atlas; fall back to a simple placeholder
+            ref_path = DATA_DIR / "hnoca_minimal_for_mapping.h5ad"
+            braun_path = DATA_DIR / "braun-et-al_minimal_for_mapping.h5ad"
+            for atlas_path in [ref_path, braun_path]:
+                if atlas_path.exists():
+                    target_profile = load_region_profile(args.target_region, atlas_path)
+                    break
+            if target_profile is None:
+                logger.error("No reference atlas found. Cannot load region profile.")
+                raise SystemExit(1)
+            logger.info("Targeting region: %s", args.target_region)
 
     if args.target_profile:
         from gopro.region_targets import load_target_profile_csv
