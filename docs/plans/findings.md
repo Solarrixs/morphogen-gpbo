@@ -190,3 +190,41 @@ All 487 tests passing.
 - CellFlow: Klein et al. bioRxiv 2025.04.11.648220
 - PerturBench: arXiv:2408.10609, 2024
 - STORIES: Nature Methods 2025
+
+---
+
+## Bug Hunter Fixes (2026-03-16)
+
+Verified 8 critical findings from bug-hunter swarm. 3 confirmed, 2 false positives, 3 won't fix.
+
+### Fixed (commit a1078f9)
+
+1. **CRIT-1 — NaN injection via zero row_sums** (`05_cellrank2_virtual.py:699`): `row_sums.replace(0, 1)` prevents NaN propagation into GP training labels when virtual conditions have all-zero push results.
+
+2. **CRIT-2 — Transport matrix dimension mismatch** (`05_cellrank2_virtual.py:544`): Added length check `len(target_dist) != len(target_labels_arr)` in `_project_condition_transport` — falls back to atlas average instead of producing silently wrong fractions.
+
+3. **CRIT-4 — Zero-width fidelity bounds** (`04_gpbo_loop.py:140`): Fidelity column now dropped from `active_cols` when only a single fidelity level exists, preventing zero-variance column from causing NaN in BoTorch Normalize.
+
+### Dismissed
+
+- **CRIT-3** (SAASBO ModelListGP crash): FALSE POSITIVE — multi-output SAASBO always flows through GenericMCObjective scalarization, which supports ModelListGP.
+- **CRIT-5** (pandas Index.append deprecated): FALSE POSITIVE — `Index.append()` is not deprecated (only `Series.append()` was).
+- **CRIT-6/7** (performance loops): WONT FIX — negligible at current dataset scale (N=48-100 conditions, k=50 vectorized calls).
+- **CRIT-8** (god function): WONT FIX — refactoring suggestion, tracked in P3.
+
+## Bug Hunter Fixes (Round 4, 2026-03-16)
+
+### Fixed
+
+1. **C-01 — `--multi-objective` CLI flag silently ignored** (`04_gpbo_loop.py`): Added `multi_objective` parameter to `run_gpbo_loop()` and threaded it through to `recommend_next_experiments(use_multi_objective=...)`. Users passing `--multi-objective` now correctly get `qLogNoisyExpectedHypervolumeImprovement` instead of scalarized `qLogEI`.
+
+2. **C-02 — `--n-duplicates` CLI flag silently ignored** (`04_gpbo_loop.py`): Added `n_duplicates` parameter to `run_gpbo_loop()` and threaded it through to `recommend_next_experiments(n_duplicates=...)`. QC duplicate plate positions for noise estimation now correctly activate when `--n-duplicates > 0`.
+
+### Dismissed (Round 4)
+
+- **C-03** (SAASBO + ModelListGP + qLogEI): FALSE POSITIVE — confirmed by prior round; GenericMCObjective scalarization supports ModelListGP.
+- **C-04** (Transport dimension mismatch): FALSE POSITIVE — guard already exists at line 546-552 with fallback to atlas average.
+- **C-05** (NaN injection in project_query_forward): FALSE POSITIVE — already fixed in prior audit (line 709: `row_sums.replace(0, 1)`).
+- **C-06** (deprecated Index.append): FALSE POSITIVE — `Index.append()` is not deprecated in pandas 2.x.
+- **C-07** (Zero-width fidelity bounds): FALSE POSITIVE — already fixed in prior audit (lines 139-152: `nunique() > 1` guard).
+- **C-08/C-09** (performance loops): WONT FIX — not correctness bugs, negligible at current scale.

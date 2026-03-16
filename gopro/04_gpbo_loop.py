@@ -1666,6 +1666,8 @@ def run_gpbo_loop(
     refine_target: bool = False,
     refine_lr: float = 0.3,
     kernel_type: Literal["ard", "additive_interaction"] = "ard",
+    multi_objective: bool = False,
+    n_duplicates: int = 0,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -1701,6 +1703,12 @@ def run_gpbo_loop(
         kernel_type: Kernel structure for the GP. ``"ard"`` (default) uses
             Matern 5/2 + ARD. ``"additive_interaction"`` uses additive +
             interaction decomposition (NAIAD, Qin et al. ICML 2025).
+        multi_objective: If True, use multi-objective acquisition
+            (qLogNoisyExpectedHypervolumeImprovement) instead of scalarized
+            qLogExpectedImprovement. (default: False)
+        n_duplicates: Number of QC duplicate plate positions for within-round
+            noise estimation. The top-scoring new conditions are duplicated.
+            Set to 0 to disable. (default: 0)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -1814,10 +1822,12 @@ def run_gpbo_loop(
         bounds=rec_bounds,
         columns=rec_cols,
         n_recommendations=n_novel,
+        use_multi_objective=multi_objective,
         use_ilr=use_ilr,
         n_composition_parts=len(cell_type_cols),
         cell_type_cols=cell_type_cols,
         target_profile=target_profile,
+        n_duplicates=n_duplicates,
     )
 
     # Restore dropped zero-variance columns as zeros
@@ -2129,6 +2139,8 @@ if __name__ == "__main__":
         refine_target=args.refine_target,
         refine_lr=args.refine_lr,
         kernel_type=args.kernel,
+        multi_objective=args.multi_objective,
+        n_duplicates=args.n_duplicates,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
