@@ -29,6 +29,7 @@
 | 2026-03-15 | 460 | +57 | Phase 5A test coverage push |
 | 2026-03-16 | 503 | +43 | TVR + simplify fixes (competitive landscape Phase B) |
 | 2026-03-16 | 510 | +7 | Target profile refinement (DeMeo 2025, Idea #4) |
+| 2026-03-16 | 521 | +11 | FBaxis_rank regionalization (Sanchis-Calleja 2025, Idea #12) |
 
 ## Iteration Log
 
@@ -61,11 +62,29 @@
 - Quality: /simplify pass fixed 6 issues — cost scaling order, missing torch.no_grad, rsample missing on posterior, dead code removal, recommendation column cleanup, bounds alignment
 - Notes: TVR _TVRPosterior is a lightweight wrapper (not full GPyTorchPosterior). Works with qLogExpectedImprovement via sample() but may need adaptation for advanced acquisition functions. Multi-output GP noise is tensor not scalar — use .mean().item() for logging.
 
-## Iteration 2 — 2026-03-16
-- Task: Phase B Idea #4: Target Profile Refinement (DeMeo 2025)
+## Iteration 2 — 2026-03-16T08:34:21Z
+- Task: Phase B Idea #4: Target Profile Refinement (DeMeo 2025) — softmax-learned interpolation
 - Result: PASS (510 tests, 0 failures)
+- Commits:
+  - e3a1b90 [ralph-2] Task 2: Target profile refinement (DeMeo 2025) — refine_target_profile() with softmax-learned interpolation (510 tests)
+  - 845322c [ralph-simplify] Fix 4 issues in refine_target_profile: dead code, vectorize cosine sim, drop redundant copy/normalization
 - Files changed:
-  - gopro/04_gpbo_loop.py | ~100 additions (refine_target_profile(), --refine-target/--refine-lr CLI flags, wired into run_gpbo_loop)
+  - gopro/04_gpbo_loop.py | 30 lines net (refine_target_profile(), --refine-target/--refine-lr CLI flags, simplify fixes)
   - gopro/tests/test_unit.py | ~100 additions (7 new tests: TestRefineTargetProfile)
   - gopro/__init__.py | 1 addition (export refine_target_profile)
-- Implementation: Softmax-based learned profile from Pearson correlations between per-cell-type fractions and fidelity scores. Interpolation: refined = (1-lr)*original + lr*learned. Default lr=0.3. Cosine-similarity proxy for fidelity when full report unavailable. Handles <3 conditions gracefully (returns original).
+  - data/gp_diagnostics_round1.csv | updated
+  - data/gp_recommendations_round1.csv | updated
+- Quality: /simplify pass fixed 4 issues — dead code removal, vectorized cosine similarity (loop→matrix op), dropped redundant .copy()/normalization
+- Notes: Softmax-based learned profile from Pearson correlations. Interpolation: refined = (1-lr)*original + lr*learned. Default lr=0.3. Cosine-similarity proxy for fidelity when full report unavailable. Returns original unchanged if <3 overlapping conditions.
+
+## Iteration 3 — 2026-03-16
+- Task: Phase B Idea #12: FBaxis_rank regionalization — continuous A-P axis targeting
+- Result: PASS (521 tests, 0 failures)
+- Commits:
+  - 5a264b9 [ralph-3] Task 3: FBaxis_rank regionalization — continuous A-P axis targeting (521 tests)
+- Files changed:
+  - gopro/region_targets.py | 133 additions (BRAIN_REGION_AP_POSITIONS, compute_fbaxis_rank, build_ap_target_profile)
+  - gopro/04_gpbo_loop.py | 30 additions (--target-fbaxis CLI flag, ap_axis target-region handling)
+  - gopro/__init__.py | 3 additions (exports for AP axis functions)
+  - gopro/tests/test_region_targets.py | 100 additions (11 new tests: TestFBaxisRank)
+- Notes: A-P positions: Dorsal telencephalon=0.0 to Medulla=1.0. Gaussian-weighted profile builder for targeting specific axis positions. Two modes: region_fractions (weighted average) or dominant_region fallback.
