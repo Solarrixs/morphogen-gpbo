@@ -32,6 +32,7 @@ from gopro.config import (
     FIDELITY_CORRELATION_THRESHOLD,
     FIDELITY_COSTS,
     GP_STATE_DIR,
+    KERNEL_COMPLEXITY_THRESHOLDS,
     MORPHOGEN_COLUMNS,
     PROTEIN_MW_KDA,
     nM_to_uM,
@@ -240,6 +241,77 @@ def _build_additive_interaction_kernel(d: int):
         d, d,
     )
     return combined
+
+
+def _select_kernel_complexity(
+    n_conditions: int,
+    d_active: int,
+    thresholds: Optional[dict[str, float]] = None,
+) -> dict:
+    """Auto-select GP kernel complexity based on data density.
+
+    Implements the adaptive complexity schedule from NAIAD (Qin et al.,
+    ICML 2025): start simple in sparse-data regimes to avoid overfitting,
+    increase complexity as data accumulates.
+
+    The N/d ratio (conditions per active dimension) drives the selection:
+      - N/d < 8:  shared lengthscale (fewest params)
+      - 8 ≤ N/d < 15: per-dim ARD (standard)
+      - N/d ≥ 15: SAASBO (fully Bayesian with sparsity prior)
+
+    Args:
+        n_conditions: Number of training conditions (N).
+        d_active: Number of active (non-zero-variance) input dimensions.
+        thresholds: Override thresholds dict. Must have keys "shared" and
+            "ard" mapping to N/d cutoffs. If None, uses
+            KERNEL_COMPLEXITY_THRESHOLDS.
+
+    Returns:
+        Dict with keys:
+          - "kernel_type": one of "shared", "ard", "saasbo"
+          - "use_saasbo": bool
+          - "n_d_ratio": float
+          - "reason": human-readable explanation
+    """
+    if thresholds is None:
+        thresholds = KERNEL_COMPLEXITY_THRESHOLDS
+
+    shared_threshold = thresholds["shared"]
+    ard_threshold = thresholds["ard"]
+
+    d_safe = max(d_active, 1)
+    ratio = n_conditions / d_safe
+
+    if ratio < shared_threshold:
+        return {
+            "kernel_type": "shared",
+            "use_saasbo": False,
+            "n_d_ratio": ratio,
+            "reason": (
+                f"N/d={ratio:.1f} < {shared_threshold} → shared lengthscale "
+                f"(N={n_conditions}, d={d_active})"
+            ),
+        }
+    elif ratio < ard_threshold:
+        return {
+            "kernel_type": "ard",
+            "use_saasbo": False,
+            "n_d_ratio": ratio,
+            "reason": (
+                f"{shared_threshold} ≤ N/d={ratio:.1f} < {ard_threshold} → "
+                f"per-dim ARD (N={n_conditions}, d={d_active})"
+            ),
+        }
+    else:
+        return {
+            "kernel_type": "saasbo",
+            "use_saasbo": True,
+            "n_d_ratio": ratio,
+            "reason": (
+                f"N/d={ratio:.1f} ≥ {ard_threshold} → SAASBO fully Bayesian "
+                f"(N={n_conditions}, d={d_active})"
+            ),
+        }
 
 
 def _helmert_basis(D: int) -> np.ndarray:
@@ -804,7 +876,7 @@ def fit_gp_botorch(
     warm_start: bool = False,
     round_num: int = 1,
     warm_start_state: Optional[dict] = None,
-    kernel_type: Literal["ard", "additive_interaction"] = "ard",
+    kernel_type: Literal["ard", "additive_interaction", "shared"] = "ard",
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
 
@@ -827,6 +899,8 @@ def fit_gp_botorch(
         kernel_type: Kernel structure. ``"ard"`` (default) uses Matern 5/2 +
             ARD. ``"additive_interaction"`` uses a sum-of-1D additive kernel
             plus a full ARD interaction kernel (NAIAD, Qin et al. ICML 2025).
+            ``"shared"`` uses Matern 5/2 with a single shared lengthscale
+            (fewest parameters, best for sparse data regimes).
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -843,7 +917,7 @@ def fit_gp_botorch(
         Y_selected = Y
     cell_type_cols = list(Y_selected.columns)
 
-    _VALID_KERNEL_TYPES = ("ard", "additive_interaction")
+    _VALID_KERNEL_TYPES = ("ard", "additive_interaction", "shared")
     if kernel_type not in _VALID_KERNEL_TYPES:
         raise ValueError(
             f"Unknown kernel_type={kernel_type!r}. Must be one of {_VALID_KERNEL_TYPES}"
@@ -935,8 +1009,12 @@ def fit_gp_botorch(
         if kernel_type == "additive_interaction":
             covar_module = _build_additive_interaction_kernel(train_X.shape[1])
             logger.info("Using single-task GP with additive+interaction kernel")
+        elif kernel_type == "shared":
+            from gpytorch.kernels import MaternKernel, ScaleKernel
+            covar_module = ScaleKernel(MaternKernel(nu=2.5))
+            logger.info("Using single-task GP with shared lengthscale (sparse-data mode)")
         else:
-            logger.info("Using single-task GP (single fidelity level)")
+            logger.info("Using single-task GP with per-dim ARD")
 
         model = SingleTaskGP(
             train_X,
@@ -1665,9 +1743,10 @@ def run_gpbo_loop(
     warm_start: bool = False,
     refine_target: bool = False,
     refine_lr: float = 0.3,
-    kernel_type: Literal["ard", "additive_interaction"] = "ard",
+    kernel_type: Literal["ard", "additive_interaction", "shared"] = "ard",
     multi_objective: bool = False,
     n_duplicates: int = 0,
+    adaptive_complexity: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -1703,12 +1782,16 @@ def run_gpbo_loop(
         kernel_type: Kernel structure for the GP. ``"ard"`` (default) uses
             Matern 5/2 + ARD. ``"additive_interaction"`` uses additive +
             interaction decomposition (NAIAD, Qin et al. ICML 2025).
+            ``"shared"`` uses Matern 5/2 with shared lengthscale.
         multi_objective: If True, use multi-objective acquisition
             (qLogNoisyExpectedHypervolumeImprovement) instead of scalarized
             qLogExpectedImprovement. (default: False)
         n_duplicates: Number of QC duplicate plate positions for within-round
             noise estimation. The top-scoring new conditions are duplicated.
             Set to 0 to disable. (default: 0)
+        adaptive_complexity: If True, auto-select kernel complexity based on
+            the N/d ratio (NAIAD, Qin et al. ICML 2025). Overrides
+            ``kernel_type`` and ``use_saasbo``. (default: False)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -1783,6 +1866,29 @@ def run_gpbo_loop(
     X_active = X[active_cols]
     logger.info("Active X shape: %s (from %s)", X_active.shape, X.shape)
 
+    # Adaptive complexity: auto-select kernel based on N/d ratio
+    effective_kernel_type = kernel_type
+    effective_saasbo = use_saasbo
+    if adaptive_complexity:
+        d_morph = len([c for c in active_cols if c != "fidelity"])
+        complexity = _select_kernel_complexity(
+            n_conditions=X_active.shape[0],
+            d_active=d_morph,
+        )
+        logger.info("Adaptive complexity: %s", complexity["reason"])
+        if kernel_type != "ard" or use_saasbo:
+            logger.warning(
+                "Adaptive complexity overriding explicit kernel_type=%r, "
+                "use_saasbo=%r → %s",
+                kernel_type, use_saasbo, complexity["kernel_type"],
+            )
+        if complexity["use_saasbo"]:
+            effective_saasbo = True
+            effective_kernel_type = "ard"  # SAASBO uses its own kernel
+        else:
+            effective_kernel_type = complexity["kernel_type"]
+            effective_saasbo = False
+
     # Fit GP on active dimensions only (save/load handled inside fit_gp_botorch)
     if use_tvr and "fidelity" in X_active.columns and X_active["fidelity"].nunique() > 1:
         logger.info("Using TVR (Targeted Variance Reduction) with %d fidelity levels",
@@ -1799,10 +1905,10 @@ def run_gpbo_loop(
             X_active, Y,
             target_cell_types=target_cell_types,
             use_ilr=use_ilr,
-            use_saasbo=use_saasbo,
+            use_saasbo=effective_saasbo,
             warm_start=warm_start,
             round_num=round_num,
-            kernel_type=kernel_type,
+            kernel_type=effective_kernel_type,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -1972,9 +2078,12 @@ if __name__ == "__main__":
     parser.add_argument("--refine-lr", type=float, default=0.3,
                         help="Learning rate for target refinement (0=keep original, 1=fully learned, default: 0.3)")
     parser.add_argument("--kernel", type=str, default="ard",
-                        choices=["ard", "additive_interaction"],
-                        help="GP kernel structure: 'ard' (Matern 5/2 + ARD, default) or "
-                             "'additive_interaction' (NAIAD 2025: additive + interaction decomposition)")
+                        choices=["ard", "additive_interaction", "shared"],
+                        help="GP kernel structure: 'ard' (Matern 5/2 + ARD, default), "
+                             "'additive_interaction' (NAIAD 2025), or 'shared' (single lengthscale)")
+    parser.add_argument("--adaptive-complexity", action="store_true",
+                        help="Auto-select kernel complexity based on N/d ratio (NAIAD 2025). "
+                             "Overrides --kernel and --saasbo.")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -2141,6 +2250,7 @@ if __name__ == "__main__":
         kernel_type=args.kernel,
         multi_objective=args.multi_objective,
         n_duplicates=args.n_duplicates,
+        adaptive_complexity=args.adaptive_complexity,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
