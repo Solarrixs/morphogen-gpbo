@@ -8,3 +8,5 @@
 | 2 | `e3a1b90` | PASS | ralph/production-readiness-phase2 | Target profile refinement (DeMeo 2025), 7 new tests (510 total) |
 | 2 | `08f3823` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 4 issues in refine_target_profile: dead code, vectorize cosine sim, drop redundant copy/normalization |
 | 3 | `5a264b9` | PASS | ralph/production-readiness-phase2 | FBaxis_rank regionalization — A-P axis targeting, 11 new tests (521 total) |
+| 3 | `af2d0ec` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 3 issues in FBaxis_rank: magic string, zero-row semantics, registry sync |
+| 3 | `80643a8` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 3 issues in FBaxis_rank: magic string, zero-row semantics, registry sync |
