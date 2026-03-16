@@ -1519,7 +1519,7 @@ def refine_target_profile(
         )
         return original_target.copy()
 
-    Y = fractions.loc[common].copy()
+    Y = fractions.loc[common]
     scores = fidelity_scores.loc[common]
 
     # Compute Pearson correlation between each cell type fraction and fidelity
@@ -1540,13 +1540,10 @@ def refine_target_profile(
     orig_aligned = original_target.reindex(all_types, fill_value=0.0)
     learned_aligned = learned_profile.reindex(all_types, fill_value=0.0)
 
-    # Re-normalize after alignment (in case original didn't sum to 1)
+    # Re-normalize original in case it didn't sum to 1
     orig_sum = orig_aligned.sum()
     if orig_sum > 0:
         orig_aligned = orig_aligned / orig_sum
-    learned_sum = learned_aligned.sum()
-    if learned_sum > 0:
-        learned_aligned = learned_aligned / learned_sum
 
     # Interpolate
     refined = (1 - learning_rate) * orig_aligned + learning_rate * learned_aligned
@@ -1665,23 +1662,22 @@ def run_gpbo_loop(
 
     # Refine target profile using observed data (DeMeo 2025)
     if refine_target and target_profile is not None:
-        # Use real data fractions and compute simple fidelity as mean fraction
-        # (proxy for composite fidelity when full fidelity report is unavailable)
-        fidelity_proxy = Y_real.sum(axis=1)  # row sums ~1.0 for all
-        # Better proxy: cosine similarity to target for each condition
+        # Cosine similarity to target as fidelity proxy
         target_aligned = target_profile.reindex(Y_real.columns, fill_value=0.0)
         target_arr = target_aligned.values
         target_norm = np.linalg.norm(target_arr)
         if target_norm > 0:
-            fidelity_proxy = Y_real.apply(
-                lambda row: np.dot(row.values, target_arr) / (
-                    np.linalg.norm(row.values) * target_norm + 1e-12
-                ),
-                axis=1,
+            Y_vals = Y_real.values
+            row_norms = np.linalg.norm(Y_vals, axis=1)
+            cos_sims = (Y_vals @ target_arr) / (row_norms * target_norm + 1e-12)
+            fidelity_proxy = pd.Series(cos_sims, index=Y_real.index)
+        else:
+            logger.warning("Target profile is zero after alignment; skipping refinement")
+            fidelity_proxy = None
+        if fidelity_proxy is not None:
+            target_profile = refine_target_profile(
+                Y_real, fidelity_proxy, target_profile, learning_rate=refine_lr,
             )
-        target_profile = refine_target_profile(
-            Y_real, fidelity_proxy, target_profile, learning_rate=refine_lr,
-        )
 
     # Compute active bounds: use real data for morphogen ranges, but merged X
     # when virtual sources exist so log_harvest_day variance is detected.
