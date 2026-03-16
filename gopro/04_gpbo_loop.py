@@ -136,10 +136,20 @@ def _compute_active_bounds(
         logger.info("Bounds for %s: [%.6f, %.6f] (train: [%.6f, %.6f])",
                      col, lower, upper, col_min, col_max)
 
-    # Always include fidelity if present
+    # Include fidelity only when multiple fidelity levels exist; a single-fidelity
+    # column has zero variance which causes NaN in BoTorch Normalize (upper-lower=0)
     if "fidelity" in columns:
-        active_cols.append("fidelity")
-        active_bounds["fidelity"] = (1.0, 1.0)
+        if isinstance(X, pd.DataFrame) and "fidelity" in X.columns:
+            n_unique = X["fidelity"].nunique()
+        else:
+            n_unique = 1
+        if n_unique > 1:
+            fid_min = float(X["fidelity"].min())
+            fid_max = float(X["fidelity"].max())
+            active_cols.append("fidelity")
+            active_bounds["fidelity"] = (fid_min, fid_max)
+        else:
+            logger.info("Dropping fidelity column (single level, zero variance)")
 
     logger.info("Active dimensions: %d / %d (dropped %d zero-variance)",
                 len([c for c in active_cols if c != "fidelity"]),

@@ -543,6 +543,14 @@ def _project_condition_transport(
             weighted = W @ t_rows
             target_dist = np.asarray(weighted.sum(axis=0)).ravel()
 
+            if len(target_dist) != len(target_labels_arr):
+                logger.warning(
+                    "Transport target dim (%d) != target labels (%d), "
+                    "using atlas average",
+                    len(target_dist), len(target_labels_arr),
+                )
+                return target_ct_fracs.copy()
+
             if target_dist.sum() > 0:
                 target_dist /= target_dist.sum()
                 virtual_fracs = pd.Series(0.0, index=target_ct_fracs.index)
@@ -697,6 +705,8 @@ def project_query_forward(
     result[ct_cols] = result[ct_cols].fillna(0.0)
 
     row_sums = result[ct_cols].sum(axis=1)
+    # Guard against zero row_sums to prevent NaN injection into GP training labels
+    row_sums = row_sums.replace(0, 1)
     result[ct_cols] = result[ct_cols].div(row_sums, axis=0)
 
     logger.info("Generated %d virtual data points", len(result))
