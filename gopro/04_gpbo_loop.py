@@ -197,6 +197,51 @@ def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
                 )
 
 
+def _build_additive_interaction_kernel(d: int):
+    """Build an additive + interaction kernel for GP fitting.
+
+    Following NAIAD (Qin et al., ICML 2025, arXiv:2411.12010), decomposes the
+    covariance function into:
+      k(x, x') = k_additive(x, x') + k_interaction(x, x')
+
+    where k_additive is a sum of 1D Matern 5/2 kernels (one per morphogen) and
+    k_interaction is a full ARD Matern 5/2 over all dimensions.  The additive
+    component captures independent morphogen effects with O(d) parameters,
+    while the interaction component captures higher-order effects.  The
+    interaction outputscale is initialized small (0.1) to encode a prior
+    toward additivity.
+
+    Args:
+        d: Number of input dimensions.
+
+    Returns:
+        A GPyTorch kernel suitable for passing as ``covar_module`` to
+        ``SingleTaskGP``.
+    """
+    from gpytorch.kernels import AdditiveKernel, MaternKernel, ScaleKernel
+
+    # Additive: sum of d independent 1D Matern 5/2 kernels
+    additive_kernels = [
+        ScaleKernel(MaternKernel(nu=2.5, active_dims=(i,)))
+        for i in range(d)
+    ]
+    k_additive = ScaleKernel(AdditiveKernel(*additive_kernels))
+
+    # Interaction: full ARD Matern 5/2 over all dimensions
+    k_interaction = ScaleKernel(
+        MaternKernel(nu=2.5, ard_num_dims=d)
+    )
+    # Initialize interaction scale small → prior toward additivity
+    k_interaction.outputscale = 0.1
+
+    combined = k_additive + k_interaction
+    logger.info(
+        "Built additive+interaction kernel (d=%d): %d additive + 1 interaction",
+        d, d,
+    )
+    return combined
+
+
 def _helmert_basis(D: int) -> np.ndarray:
     """Construct the Helmert ILR basis matrix.
 
@@ -376,12 +421,21 @@ def _extract_lengthscales(model, n_input_dims: int):
 
         # Standard GP (MAP)
         if hasattr(model, 'covar_module'):
-            if hasattr(model.covar_module, 'base_kernel') and model.covar_module.base_kernel is not None:
-                ls = model.covar_module.base_kernel.lengthscale
+            covar = model.covar_module
+            # Additive+interaction kernel: AdditiveKernel(ScaleKernel(...), ScaleKernel(Matern(ard)))
+            # Extract lengthscales from the interaction (ARD) sub-kernel
+            if hasattr(covar, 'kernels') and len(covar.kernels) == 2:
+                # Second kernel is the interaction ScaleKernel(MaternKernel(ard))
+                interaction = covar.kernels[1]
+                base = getattr(interaction, 'base_kernel', interaction)
+                if hasattr(base, 'lengthscale') and base.lengthscale is not None:
+                    return base.lengthscale.detach().cpu().numpy().flatten()
+            if hasattr(covar, 'base_kernel') and covar.base_kernel is not None:
+                ls = covar.base_kernel.lengthscale
                 if ls is not None:
                     return ls.detach().cpu().numpy().flatten()
-            elif hasattr(model.covar_module, 'lengthscale'):
-                ls = model.covar_module.lengthscale
+            elif hasattr(covar, 'lengthscale'):
+                ls = covar.lengthscale
                 if ls is not None:
                     return ls.detach().cpu().numpy().flatten()
     except (AttributeError, RuntimeError):
@@ -750,6 +804,7 @@ def fit_gp_botorch(
     warm_start: bool = False,
     round_num: int = 1,
     warm_start_state: Optional[dict] = None,
+    kernel_type: str = "ard",
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
 
@@ -769,6 +824,9 @@ def fit_gp_botorch(
             previous round's state file when ``warm_start=True``).
         warm_start_state: **Deprecated**. Legacy dict-based warm-start.
             Use ``warm_start=True`` instead.
+        kernel_type: Kernel structure. ``"ard"`` (default) uses Matern 5/2 +
+            ARD. ``"additive_interaction"`` uses a sum-of-1D additive kernel
+            plus a full ARD interaction kernel (NAIAD, Qin et al. ICML 2025).
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -866,14 +924,23 @@ def fit_gp_botorch(
                 saas_models.append(m)
             model = ModelListGP(*saas_models)
     else:
-        logger.info("Using single-task GP (single fidelity level)")
+        # Build kernel based on kernel_type
+        covar_module = None
+        if kernel_type == "additive_interaction":
+            covar_module = _build_additive_interaction_kernel(train_X.shape[1])
+            logger.info("Using single-task GP with additive+interaction kernel")
+        else:
+            logger.info("Using single-task GP (single fidelity level)")
+
         model = SingleTaskGP(
             train_X,
             train_Y,
+            covar_module=covar_module,
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
-        _set_dim_scaled_lengthscale_prior(model, train_X.shape[1])
+        if kernel_type != "additive_interaction":
+            _set_dim_scaled_lengthscale_prior(model, train_X.shape[1])
         # Warm-start: load hyperparameters from previous round
         if warm_start:
             load_gp_state(model, gp_state_path)
@@ -1592,6 +1659,7 @@ def run_gpbo_loop(
     warm_start: bool = False,
     refine_target: bool = False,
     refine_lr: float = 0.3,
+    kernel_type: str = "ard",
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -1624,6 +1692,9 @@ def run_gpbo_loop(
             refined target is used for acquisition instead of the original.
         refine_lr: Learning rate for target refinement interpolation.
             0 = keep original, 1 = fully learned. (default: 0.3)
+        kernel_type: Kernel structure for the GP. ``"ard"`` (default) uses
+            Matern 5/2 + ARD. ``"additive_interaction"`` uses additive +
+            interaction decomposition (NAIAD, Qin et al. ICML 2025).
 
     Returns:
         DataFrame of recommended next experiments.
@@ -1717,6 +1788,7 @@ def run_gpbo_loop(
             use_saasbo=use_saasbo,
             warm_start=warm_start,
             round_num=round_num,
+            kernel_type=kernel_type,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -1883,6 +1955,10 @@ if __name__ == "__main__":
                         help="Refine target profile using observed data (DeMeo 2025 interpolation)")
     parser.add_argument("--refine-lr", type=float, default=0.3,
                         help="Learning rate for target refinement (0=keep original, 1=fully learned, default: 0.3)")
+    parser.add_argument("--kernel", type=str, default="ard",
+                        choices=["ard", "additive_interaction"],
+                        help="GP kernel structure: 'ard' (Matern 5/2 + ARD, default) or "
+                             "'additive_interaction' (NAIAD 2025: additive + interaction decomposition)")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -2046,6 +2122,7 @@ if __name__ == "__main__":
         warm_start=args.warm_start,
         refine_target=args.refine_target,
         refine_lr=args.refine_lr,
+        kernel_type=args.kernel,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

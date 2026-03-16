@@ -30,6 +30,7 @@
 | 2026-03-16 | 503 | +43 | TVR + simplify fixes (competitive landscape Phase B) |
 | 2026-03-16 | 510 | +7 | Target profile refinement (DeMeo 2025, Idea #4) |
 | 2026-03-16 | 521 | +11 | FBaxis_rank regionalization (Sanchis-Calleja 2025, Idea #12) |
+| 2026-03-16 | 526 | +5 | Additive+interaction kernel (NAIAD 2025, Idea #8) |
 
 ## Iteration Log
 
@@ -77,14 +78,26 @@
 - Quality: /simplify pass fixed 4 issues — dead code removal, vectorized cosine similarity (loop→matrix op), dropped redundant .copy()/normalization
 - Notes: Softmax-based learned profile from Pearson correlations. Interpolation: refined = (1-lr)*original + lr*learned. Default lr=0.3. Cosine-similarity proxy for fidelity when full report unavailable. Returns original unchanged if <3 overlapping conditions.
 
-## Iteration 3 — 2026-03-16
+## Iteration 3 — 2026-03-16T08:55:03Z
 - Task: Phase B Idea #12: FBaxis_rank regionalization — continuous A-P axis targeting
 - Result: PASS (521 tests, 0 failures)
 - Commits:
   - 5a264b9 [ralph-3] Task 3: FBaxis_rank regionalization — continuous A-P axis targeting (521 tests)
+  - af2d0ec [ralph-simplify] Fix 3 issues in FBaxis_rank: magic string, zero-row semantics, registry sync
 - Files changed:
-  - gopro/region_targets.py | 133 additions (BRAIN_REGION_AP_POSITIONS, compute_fbaxis_rank, build_ap_target_profile)
-  - gopro/04_gpbo_loop.py | 30 additions (--target-fbaxis CLI flag, ap_axis target-region handling)
-  - gopro/__init__.py | 3 additions (exports for AP axis functions)
+  - gopro/region_targets.py | 133+20 additions (BRAIN_REGION_AP_POSITIONS, compute_fbaxis_rank, build_ap_target_profile + simplify fixes)
+  - gopro/04_gpbo_loop.py | 30+9 changes (--target-fbaxis CLI flag, ap_axis target-region handling + simplify fixes)
+  - gopro/__init__.py | 3+1 additions (exports for AP axis functions + registry sync)
   - gopro/tests/test_region_targets.py | 100 additions (11 new tests: TestFBaxisRank)
+  - data/gp_diagnostics_round1.csv | updated
+  - data/gp_recommendations_round1.csv | updated
+- Quality: /simplify pass fixed 3 issues — magic string replacement, zero-row semantics in build_ap_target_profile, registry sync in __init__.py
 - Notes: A-P positions: Dorsal telencephalon=0.0 to Medulla=1.0. Gaussian-weighted profile builder for targeting specific axis positions. Two modes: region_fractions (weighted average) or dominant_region fallback.
+
+## Iteration 4 — 2026-03-16
+- Task: Phase C Idea #8: Additive + interaction kernel (NAIAD 2025)
+- Result: PASS (526 tests, 0 failures)
+- Files changed:
+  - gopro/04_gpbo_loop.py | ~80 additions (_build_additive_interaction_kernel, kernel_type param, CLI --kernel flag, _extract_lengthscales additive support)
+  - gopro/tests/test_unit.py | ~100 additions (5 new tests: TestAdditiveInteractionKernel)
+- Notes: Additive kernel = sum of d independent 1D Matern 5/2 (one per morphogen). Interaction kernel = full ARD Matern 5/2. Interaction outputscale initialized to 0.1 (prior toward additivity). Reduces effective params from O(d^2) to O(d). _extract_lengthscales extracts interaction kernel ARD lengthscales for importance ranking.

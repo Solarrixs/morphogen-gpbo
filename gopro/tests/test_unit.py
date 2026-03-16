@@ -1840,3 +1840,101 @@ class TestRefineTargetProfile:
         # Original is uniform 0.25 each. Since Neuron correlates with fidelity,
         # Neuron should be higher in refined target
         assert refined["Neuron"] > original["Neuron"]
+
+
+class TestAdditiveInteractionKernel:
+    """Tests for additive + interaction kernel (NAIAD 2025, Idea #8)."""
+
+    def test_build_kernel_structure(self):
+        """Kernel should have additive + interaction sub-kernels."""
+        from gpytorch.kernels import AdditiveKernel, ScaleKernel, MaternKernel
+
+        kernel = step04._build_additive_interaction_kernel(d=5)
+        # Should be an AdditiveKernel with 2 sub-kernels
+        assert hasattr(kernel, 'kernels')
+        assert len(kernel.kernels) == 2
+        # First is ScaleKernel(AdditiveKernel(...)) — the additive part
+        additive_part = kernel.kernels[0]
+        assert isinstance(additive_part, ScaleKernel)
+        assert isinstance(additive_part.base_kernel, AdditiveKernel)
+        # AdditiveKernel should have d=5 sub-kernels
+        assert len(additive_part.base_kernel.kernels) == 5
+        # Second is ScaleKernel(MaternKernel(ard)) — the interaction part
+        interaction_part = kernel.kernels[1]
+        assert isinstance(interaction_part, ScaleKernel)
+        assert isinstance(interaction_part.base_kernel, MaternKernel)
+
+    def test_interaction_scale_initialized_small(self):
+        """Interaction outputscale should start small (prior toward additivity)."""
+        kernel = step04._build_additive_interaction_kernel(d=4)
+        interaction_part = kernel.kernels[1]
+        assert interaction_part.outputscale.item() == pytest.approx(0.1, abs=1e-6)
+
+    def test_additive_kernels_have_correct_active_dims(self):
+        """Each additive sub-kernel should operate on exactly one dimension."""
+        from gpytorch.kernels import AdditiveKernel
+
+        kernel = step04._build_additive_interaction_kernel(d=3)
+        additive_part = kernel.kernels[0].base_kernel
+        assert isinstance(additive_part, AdditiveKernel)
+        for i, sub_k in enumerate(additive_part.kernels):
+            # ScaleKernel wraps MaternKernel; active_dims is on the Matern
+            matern = sub_k.base_kernel
+            assert tuple(matern.active_dims) == (i,)
+
+    def test_fit_gp_with_additive_interaction_kernel(self, tmp_path, monkeypatch):
+        """GP should fit and produce predictions with additive+interaction kernel."""
+        import torch
+
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+
+        np.random.seed(42)
+        n, d = 20, 4
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=[f"m{i}" for i in range(d)],
+        )
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=n),
+            columns=["ct_A", "ct_B", "ct_C"],
+        )
+
+        model, train_X, train_Y, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, round_num=1,
+            kernel_type="additive_interaction",
+        )
+
+        # Model should produce predictions
+        model.eval()
+        with torch.no_grad():
+            test_X = torch.tensor(
+                np.random.rand(5, d), dtype=torch.float64
+            )
+            posterior = model.posterior(test_X)
+            mean = posterior.mean
+            assert mean.shape == (5, 2)  # ILR: 3 cell types -> 2 dims
+
+    def test_extract_lengthscales_from_additive_interaction(self, tmp_path, monkeypatch):
+        """_extract_lengthscales should return interaction kernel lengthscales."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+
+        np.random.seed(42)
+        n, d = 20, 4
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=[f"m{i}" for i in range(d)],
+        )
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=n),
+            columns=["ct_A", "ct_B", "ct_C"],
+        )
+
+        model, train_X, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, round_num=1,
+            kernel_type="additive_interaction",
+        )
+
+        ls = step04._extract_lengthscales(model, d)
+        assert ls is not None
+        assert ls.shape == (d,)
+        assert np.all(ls > 0)
