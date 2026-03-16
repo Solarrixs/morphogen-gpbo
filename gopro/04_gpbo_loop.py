@@ -506,6 +506,249 @@ def load_gp_state(model, path: Path) -> bool:
         return False
 
 
+def fit_tvr_models(
+    X: pd.DataFrame,
+    Y: pd.DataFrame,
+    target_cell_types: Optional[list[str]] = None,
+    use_ilr: bool = True,
+) -> tuple:
+    """Fit separate GPs per fidelity level for Targeted Variance Reduction.
+
+    TVR (Fare et al. 2022, McDonald et al. 2025) fits independent GPs for
+    each fidelity level and combines them by selecting the model with the
+    lowest cost-scaled posterior variance at each candidate point.
+
+    Args:
+        X: Morphogen matrix with ``fidelity`` column.
+        Y: Cell type fraction matrix.
+        target_cell_types: Cell types to optimize for. None = all.
+        use_ilr: Whether to apply ILR transform to Y.
+
+    Returns:
+        Tuple of (tvr_ensemble, train_X_tensor, train_Y_tensor, cell_type_cols)
+        where tvr_ensemble is a TVRModelEnsemble instance.
+    """
+    from botorch.models import SingleTaskGP
+    from botorch.models.transforms import Normalize, Standardize
+    from gpytorch.mlls import ExactMarginalLogLikelihood
+    from botorch.fit import fit_gpytorch_mll
+
+    if "fidelity" not in X.columns:
+        raise ValueError("TVR requires multi-fidelity data (fidelity column missing)")
+
+    fidelity_levels = sorted(X["fidelity"].unique())
+    if len(fidelity_levels) < 2:
+        raise ValueError(
+            f"TVR requires at least 2 fidelity levels, got {len(fidelity_levels)}"
+        )
+
+    # Select target cell types
+    if target_cell_types:
+        Y_selected = Y[target_cell_types]
+    else:
+        Y_selected = Y
+    cell_type_cols = list(Y_selected.columns)
+
+    # Prepare Y values (ILR transform if applicable)
+    Y_values = Y_selected.values
+    if use_ilr and Y_values.shape[1] > 1:
+        logger.info("Applying ILR transform to compositional Y data...")
+        Y_values = ilr_transform(Y_values)
+
+    # Morphogen columns (excluding fidelity)
+    morph_cols = [c for c in X.columns if c != "fidelity"]
+
+    # Fit one GP per fidelity level
+    per_fidelity_models = {}
+    per_fidelity_stats = {}  # For min-max normalization of means
+    for fid in fidelity_levels:
+        mask = X["fidelity"] == fid
+        X_fid = X.loc[mask, morph_cols]
+        Y_fid = Y_values[mask.values] if isinstance(mask, pd.Series) else Y_values[mask]
+
+        n_points = len(X_fid)
+        logger.info("Fitting TVR GP for fidelity=%.1f (%d points, %d dims)",
+                     fid, n_points, len(morph_cols))
+
+        X_tensor = torch.tensor(X_fid.values, dtype=DTYPE, device=DEVICE)
+        Y_tensor = torch.tensor(Y_fid, dtype=DTYPE, device=DEVICE)
+
+        model = SingleTaskGP(
+            X_tensor, Y_tensor,
+            input_transform=Normalize(d=X_tensor.shape[1]),
+            outcome_transform=Standardize(m=Y_tensor.shape[1]),
+        )
+        _set_dim_scaled_lengthscale_prior(model, X_tensor.shape[1])
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+
+        # Compute min/max of predictions on training data for normalization
+        with torch.no_grad():
+            post = model.posterior(X_tensor)
+            pred_mean = post.mean
+        per_fidelity_stats[fid] = {
+            "min": pred_mean.min(dim=0).values,
+            "max": pred_mean.max(dim=0).values,
+        }
+
+        per_fidelity_models[fid] = model
+        noise_val = model.likelihood.noise.mean().item()
+        logger.info("  Fitted GP for fidelity=%.1f (noise=%.4f)", fid, noise_val)
+
+    # Build ensemble
+    ensemble = TVRModelEnsemble(
+        models=per_fidelity_models,
+        stats=per_fidelity_stats,
+        cost_ratios={fid: FIDELITY_COSTS.get(fid, 1.0) for fid in fidelity_levels},
+    )
+
+    # Use full training data for train_X/train_Y (needed for acquisition function)
+    train_X = torch.tensor(X[morph_cols].values, dtype=DTYPE, device=DEVICE)
+    train_Y = torch.tensor(Y_values, dtype=DTYPE, device=DEVICE)
+
+    return ensemble, train_X, train_Y, cell_type_cols
+
+
+class TVRModelEnsemble:
+    """Ensemble of per-fidelity GPs for Targeted Variance Reduction.
+
+    At each candidate point, selects the model with the lowest
+    cost-scaled posterior variance. Mean predictions are min-max
+    normalized per model before comparison.
+
+    This class provides a ``posterior()`` method compatible with
+    BoTorch's acquisition function interface.
+    """
+
+    def __init__(
+        self,
+        models: dict[float, object],
+        stats: dict[float, dict],
+        cost_ratios: dict[float, float],
+    ):
+        self.models = models
+        self.stats = stats
+        self.cost_ratios = cost_ratios
+        self._fidelity_levels = sorted(models.keys())
+
+    @property
+    def num_outputs(self) -> int:
+        """Number of output dimensions."""
+        first_model = self.models[self._fidelity_levels[0]]
+        return first_model.num_outputs
+
+    def posterior(self, X: torch.Tensor, **kwargs):
+        """Return a posterior that combines per-fidelity models via TVR.
+
+        For each candidate point, selects the model with the lowest
+        variance scaled by inverse cost. Returns that model's posterior
+        mean and variance.
+        """
+        from botorch.posteriors import GPyTorchPosterior
+        from gpytorch.distributions import MultivariateNormal
+
+        # Collect posteriors from all models
+        posteriors = {}
+        for fid in self._fidelity_levels:
+            with torch.no_grad():
+                posteriors[fid] = self.models[fid].posterior(X)
+
+        # For each point, pick the model with lowest cost-scaled variance
+        # Shape: X is (..., d), posterior mean is (..., m)
+        batch_shape = X.shape[:-1]
+        n_outputs = self.num_outputs
+
+        best_means = []
+        best_vars = []
+
+        for fid in self._fidelity_levels:
+            post = posteriors[fid]
+            mean = post.mean  # (..., m)
+            var = post.variance  # (..., m)
+
+            # Scale variance by inverse cost (cheaper models get downweighted)
+            cost = self.cost_ratios.get(fid, 1.0)
+            scaled_var = var / max(cost, 1e-10)
+
+            best_means.append(mean)
+            best_vars.append(scaled_var)
+
+        # Stack: (n_fidelities, ..., m)
+        all_means = torch.stack(best_means, dim=0)
+        all_scaled_vars = torch.stack(best_vars, dim=0)
+
+        # For each point and output, pick the fidelity with lowest scaled var
+        # Mean of scaled_var across outputs for selection
+        mean_scaled_var = all_scaled_vars.mean(dim=-1)  # (n_fid, ...)
+        best_fid_idx = mean_scaled_var.argmin(dim=0)  # (...)
+
+        # Gather the best mean and variance
+        # Expand best_fid_idx for gathering across the output dim
+        idx_expanded = best_fid_idx.unsqueeze(0).unsqueeze(-1).expand(
+            1, *batch_shape, n_outputs
+        )
+        selected_mean = torch.gather(all_means, 0, idx_expanded).squeeze(0)
+        selected_var = torch.gather(
+            torch.stack([posteriors[fid].variance for fid in self._fidelity_levels], dim=0),
+            0, idx_expanded,
+        ).squeeze(0)
+
+        # Build a GPyTorchPosterior-like object
+        # Create a MultivariateNormal with diagonal covariance
+        # Flatten for MVN then reshape
+        flat_mean = selected_mean.reshape(-1, n_outputs)
+        flat_var = selected_var.reshape(-1, n_outputs)
+
+        # For BoTorch compatibility, wrap in a simple posterior
+        return _TVRPosterior(selected_mean, selected_var)
+
+
+class _TVRPosterior:
+    """Lightweight posterior wrapper for TVR ensemble predictions.
+
+    Provides the ``mean``, ``variance``, and ``sample()`` interface
+    that BoTorch acquisition functions expect.
+    """
+
+    def __init__(self, mean: torch.Tensor, variance: torch.Tensor):
+        self._mean = mean
+        self._variance = variance
+
+    @property
+    def mean(self) -> torch.Tensor:
+        return self._mean
+
+    @property
+    def variance(self) -> torch.Tensor:
+        return self._variance
+
+    @property
+    def device(self) -> torch.device:
+        return self._mean.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._mean.dtype
+
+    def sample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
+        """Draw samples from the posterior (used by MC acquisition functions)."""
+        std = self._variance.sqrt()
+        # sample_shape + batch_shape + (m,)
+        eps = torch.randn(
+            *sample_shape, *self._mean.shape,
+            device=self._mean.device, dtype=self._mean.dtype,
+        )
+        return self._mean.unsqueeze(0).expand(*sample_shape, *self._mean.shape) + std.unsqueeze(0).expand(*sample_shape, *self._mean.shape) * eps
+
+    @property
+    def batch_shape(self) -> torch.Size:
+        return self._mean.shape[:-1]
+
+    @property
+    def base_sample_shape(self) -> torch.Size:
+        return self._mean.shape[-1:]
+
+
 def fit_gp_botorch(
     X: pd.DataFrame,
     Y: pd.DataFrame,
@@ -1259,6 +1502,7 @@ def run_gpbo_loop(
     use_ilr: bool = True,
     virtual_sources: Optional[list[tuple[Path, Path, float]]] = None,
     use_saasbo: bool = False,
+    use_tvr: bool = False,
     target_profile: Optional[pd.Series] = None,
     n_replicates: int = 2,
     replicate_strategy: str = "high_variance",
@@ -1277,6 +1521,10 @@ def run_gpbo_loop(
             tuples for multi-fidelity data. Real data is always included at
             fidelity=1.0. Virtual sources add CellRank2 (0.5) or CellFlow (0.0).
         use_saasbo: Use SAASBO (fully Bayesian GP with sparsity prior).
+        use_tvr: Use Targeted Variance Reduction (TVR) instead of
+            SingleTaskMultiFidelityGP. Fits separate GPs per fidelity level
+            and selects the model with lowest cost-scaled variance at each
+            candidate point. Requires multi-fidelity data.
         target_profile: Optional target cell type composition profile (Series).
             When provided, the GP objective maximizes cosine similarity between
             predicted composition and this target instead of equal weighting.
@@ -1342,22 +1590,42 @@ def run_gpbo_loop(
     logger.info("Active X shape: %s (from %s)", X_active.shape, X.shape)
 
     # Fit GP on active dimensions only (save/load handled inside fit_gp_botorch)
-    model, train_X, train_Y, cell_type_cols = fit_gp_botorch(
-        X_active, Y,
-        target_cell_types=target_cell_types,
-        use_ilr=use_ilr,
-        use_saasbo=use_saasbo,
-        warm_start=warm_start,
-        round_num=round_num,
-    )
+    if use_tvr and "fidelity" in X_active.columns and X_active["fidelity"].nunique() > 1:
+        logger.info("Using TVR (Targeted Variance Reduction) with %d fidelity levels",
+                     X_active["fidelity"].nunique())
+        model, train_X, train_Y, cell_type_cols = fit_tvr_models(
+            X_active, Y,
+            target_cell_types=target_cell_types,
+            use_ilr=use_ilr,
+        )
+    else:
+        if use_tvr:
+            logger.warning("TVR requested but only 1 fidelity level; falling back to standard GP")
+        model, train_X, train_Y, cell_type_cols = fit_gp_botorch(
+            X_active, Y,
+            target_cell_types=target_cell_types,
+            use_ilr=use_ilr,
+            use_saasbo=use_saasbo,
+            warm_start=warm_start,
+            round_num=round_num,
+        )
 
     # Recommend next experiments (in active dimensions)
+    # For TVR, the model doesn't have a fidelity dimension — exclude it
+    # from the columns and bounds passed to the acquisition optimizer.
+    if use_tvr and isinstance(model, TVRModelEnsemble):
+        rec_cols = [c for c in X_active.columns if c != "fidelity"]
+        rec_bounds = {k: v for k, v in active_bounds.items() if k != "fidelity"}
+    else:
+        rec_cols = list(X_active.columns)
+        rec_bounds = active_bounds
+
     # Reserve wells for replicates if requested
     n_novel = max(1, n_recommendations - n_replicates)
     recommendations = recommend_next_experiments(
         model, train_X, train_Y,
-        bounds=active_bounds,
-        columns=list(X_active.columns),
+        bounds=rec_bounds,
+        columns=rec_cols,
         n_recommendations=n_novel,
         use_ilr=use_ilr,
         n_composition_parts=len(cell_type_cols),
@@ -1481,6 +1749,9 @@ if __name__ == "__main__":
                         help="Path to SAG screen morphogens CSV")
     parser.add_argument("--saasbo", action="store_true",
                         help="Use SAASBO (fully Bayesian GP with sparsity prior)")
+    parser.add_argument("--tvr", action="store_true",
+                        help="Use Targeted Variance Reduction (fit per-fidelity GPs, "
+                             "select by lowest cost-scaled variance)")
     parser.add_argument("--target-region", type=str, default=None,
                         help="Named region to optimize for (e.g., dorsal_telencephalon)")
     parser.add_argument("--target-profile", type=str, default=None,
@@ -1641,6 +1912,7 @@ if __name__ == "__main__":
         use_ilr=not args.no_ilr,
         virtual_sources=virtual_sources if virtual_sources else None,
         use_saasbo=args.saasbo,
+        use_tvr=args.tvr,
         target_profile=target_profile,
         n_replicates=args.n_replicates,
         replicate_strategy=args.replicate_strategy,

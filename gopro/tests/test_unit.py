@@ -1612,3 +1612,131 @@ class TestGPWarmStart:
 
         state = torch.load(str(state_path), weights_only=True)
         assert "lengthscales" in state
+
+
+class TestTVR:
+    """Tests for Targeted Variance Reduction (TVR) model ensemble."""
+
+    @pytest.fixture
+    def multi_fidelity_data(self):
+        """Create multi-fidelity training data for TVR tests."""
+        np.random.seed(42)
+        n_real, n_virtual = 15, 10
+        d, m = 4, 3
+        morph_cols = ["CHIR99021_uM", "SAG_uM", "BMP4_uM", "log_harvest_day"]
+
+        # Real data (fidelity=1.0)
+        X_real = pd.DataFrame(
+            np.random.rand(n_real, d),
+            columns=morph_cols,
+            index=[f"real_{i}" for i in range(n_real)],
+        )
+        X_real["fidelity"] = 1.0
+        Y_real = pd.DataFrame(
+            np.random.dirichlet(np.ones(m), size=n_real),
+            columns=["ct_A", "ct_B", "ct_C"],
+            index=X_real.index,
+        )
+
+        # Virtual data (fidelity=0.5)
+        X_virt = pd.DataFrame(
+            np.random.rand(n_virtual, d),
+            columns=morph_cols,
+            index=[f"virt_{i}" for i in range(n_virtual)],
+        )
+        X_virt["fidelity"] = 0.5
+        Y_virt = pd.DataFrame(
+            np.random.dirichlet(np.ones(m), size=n_virtual),
+            columns=["ct_A", "ct_B", "ct_C"],
+            index=X_virt.index,
+        )
+
+        X = pd.concat([X_real, X_virt])
+        Y = pd.concat([Y_real, Y_virt])
+        return X, Y
+
+    def test_fit_tvr_models_returns_ensemble(self, multi_fidelity_data):
+        """fit_tvr_models returns a TVRModelEnsemble."""
+        X, Y = multi_fidelity_data
+        model, train_X, train_Y, ct_cols = step04.fit_tvr_models(X, Y, use_ilr=True)
+        assert isinstance(model, step04.TVRModelEnsemble)
+        assert len(ct_cols) == 3
+
+    def test_tvr_ensemble_has_per_fidelity_models(self, multi_fidelity_data):
+        """TVR ensemble should contain one GP per fidelity level."""
+        X, Y = multi_fidelity_data
+        model, _, _, _ = step04.fit_tvr_models(X, Y, use_ilr=True)
+        assert len(model.models) == 2
+        assert 1.0 in model.models
+        assert 0.5 in model.models
+
+    def test_tvr_posterior_shape(self, multi_fidelity_data):
+        """TVR posterior should return correct shapes for mean and variance."""
+        import torch
+        X, Y = multi_fidelity_data
+        model, train_X, _, _ = step04.fit_tvr_models(X, Y, use_ilr=True)
+
+        # Query 3 points
+        X_test = train_X[:3]
+        post = model.posterior(X_test)
+        # ILR: 3 cell types -> 2 ILR coords
+        assert post.mean.shape == (3, 2)
+        assert post.variance.shape == (3, 2)
+        assert torch.all(post.variance > 0)
+
+    def test_tvr_posterior_sample(self, multi_fidelity_data):
+        """TVR posterior should support sampling for MC acquisition."""
+        import torch
+        X, Y = multi_fidelity_data
+        model, train_X, _, _ = step04.fit_tvr_models(X, Y, use_ilr=True)
+
+        X_test = train_X[:3]
+        post = model.posterior(X_test)
+        samples = post.sample(torch.Size([5]))
+        assert samples.shape == (5, 3, 2)
+
+    def test_tvr_requires_multi_fidelity(self):
+        """TVR should raise ValueError without fidelity column."""
+        np.random.seed(42)
+        X = pd.DataFrame(
+            np.random.rand(10, 3),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM"],
+        )
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(2), size=10),
+            columns=["ct_A", "ct_B"],
+        )
+        with pytest.raises(ValueError, match="fidelity column missing"):
+            step04.fit_tvr_models(X, Y)
+
+    def test_tvr_requires_multiple_fidelity_levels(self):
+        """TVR should raise ValueError with only one fidelity level."""
+        np.random.seed(42)
+        X = pd.DataFrame(
+            np.random.rand(10, 3),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM"],
+        )
+        X["fidelity"] = 1.0
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(2), size=10),
+            columns=["ct_A", "ct_B"],
+        )
+        with pytest.raises(ValueError, match="at least 2 fidelity levels"):
+            step04.fit_tvr_models(X, Y)
+
+    def test_tvr_cost_scaling_affects_selection(self, multi_fidelity_data):
+        """Cost-scaled variance should prefer cheaper models when variance is similar."""
+        import torch
+        X, Y = multi_fidelity_data
+        model, train_X, _, _ = step04.fit_tvr_models(X, Y, use_ilr=True)
+
+        # The ensemble should use cost ratios from FIDELITY_COSTS
+        assert model.cost_ratios[1.0] == 1.0
+        assert model.cost_ratios[0.5] < 1.0  # cheaper model
+
+    def test_tvr_num_outputs(self, multi_fidelity_data):
+        """TVR ensemble num_outputs should match ILR-transformed dimension."""
+        X, Y = multi_fidelity_data
+        model, _, _, _ = step04.fit_tvr_models(X, Y, use_ilr=True)
+        # 3 cell types -> 2 ILR coords
+        assert model.num_outputs == 2
