@@ -1472,6 +1472,103 @@ def _estimate_noise_from_replicates(
     )
     return noise
 
+
+def refine_target_profile(
+    fractions: pd.DataFrame,
+    fidelity_scores: pd.Series,
+    original_target: pd.Series,
+    learning_rate: float = 0.3,
+) -> pd.Series:
+    """Refine a target composition profile using observed data (DeMeo 2025).
+
+    After Round 1, update the target profile by interpolating between the
+    original reference (e.g., Braun fetal brain) and a "learned" profile
+    derived from correlating per-cell-type fractions with composite fidelity
+    scores.  Cell types whose abundance positively correlates with fidelity
+    are upweighted; noise cell types are downweighted.
+
+    The refined target is:
+        refined = (1 - lr) * original + lr * learned
+
+    Args:
+        fractions: Cell type fractions DataFrame (conditions × cell types).
+        fidelity_scores: Composite fidelity score per condition (Series
+            indexed by condition name, values in [0, 1]).
+        original_target: Original target composition profile (Series indexed
+            by cell type name).
+        learning_rate: Interpolation weight toward learned profile. 0 = keep
+            original, 1 = fully learned. Default 0.3 (conservative).
+
+    Returns:
+        Refined target profile (Series, sums to 1, non-negative).
+
+    Raises:
+        ValueError: If no overlapping conditions between fractions and scores,
+            or if learning_rate is outside [0, 1].
+    """
+    if not 0.0 <= learning_rate <= 1.0:
+        raise ValueError(f"learning_rate must be in [0, 1], got {learning_rate}")
+
+    # Align conditions between fractions and fidelity scores
+    common = fractions.index.intersection(fidelity_scores.index)
+    if len(common) < 3:
+        logger.warning(
+            "Too few overlapping conditions (%d) for target refinement; "
+            "returning original target unchanged",
+            len(common),
+        )
+        return original_target.copy()
+
+    Y = fractions.loc[common].copy()
+    scores = fidelity_scores.loc[common]
+
+    # Compute Pearson correlation between each cell type fraction and fidelity
+    correlations = Y.corrwith(scores)
+
+    # Replace NaN correlations (constant columns) with 0
+    correlations = correlations.fillna(0.0)
+
+    # Build learned profile: softmax of correlations to get non-negative weights
+    # that sum to 1.  Using softmax rather than raw correlations ensures the
+    # profile is a valid composition even when some correlations are negative.
+    corr_shifted = correlations - correlations.max()  # numerical stability
+    exp_corr = np.exp(corr_shifted)
+    learned_profile = exp_corr / exp_corr.sum()
+
+    # Align learned profile with original target (union of cell types)
+    all_types = original_target.index.union(learned_profile.index)
+    orig_aligned = original_target.reindex(all_types, fill_value=0.0)
+    learned_aligned = learned_profile.reindex(all_types, fill_value=0.0)
+
+    # Re-normalize after alignment (in case original didn't sum to 1)
+    orig_sum = orig_aligned.sum()
+    if orig_sum > 0:
+        orig_aligned = orig_aligned / orig_sum
+    learned_sum = learned_aligned.sum()
+    if learned_sum > 0:
+        learned_aligned = learned_aligned / learned_sum
+
+    # Interpolate
+    refined = (1 - learning_rate) * orig_aligned + learning_rate * learned_aligned
+
+    # Ensure valid composition (non-negative, sums to 1)
+    refined = refined.clip(lower=0.0)
+    total = refined.sum()
+    if total > 0:
+        refined = refined / total
+
+    logger.info(
+        "Target profile refined: lr=%.2f, %d conditions, "
+        "top learned cell types: %s",
+        learning_rate,
+        len(common),
+        ", ".join(f"{ct}={v:.3f}" for ct, v in
+                  learned_profile.nlargest(3).items()),
+    )
+
+    return refined
+
+
 def run_gpbo_loop(
     fractions_csv: Path,
     morphogen_csv: Path,
@@ -1486,6 +1583,8 @@ def run_gpbo_loop(
     n_replicates: int = 2,
     replicate_strategy: str = "high_variance",
     warm_start: bool = False,
+    refine_target: bool = False,
+    refine_lr: float = 0.3,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -1513,6 +1612,11 @@ def run_gpbo_loop(
             "high_variance", "high_value", or "random". (default: "high_variance")
         warm_start: If True, warm-start GP from previous round's saved
             hyperparameters. State files are stored in GP_STATE_DIR.
+        refine_target: If True and target_profile is provided, refine the
+            target using observed data (DeMeo 2025 interpolation). The
+            refined target is used for acquisition instead of the original.
+        refine_lr: Learning rate for target refinement interpolation.
+            0 = keep original, 1 = fully learned. (default: 0.3)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -1558,6 +1662,26 @@ def run_gpbo_loop(
             X, Y = X_real, Y_real
     else:
         X, Y = X_real, Y_real
+
+    # Refine target profile using observed data (DeMeo 2025)
+    if refine_target and target_profile is not None:
+        # Use real data fractions and compute simple fidelity as mean fraction
+        # (proxy for composite fidelity when full fidelity report is unavailable)
+        fidelity_proxy = Y_real.sum(axis=1)  # row sums ~1.0 for all
+        # Better proxy: cosine similarity to target for each condition
+        target_aligned = target_profile.reindex(Y_real.columns, fill_value=0.0)
+        target_arr = target_aligned.values
+        target_norm = np.linalg.norm(target_arr)
+        if target_norm > 0:
+            fidelity_proxy = Y_real.apply(
+                lambda row: np.dot(row.values, target_arr) / (
+                    np.linalg.norm(row.values) * target_norm + 1e-12
+                ),
+                axis=1,
+            )
+        target_profile = refine_target_profile(
+            Y_real, fidelity_proxy, target_profile, learning_rate=refine_lr,
+        )
 
     # Compute active bounds: use real data for morphogen ranges, but merged X
     # when virtual sources exist so log_harvest_day variance is detected.
@@ -1746,6 +1870,10 @@ if __name__ == "__main__":
                         help="Validate cross-fidelity correlation and print recommendation, then exit")
     parser.add_argument("--warm-start", action="store_true",
                         help="Warm-start GP from previous round's hyperparameters")
+    parser.add_argument("--refine-target", action="store_true",
+                        help="Refine target profile using observed data (DeMeo 2025 interpolation)")
+    parser.add_argument("--refine-lr", type=float, default=0.3,
+                        help="Learning rate for target refinement (0=keep original, 1=fully learned, default: 0.3)")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -1896,6 +2024,8 @@ if __name__ == "__main__":
         n_replicates=args.n_replicates,
         replicate_strategy=args.replicate_strategy,
         warm_start=args.warm_start,
+        refine_target=args.refine_target,
+        refine_lr=args.refine_lr,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

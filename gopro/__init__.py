@@ -60,6 +60,7 @@ _LAZY_IMPORTS: dict[str, str] = {
     "ilr_transform": "04_gpbo_loop.py",
     "ilr_inverse": "04_gpbo_loop.py",
     "merge_multi_fidelity_data": "04_gpbo_loop.py",
+    "refine_target_profile": "04_gpbo_loop.py",
     # 03_fidelity_scoring.py
     "score_all_conditions": "03_fidelity_scoring.py",
     "compute_composite_fidelity": "03_fidelity_scoring.py",

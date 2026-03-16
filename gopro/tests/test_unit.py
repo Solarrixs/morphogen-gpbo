@@ -1740,3 +1740,103 @@ class TestTVR:
         model, _, _, _ = step04.fit_tvr_models(X, Y, use_ilr=True)
         # 3 cell types -> 2 ILR coords
         assert model.num_outputs == 2
+
+
+class TestRefineTargetProfile:
+    """Tests for target profile refinement (DeMeo 2025 interpolation)."""
+
+    @pytest.fixture
+    def sample_data(self):
+        """Create sample fractions and fidelity scores for refinement tests."""
+        np.random.seed(42)
+        cell_types = ["Neuron", "Astrocyte", "OPC", "Microglia"]
+        n_conditions = 20
+
+        # Create fractions where Neuron correlates positively with fidelity
+        fractions = pd.DataFrame(
+            np.random.dirichlet([3, 2, 2, 1], size=n_conditions),
+            columns=cell_types,
+            index=[f"cond_{i}" for i in range(n_conditions)],
+        )
+        # Make Neuron fraction correlate with fidelity
+        fidelity = pd.Series(
+            fractions["Neuron"] * 0.8 + np.random.normal(0, 0.05, n_conditions),
+            index=fractions.index,
+        ).clip(0, 1)
+
+        original_target = pd.Series(
+            [0.25, 0.25, 0.25, 0.25], index=cell_types
+        )
+        return fractions, fidelity, original_target
+
+    def test_refined_differs_from_original(self, sample_data):
+        """Refined target should differ from original when data is informative."""
+        fractions, fidelity, original = sample_data
+        refined = step04.refine_target_profile(
+            fractions, fidelity, original, learning_rate=0.5,
+        )
+        # Should not be identical
+        assert not np.allclose(refined.values, original.values, atol=1e-6)
+
+    def test_refined_is_valid_composition(self, sample_data):
+        """Refined target must be a valid composition (non-negative, sums to 1)."""
+        fractions, fidelity, original = sample_data
+        refined = step04.refine_target_profile(
+            fractions, fidelity, original, learning_rate=0.7,
+        )
+        assert (refined >= 0).all()
+        assert abs(refined.sum() - 1.0) < 1e-10
+
+    def test_lr_zero_returns_original(self, sample_data):
+        """learning_rate=0 should return the original target."""
+        fractions, fidelity, original = sample_data
+        refined = step04.refine_target_profile(
+            fractions, fidelity, original, learning_rate=0.0,
+        )
+        np.testing.assert_allclose(refined.values, original.values, atol=1e-10)
+
+    def test_lr_one_fully_learned(self, sample_data):
+        """learning_rate=1 should return the fully learned target (not original)."""
+        fractions, fidelity, original = sample_data
+        refined = step04.refine_target_profile(
+            fractions, fidelity, original, learning_rate=1.0,
+        )
+        # Should be fully learned — NOT equal to original
+        assert not np.allclose(refined.values, original.values, atol=1e-3)
+        # Should still be a valid composition
+        assert (refined >= 0).all()
+        assert abs(refined.sum() - 1.0) < 1e-10
+
+    def test_too_few_conditions_returns_original(self):
+        """With fewer than 3 overlapping conditions, return original unchanged."""
+        cell_types = ["A", "B", "C"]
+        fractions = pd.DataFrame(
+            [[0.5, 0.3, 0.2], [0.4, 0.4, 0.2]],
+            columns=cell_types,
+            index=["c0", "c1"],
+        )
+        fidelity = pd.Series([0.8, 0.6], index=["c0", "c1"])
+        original = pd.Series([0.33, 0.33, 0.34], index=cell_types)
+
+        refined = step04.refine_target_profile(
+            fractions, fidelity, original, learning_rate=0.5,
+        )
+        np.testing.assert_allclose(refined.values, original.values)
+
+    def test_invalid_lr_raises(self, sample_data):
+        """learning_rate outside [0, 1] should raise ValueError."""
+        fractions, fidelity, original = sample_data
+        with pytest.raises(ValueError, match="learning_rate"):
+            step04.refine_target_profile(fractions, fidelity, original, learning_rate=-0.1)
+        with pytest.raises(ValueError, match="learning_rate"):
+            step04.refine_target_profile(fractions, fidelity, original, learning_rate=1.5)
+
+    def test_neuron_upweighted_when_correlated(self, sample_data):
+        """Neuron should be upweighted in refined target (positively correlated with fidelity)."""
+        fractions, fidelity, original = sample_data
+        refined = step04.refine_target_profile(
+            fractions, fidelity, original, learning_rate=0.5,
+        )
+        # Original is uniform 0.25 each. Since Neuron correlates with fidelity,
+        # Neuron should be higher in refined target
+        assert refined["Neuron"] > original["Neuron"]
