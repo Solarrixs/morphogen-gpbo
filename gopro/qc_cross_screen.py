@@ -2,16 +2,31 @@
 
 Compares cell type fractions between screens for conditions that share
 the same morphogen vector, flagging batch effect concerns.
+
+Uses Aitchison similarity (Euclidean distance in CLR space) which is the
+correct metric for compositional data (Quinn et al., *Bioinformatics* 2018).
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine
 
 from gopro.config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _aitchison_similarity_vec(a: np.ndarray, b: np.ndarray) -> float:
+    """Aitchison similarity between two composition vectors in [0, 1]."""
+    eps = 1e-6
+    a_safe = np.maximum(a.ravel(), eps)
+    b_safe = np.maximum(b.ravel(), eps)
+    a_safe = a_safe / a_safe.sum()
+    b_safe = b_safe / b_safe.sum()
+    clr_a = np.log(a_safe) - np.mean(np.log(a_safe))
+    clr_b = np.log(b_safe) - np.mean(np.log(b_safe))
+    dist = float(np.linalg.norm(clr_a - clr_b))
+    return float(np.exp(-dist / 2.0))
 
 
 def compute_cross_screen_similarity(
@@ -19,7 +34,7 @@ def compute_cross_screen_similarity(
     fracs_b: pd.DataFrame,
     condition_mapping: dict[str, str],
 ) -> dict[str, dict]:
-    """Compute cosine similarity between overlapping conditions across screens.
+    """Compute Aitchison similarity between overlapping conditions across screens.
 
     Args:
         fracs_a: Cell type fractions from screen A (conditions x cell types).
@@ -27,7 +42,7 @@ def compute_cross_screen_similarity(
         condition_mapping: Dict mapping screen_a condition -> screen_b condition.
 
     Returns:
-        Dict mapping screen_a condition -> {cosine_similarity, screen_b_condition}.
+        Dict mapping screen_a condition -> {similarity, screen_b_condition}.
     """
     fracs_a = fracs_a.copy()
     fracs_b = fracs_b.copy()
@@ -46,15 +61,15 @@ def compute_cross_screen_similarity(
             logger.warning("Condition not found: %s or %s", cond_a, cond_b)
             continue
 
-        vec_a = fracs_a.loc[cond_a, all_cols].values.reshape(1, -1)
-        vec_b = fracs_b.loc[cond_b, all_cols].values.reshape(1, -1)
+        vec_a = fracs_a.loc[cond_a, all_cols].values
+        vec_b = fracs_b.loc[cond_b, all_cols].values
 
-        sim = float(sklearn_cosine(vec_a, vec_b)[0, 0])
+        sim = _aitchison_similarity_vec(vec_a, vec_b)
         results[cond_a] = {
-            "cosine_similarity": sim,
+            "similarity": sim,
             "screen_b_condition": cond_b,
         }
-        logger.info("QC: %s vs %s — cosine similarity = %.3f", cond_a, cond_b, sim)
+        logger.info("QC: %s vs %s — Aitchison similarity = %.3f", cond_a, cond_b, sim)
 
     return results
 
@@ -63,7 +78,7 @@ def validate_cross_screen(
     fracs_a: pd.DataFrame,
     fracs_b: pd.DataFrame,
     condition_mapping: dict[str, str],
-    threshold: float = 0.8,
+    threshold: float = 0.5,
 ) -> list[str]:
     """Validate overlapping conditions and return flagged ones.
 
@@ -71,7 +86,8 @@ def validate_cross_screen(
         fracs_a: Cell type fractions from screen A.
         fracs_b: Cell type fractions from screen B.
         condition_mapping: Dict mapping screen_a -> screen_b conditions.
-        threshold: Minimum cosine similarity (below = flagged).
+        threshold: Minimum Aitchison similarity (below = flagged).
+            Default 0.5 (corresponding to Aitchison distance ~1.4).
 
     Returns:
         List of screen_a condition names that failed QC.
@@ -80,11 +96,11 @@ def validate_cross_screen(
 
     flagged = []
     for cond, result in similarities.items():
-        if result["cosine_similarity"] < threshold:
+        if result["similarity"] < threshold:
             logger.warning(
-                "QC FLAG: %s vs %s similarity %.3f < %.3f threshold",
+                "QC FLAG: %s vs %s Aitchison similarity %.3f < %.3f threshold",
                 cond, result["screen_b_condition"],
-                result["cosine_similarity"], threshold,
+                result["similarity"], threshold,
             )
             flagged.append(cond)
 

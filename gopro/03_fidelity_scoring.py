@@ -216,6 +216,11 @@ def compute_condition_region_fractions(
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """Compute cosine similarity between two vectors, handling zero vectors.
 
+    .. deprecated::
+        Use :func:`aitchison_similarity` for comparing compositional data
+        (cell type fractions).  Cosine similarity does not respect the
+        geometry of the simplex.
+
     Args:
         a: First vector.
         b: Second vector.
@@ -228,6 +233,55 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return float(np.dot(a, b) / (norm_a * norm_b))
+
+
+def aitchison_distance(a: np.ndarray, b: np.ndarray) -> float:
+    """Aitchison distance between two compositional vectors.
+
+    The Aitchison distance is the Euclidean distance in CLR (centered
+    log-ratio) space.  Unlike cosine similarity it respects the simplex
+    geometry of compositional data — it is scale-invariant, permutation-
+    invariant, and satisfies sub-compositional dominance (Quinn et al.,
+    *Bioinformatics* 2018).
+
+    Args:
+        a: First composition vector (non-negative, sums to ~1).
+        b: Second composition vector (non-negative, sums to ~1).
+
+    Returns:
+        Aitchison distance (>= 0).  Returns 0 for identical compositions.
+    """
+    # Small pseudo-count to handle zeros (multiplicative-style)
+    eps = 1e-6
+    a_safe = np.maximum(a, eps)
+    b_safe = np.maximum(b, eps)
+    # Closure: ensure each sums to 1
+    a_safe = a_safe / a_safe.sum()
+    b_safe = b_safe / b_safe.sum()
+    # CLR transform
+    clr_a = np.log(a_safe) - np.mean(np.log(a_safe))
+    clr_b = np.log(b_safe) - np.mean(np.log(b_safe))
+    return float(np.linalg.norm(clr_a - clr_b))
+
+
+def aitchison_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Convert Aitchison distance to a similarity score in [0, 1].
+
+    Uses an exponential decay: ``sim = exp(-dist / scale)`` where
+    *scale* is set so that typical between-region distances map to
+    moderate similarity values.
+
+    Args:
+        a: First composition vector.
+        b: Second composition vector.
+
+    Returns:
+        Similarity in [0, 1].  1 = identical, 0 = maximally different.
+    """
+    dist = aitchison_distance(a, b)
+    # Scale factor chosen so that a distance of ~4 (typical for dissimilar
+    # brain regions with ~17 cell types) maps to similarity ~0.14.
+    return float(np.exp(-dist / 2.0))
 
 
 def shannon_entropy(fractions: np.ndarray) -> float:
@@ -275,9 +329,10 @@ def compute_rss(
 ) -> tuple[str, float]:
     """Compute Reference Similarity Spectrum: find best-matching fetal region.
 
-    Computes cosine similarity between the condition's cell type composition
-    and each fetal brain region's composition. Returns the best-matching
-    region and its similarity score.
+    Uses Aitchison similarity (Euclidean distance in CLR space) to compare
+    the condition's cell type composition against each fetal brain region
+    profile.  Aitchison distance is the correct metric for compositional
+    data (Quinn et al., *Bioinformatics* 2018).
 
     Args:
         condition_vec: Cell type fractions for one condition (Series, index=cell types).
@@ -285,7 +340,7 @@ def compute_rss(
             (rows=regions, columns=cell classes).
 
     Returns:
-        Tuple of (best_matching_region, cosine_similarity_score).
+        Tuple of (best_matching_region, similarity_score).
     """
     # Align cell types: use union of both label sets, fill missing with 0
     all_labels = sorted(set(condition_vec.index) | set(reference_profiles.columns))
@@ -296,7 +351,7 @@ def compute_rss(
 
     for region in reference_profiles.index:
         ref_aligned = np.array([reference_profiles.loc[region].get(l, 0.0) for l in all_labels])
-        sim = cosine_similarity(cond_aligned, ref_aligned)
+        sim = aitchison_similarity(cond_aligned, ref_aligned)
         if sim > best_sim:
             best_sim = sim
             best_region = region

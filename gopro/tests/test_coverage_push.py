@@ -1295,14 +1295,14 @@ class TestComputeRSS:
         assert score == pytest.approx(1.0)
 
     def test_no_overlap_returns_low(self):
-        """Non-overlapping types should give low (but not necessarily zero) score."""
+        """Non-overlapping types should give very low score."""
         ref = pd.DataFrame({
             "TypeA": [0.5],
             "TypeB": [0.5],
         }, index=["Region1"])
         cond = pd.Series({"TypeC": 0.5, "TypeD": 0.5})
         region, score = step03.compute_rss(cond, ref)
-        assert score == pytest.approx(0.0)
+        assert score < 0.01  # Near zero for non-overlapping compositions
 
     def test_best_region_selected(self):
         """Should select the region with highest cosine similarity."""
@@ -1313,7 +1313,7 @@ class TestComputeRSS:
         cond = pd.Series({"TypeA": 0.05, "TypeB": 0.95})
         region, score = step03.compute_rss(cond, ref)
         assert region == "RegionB"
-        assert score > 0.9
+        assert score > 0.5  # Aitchison similarity scale (lower than cosine for near-matches)
 
     def test_partial_overlap(self):
         """Partial overlap should give intermediate score."""

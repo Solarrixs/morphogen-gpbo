@@ -27,6 +27,7 @@ Outputs:
 from __future__ import annotations
 
 import math
+import os
 import pickle
 from pathlib import Path
 from typing import Optional
@@ -50,10 +51,10 @@ PROJECTION_TARGETS = [30, 60, 90]
 # Medium fidelity level for CellRank 2 virtual data
 FIDELITY_LEVEL = 0.5
 
-# Moscot OT solver parameters
-MOSCOT_EPSILON = 1e-3  # Entropic regularization
-MOSCOT_TAU_A = 0.94    # Unbalancedness parameter (source)
-MOSCOT_TAU_B = 0.94    # Unbalancedness parameter (target)
+# Moscot OT solver parameters (overridable via env vars)
+MOSCOT_EPSILON = float(os.environ.get("GPBO_MOSCOT_EPSILON", "1e-3"))
+MOSCOT_TAU_A = float(os.environ.get("GPBO_MOSCOT_TAU_A", "0.94"))
+MOSCOT_TAU_B = float(os.environ.get("GPBO_MOSCOT_TAU_B", "0.94"))
 
 # Label harmonization: map atlas-native cell type names to HNOCA level-2 vocabulary
 LABEL_HARMONIZATION: dict[str, str] = {
