@@ -13,3 +13,4 @@
 | final | `1de4b09` | verified | ralph/production-readiness-phase2 | Bug hunter verified |
 | 4 | `51212d5` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 3 quality issues in additive kernel: Literal type, robust ARD detection, dedup guard |
 | final | `35c37c2` | verified | ralph/production-readiness-phase2 | Bug hunter verified |
+| 5 | (pending) | PASS | ralph/production-readiness-phase2 | Adaptive complexity schedule tests — 8 new tests (534 total) |

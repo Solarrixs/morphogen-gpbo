@@ -31,6 +31,7 @@
 | 2026-03-16 | 510 | +7 | Target profile refinement (DeMeo 2025, Idea #4) |
 | 2026-03-16 | 521 | +11 | FBaxis_rank regionalization (Sanchis-Calleja 2025, Idea #12) |
 | 2026-03-16 | 526 | +5 | Additive+interaction kernel (NAIAD 2025, Idea #8) |
+| 2026-03-16 | 534 | +8 | Adaptive complexity schedule (NAIAD 2025, Idea #9) |
 
 ## Iteration Log
 
@@ -94,10 +95,22 @@
 - Quality: /simplify pass fixed 3 issues — magic string replacement, zero-row semantics in build_ap_target_profile, registry sync in __init__.py
 - Notes: A-P positions: Dorsal telencephalon=0.0 to Medulla=1.0. Gaussian-weighted profile builder for targeting specific axis positions. Two modes: region_fractions (weighted average) or dominant_region fallback.
 
-## Iteration 4 — 2026-03-16
-- Task: Phase C Idea #8: Additive + interaction kernel (NAIAD 2025)
+## Iteration 4 — 2026-03-16T10:07:43Z
+- Task: Phase C Idea #8: Additive + interaction kernel (NAIAD 2025) — sum-of-1D + full ARD structure
 - Result: PASS (526 tests, 0 failures)
+- Commits:
+  - 46e86b1 [ralph-4] Task 4: Additive + interaction kernel (NAIAD 2025, Idea #8) — 526 tests
+  - 1511a86 [ralph-simplify] Fix 3 quality issues in additive kernel: Literal type, robust ARD detection, dedup guard
 - Files changed:
-  - gopro/04_gpbo_loop.py | ~80 additions (_build_additive_interaction_kernel, kernel_type param, CLI --kernel flag, _extract_lengthscales additive support)
-  - gopro/tests/test_unit.py | ~100 additions (5 new tests: TestAdditiveInteractionKernel)
-- Notes: Additive kernel = sum of d independent 1D Matern 5/2 (one per morphogen). Interaction kernel = full ARD Matern 5/2. Interaction outputscale initialized to 0.1 (prior toward additivity). Reduces effective params from O(d^2) to O(d). _extract_lengthscales extracts interaction kernel ARD lengthscales for importance ranking.
+  - gopro/04_gpbo_loop.py | 30 ++++++++++++++++++------------
+  - data/gp_recommendations_round1.csv | 8 ++++----
+  - docs/plans/findings.md | 21 +++++++++++++++++++++
+- Quality: /simplify pass fixed 3 issues — Literal type annotation for kernel_type, robust ARD detection using hasattr chain, dedup guard for additive kernel in recommendation output
+- Notes: Additive kernel = sum of d independent 1D Matern 5/2 (one per morphogen). Interaction kernel = full ARD Matern 5/2. Interaction outputscale initialized to 0.1 (prior toward additivity). Reduces effective params from O(d^2) to O(d). _extract_lengthscales extracts interaction kernel ARD lengthscales for importance ranking. Only applies to standard SingleTaskGP path (not multi-fidelity or SAASBO).
+
+## Iteration 5 — 2026-03-16
+- Task: Phase C Idea #9: Adaptive complexity schedule — auto-select kernel based on N/d ratio
+- Result: PASS (534 tests, 0 failures)
+- Files changed:
+  - gopro/tests/test_unit.py | 66 additions (8 new tests: TestAdaptiveComplexitySchedule)
+- Notes: _select_kernel_complexity() and --adaptive-complexity CLI flag already existed from prior iteration. This iteration adds 8 tests covering all 3 regimes (shared/ARD/SAASBO), boundary conditions, custom thresholds, zero-dim safety, and reason string content. No code changes needed — implementation was complete, just missing test coverage.

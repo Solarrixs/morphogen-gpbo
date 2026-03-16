@@ -1938,3 +1938,67 @@ class TestAdditiveInteractionKernel:
         assert ls is not None
         assert ls.shape == (d,)
         assert np.all(ls > 0)
+
+
+class TestAdaptiveComplexitySchedule:
+    """Tests for adaptive kernel complexity selection (NAIAD 2025, Idea #9)."""
+
+    def test_sparse_data_selects_shared(self):
+        """N/d < 8 should select shared lengthscale kernel."""
+        result = step04._select_kernel_complexity(n_conditions=20, d_active=5)
+        # 20/5 = 4.0 < 8 → shared
+        assert result["kernel_type"] == "shared"
+        assert result["use_saasbo"] is False
+        assert result["n_d_ratio"] == pytest.approx(4.0)
+
+    def test_moderate_data_selects_ard(self):
+        """8 ≤ N/d < 15 should select per-dim ARD kernel."""
+        result = step04._select_kernel_complexity(n_conditions=50, d_active=5)
+        # 50/5 = 10.0, in [8, 15) → ARD
+        assert result["kernel_type"] == "ard"
+        assert result["use_saasbo"] is False
+        assert result["n_d_ratio"] == pytest.approx(10.0)
+
+    def test_dense_data_selects_saasbo(self):
+        """N/d ≥ 15 should select SAASBO."""
+        result = step04._select_kernel_complexity(n_conditions=80, d_active=5)
+        # 80/5 = 16.0 ≥ 15 → SAASBO
+        assert result["kernel_type"] == "saasbo"
+        assert result["use_saasbo"] is True
+        assert result["n_d_ratio"] == pytest.approx(16.0)
+
+    def test_boundary_shared_ard(self):
+        """Exactly at shared threshold should select ARD."""
+        result = step04._select_kernel_complexity(n_conditions=40, d_active=5)
+        # 40/5 = 8.0, right at threshold → ARD (not shared)
+        assert result["kernel_type"] == "ard"
+
+    def test_boundary_ard_saasbo(self):
+        """Exactly at ARD threshold should select SAASBO."""
+        result = step04._select_kernel_complexity(n_conditions=75, d_active=5)
+        # 75/5 = 15.0, right at threshold → SAASBO
+        assert result["kernel_type"] == "saasbo"
+        assert result["use_saasbo"] is True
+
+    def test_custom_thresholds(self):
+        """Custom thresholds should override defaults."""
+        custom = {"shared": 3.0, "ard": 5.0}
+        # 20/5 = 4.0, in [3, 5) → ARD with custom thresholds
+        result = step04._select_kernel_complexity(
+            n_conditions=20, d_active=5, thresholds=custom,
+        )
+        assert result["kernel_type"] == "ard"
+
+    def test_zero_active_dims_safe(self):
+        """d_active=0 should not cause division by zero."""
+        result = step04._select_kernel_complexity(n_conditions=10, d_active=0)
+        # d_safe = max(0, 1) = 1; ratio = 10.0, in [8, 15) → ARD
+        assert result["kernel_type"] == "ard"
+        assert result["n_d_ratio"] == pytest.approx(10.0)
+
+    def test_reason_string_contains_values(self):
+        """Reason string should mention N, d, and ratio."""
+        result = step04._select_kernel_complexity(n_conditions=48, d_active=8)
+        assert "N=48" in result["reason"]
+        assert "d=8" in result["reason"]
+        assert "N/d=" in result["reason"]
