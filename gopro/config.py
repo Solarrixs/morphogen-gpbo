@@ -18,6 +18,7 @@ MODEL_DIR = Path(os.environ.get(
     "GPBO_MODEL_DIR",
     str(PROJECT_DIR / "data" / "neural_organoid_atlas" / "supplemental_files" / "scpoli_model_params"),
 ))
+GP_STATE_DIR = Path(os.environ.get("GPBO_GP_STATE_DIR", str(DATA_DIR / "gp_state")))
 
 # --- Morphogen columns (canonical ordering, all concentrations in µM) ---
 MORPHOGEN_COLUMNS: list[str] = [

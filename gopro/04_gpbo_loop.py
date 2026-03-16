@@ -31,6 +31,7 @@ from gopro.config import (
     DATA_DIR,
     FIDELITY_CORRELATION_THRESHOLD,
     FIDELITY_COSTS,
+    GP_STATE_DIR,
     MORPHOGEN_COLUMNS,
     PROTEIN_MW_KDA,
     nM_to_uM,
@@ -378,6 +379,133 @@ def _extract_lengthscales(model, n_input_dims: int):
     return None
 
 
+def save_gp_state(model, path: Path) -> None:
+    """Save GP hyperparameters for warm-starting next round.
+
+    Saves lengthscales, outputscale, noise, and mean constant for standard
+    SingleTaskGP models. For SAASBO (fully Bayesian) models, saves the
+    MAP estimate (median of posterior samples) so it can be used as the
+    initial position for NUTS in the next round.
+
+    Args:
+        model: Fitted BoTorch GP model.
+        path: File path to save the state dict (`.pt` format).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    state: dict = {}
+
+    # ModelListGP (e.g. SAASBO multi-output): save per-sub-model
+    if hasattr(model, "models"):
+        sub_states = []
+        for sub in model.models:
+            sub_states.append(sub.state_dict())
+        state["model_list_states"] = sub_states
+        state["model_type"] = "model_list"
+    else:
+        # Standard SingleTaskGP or SingleTaskMultiFidelityGP
+        # Save selective hyperparameters (not full state_dict) for resilience
+        # to dimension changes across rounds.
+        try:
+            if hasattr(model, "covar_module"):
+                kernel = model.covar_module
+                # Handle both ScaleKernel(base_kernel=...) and bare RBFKernel
+                base = kernel.base_kernel if hasattr(kernel, "base_kernel") else kernel
+                if hasattr(base, "lengthscale") and base.lengthscale is not None:
+                    state["lengthscales"] = base.lengthscale.detach().cpu()
+                if hasattr(kernel, "outputscale"):
+                    state["outputscale"] = kernel.outputscale.detach().cpu()
+            if hasattr(model, "likelihood") and hasattr(model.likelihood, "noise"):
+                state["noise"] = model.likelihood.noise.detach().cpu()
+            if hasattr(model, "mean_module") and hasattr(model.mean_module, "constant"):
+                state["mean_constant"] = model.mean_module.constant.detach().cpu()
+            state["model_type"] = "single_task"
+        except (AttributeError, RuntimeError) as exc:
+            logger.warning("Could not extract GP hyperparameters: %s", exc)
+            return
+
+    torch.save(state, str(path))
+    logger.info("Saved GP state to %s", path)
+
+
+def load_gp_state(model, path: Path) -> bool:
+    """Load saved GP hyperparameters as initialization for fitting.
+
+    Sets initial hyperparameter values but does NOT prevent further
+    optimization (MLL fitting will continue to refine them).
+
+    Handles dimension mismatches gracefully: if the saved lengthscales
+    have a different number of dimensions than the current model, the
+    state is skipped with a warning.
+
+    Args:
+        model: BoTorch GP model (pre-fitting).
+        path: Path to saved state file (`.pt` format).
+
+    Returns:
+        True if warm-start was applied, False otherwise.
+    """
+    path = Path(path)
+    if not path.exists():
+        logger.info("No GP state found at %s, using default initialization", path)
+        return False
+
+    try:
+        state = torch.load(str(path), weights_only=True)
+    except Exception as exc:
+        logger.warning("Failed to load GP state from %s: %s", path, exc)
+        return False
+
+    model_type = state.get("model_type", "single_task")
+
+    # ModelListGP warm-start: apply per-sub-model state
+    if model_type == "model_list" and hasattr(model, "models"):
+        sub_states = state.get("model_list_states", [])
+        if len(sub_states) != len(model.models):
+            logger.warning(
+                "GP warm-start skipped: saved %d sub-models but current model has %d",
+                len(sub_states), len(model.models),
+            )
+            return False
+        try:
+            for sub_model, sub_state in zip(model.models, sub_states):
+                sub_model.load_state_dict(sub_state, strict=False)
+            logger.info("Warm-started ModelListGP from %s", path)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to warm-start ModelListGP: %s", exc)
+            return False
+
+    # Single-task GP warm-start
+    try:
+        if "lengthscales" in state and hasattr(model, "covar_module"):
+            kernel = model.covar_module
+            base = kernel.base_kernel if hasattr(kernel, "base_kernel") else kernel
+            if hasattr(base, "lengthscale") and base.lengthscale is not None:
+                saved_ls = state["lengthscales"]
+                current_ls = base.lengthscale
+                if saved_ls.shape != current_ls.shape:
+                    logger.warning(
+                        "GP warm-start dimension mismatch: saved lengthscales %s "
+                        "vs current %s. Skipping warm-start.",
+                        list(saved_ls.shape), list(current_ls.shape),
+                    )
+                    return False
+                base.lengthscale = saved_ls
+        if "outputscale" in state and hasattr(model, "covar_module") and hasattr(model.covar_module, "outputscale"):
+            model.covar_module.outputscale = state["outputscale"]
+        if "noise" in state and hasattr(model, "likelihood"):
+            model.likelihood.noise = state["noise"]
+        if "mean_constant" in state and hasattr(model, "mean_module") and hasattr(model.mean_module, "constant"):
+            model.mean_module.constant = state["mean_constant"]
+        logger.info("Warm-started GP from %s", path)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to warm-start GP: %s. Using defaults.", exc)
+        return False
+
+
 def fit_gp_botorch(
     X: pd.DataFrame,
     Y: pd.DataFrame,
@@ -387,6 +515,8 @@ def fit_gp_botorch(
     saasbo_warmup: int = 256,
     saasbo_num_samples: int = 128,
     saasbo_thinning: int = 16,
+    warm_start: bool = False,
+    round_num: int = 1,
     warm_start_state: Optional[dict] = None,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
@@ -401,6 +531,12 @@ def fit_gp_botorch(
         saasbo_warmup: NUTS warmup steps for SAASBO.
         saasbo_num_samples: NUTS posterior samples for SAASBO.
         saasbo_thinning: NUTS thinning factor for SAASBO.
+        warm_start: If True, load hyperparameters from previous round's
+            saved state as initialization (further fitting still occurs).
+        round_num: Current optimization round number (used to locate the
+            previous round's state file when ``warm_start=True``).
+        warm_start_state: **Deprecated**. Legacy dict-based warm-start.
+            Use ``warm_start=True`` instead.
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -428,6 +564,9 @@ def fit_gp_botorch(
 
     train_Y = torch.tensor(Y_values, dtype=DTYPE, device=DEVICE)
 
+    # Resolve warm-start state path
+    gp_state_path = GP_STATE_DIR / f"round_{round_num - 1}.pt"
+
     # Fit GP
     logger.info("Fitting BoTorch GP...")
     logger.info("X: %s, Y: %s", train_X.shape, train_Y.shape)
@@ -448,6 +587,9 @@ def fit_gp_botorch(
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
+        # Warm-start multi-fidelity GP if requested
+        if warm_start:
+            load_gp_state(model, gp_state_path)
         # Skip lengthscale prior for multi-fidelity GP — its kernel structure
         # wraps lengthscales in a way incompatible with register_prior closures
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
@@ -501,14 +643,21 @@ def fit_gp_botorch(
         )
         _set_dim_scaled_lengthscale_prior(model, train_X.shape[1])
         # Warm-start: load hyperparameters from previous round
-        if warm_start_state is not None:
+        if warm_start:
+            load_gp_state(model, gp_state_path)
+        elif warm_start_state is not None:
+            # Legacy path: dict-based warm-start (deprecated)
             try:
                 model.load_state_dict(warm_start_state, strict=False)
-                logger.info("Warm-started GP from previous round hyperparameters")
+                logger.info("Warm-started GP from previous round hyperparameters (legacy)")
             except Exception as exc:
                 logger.warning("Could not warm-start GP: %s", exc)
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
         fit_gpytorch_mll(mll)
+
+    # Save GP state for warm-starting future rounds
+    save_path = GP_STATE_DIR / f"round_{round_num}.pt"
+    save_gp_state(model, save_path)
 
     # Report kernel parameters
     logger.info("GP Kernel Parameters:")
@@ -1113,6 +1262,7 @@ def run_gpbo_loop(
     target_profile: Optional[pd.Series] = None,
     n_replicates: int = 2,
     replicate_strategy: str = "high_variance",
+    warm_start: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -1134,6 +1284,8 @@ def run_gpbo_loop(
             Set to 0 to disable replicates. (default: 2)
         replicate_strategy: Strategy for selecting replicates. One of
             "high_variance", "high_value", or "random". (default: "high_variance")
+        warm_start: If True, warm-start GP from previous round's saved
+            hyperparameters. State files are stored in GP_STATE_DIR.
 
     Returns:
         DataFrame of recommended next experiments.
@@ -1189,32 +1341,15 @@ def run_gpbo_loop(
     X_active = X[active_cols]
     logger.info("Active X shape: %s (from %s)", X_active.shape, X.shape)
 
-    # Load warm-start state from previous round if available
-    warm_start_path = DATA_DIR / f"gp_state_round{round_num - 1}.pt"
-    warm_start_state = None
-    if warm_start_path.exists():
-        try:
-            warm_start_state = torch.load(warm_start_path, weights_only=True)
-            logger.info("Found warm-start state from round %d", round_num - 1)
-        except Exception as exc:
-            logger.warning("Could not load warm-start state: %s", exc)
-
-    # Fit GP on active dimensions only
+    # Fit GP on active dimensions only (save/load handled inside fit_gp_botorch)
     model, train_X, train_Y, cell_type_cols = fit_gp_botorch(
         X_active, Y,
         target_cell_types=target_cell_types,
         use_ilr=use_ilr,
         use_saasbo=use_saasbo,
-        warm_start_state=warm_start_state,
+        warm_start=warm_start,
+        round_num=round_num,
     )
-
-    # Save GP state for warm-starting future rounds
-    state_save_path = DATA_DIR / f"gp_state_round{round_num}.pt"
-    try:
-        torch.save(model.state_dict(), state_save_path)
-        logger.info("Saved GP state to %s", state_save_path)
-    except Exception as exc:
-        logger.warning("Could not save GP state: %s", exc)
 
     # Recommend next experiments (in active dimensions)
     # Reserve wells for replicates if requested
@@ -1359,6 +1494,8 @@ if __name__ == "__main__":
                         help="Strategy for selecting replicate conditions (default: high_variance)")
     parser.add_argument("--validate-fidelity", action="store_true",
                         help="Validate cross-fidelity correlation and print recommendation, then exit")
+    parser.add_argument("--warm-start", action="store_true",
+                        help="Warm-start GP from previous round's hyperparameters")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -1507,6 +1644,7 @@ if __name__ == "__main__":
         target_profile=target_profile,
         n_replicates=args.n_replicates,
         replicate_strategy=args.replicate_strategy,
+        warm_start=args.warm_start,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

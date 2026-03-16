@@ -1421,3 +1421,194 @@ class TestEstimateNoiseFromReplicates:
         groups = {"g1": [0, 1]}  # very different -> high var
         noise = step04._estimate_noise_from_replicates(Y, groups)
         assert noise > 0.05
+
+
+class TestGPWarmStart:
+    """Tests for GP state serialization and warm-starting across rounds."""
+
+    @pytest.fixture
+    def simple_gp(self):
+        """Create a fitted SingleTaskGP for testing."""
+        import torch
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+        from gpytorch.mlls import ExactMarginalLogLikelihood
+        from botorch.fit import fit_gpytorch_mll
+
+        torch.manual_seed(42)
+        n, d = 10, 3
+        train_X = torch.rand(n, d, dtype=torch.double)
+        train_Y = torch.rand(n, 2, dtype=torch.double)
+        model = SingleTaskGP(
+            train_X, train_Y,
+            input_transform=Normalize(d=d),
+            outcome_transform=Standardize(m=2),
+        )
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+        return model
+
+    def test_save_gp_state_creates_file(self, simple_gp, tmp_path):
+        """Verify save_gp_state creates a state file on disk."""
+        save_path = tmp_path / "gp_state" / "round_1.pt"
+        step04.save_gp_state(simple_gp, save_path)
+        assert save_path.exists()
+        assert save_path.stat().st_size > 0
+
+    def test_save_gp_state_contains_hyperparams(self, simple_gp, tmp_path):
+        """Verify saved state contains expected hyperparameter keys."""
+        import torch
+        save_path = tmp_path / "round_1.pt"
+        step04.save_gp_state(simple_gp, save_path)
+        state = torch.load(str(save_path), weights_only=True)
+        assert "lengthscales" in state
+        assert "noise" in state
+        assert state["model_type"] == "single_task"
+        # mean_constant should also be saved
+        assert "mean_constant" in state
+
+    def test_load_gp_state_sets_hyperparams(self, simple_gp, tmp_path):
+        """Verify load_gp_state sets hyperparameters on a new model."""
+        import torch
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+
+        # Save the fitted model's state
+        save_path = tmp_path / "round_1.pt"
+        step04.save_gp_state(simple_gp, save_path)
+
+        # Get original values — covar_module may be bare RBFKernel or ScaleKernel
+        kernel = simple_gp.covar_module
+        base = kernel.base_kernel if hasattr(kernel, "base_kernel") else kernel
+        orig_ls = base.lengthscale.detach().clone()
+
+        # Create a fresh (unfitted) model with same dimensions
+        torch.manual_seed(99)
+        n, d = 10, 3
+        train_X = torch.rand(n, d, dtype=torch.double)
+        train_Y = torch.rand(n, 2, dtype=torch.double)
+        new_model = SingleTaskGP(
+            train_X, train_Y,
+            input_transform=Normalize(d=d),
+            outcome_transform=Standardize(m=2),
+        )
+
+        # Load state into new model
+        result = step04.load_gp_state(new_model, save_path)
+        assert result is True
+
+        # Verify hyperparameters match
+        new_kernel = new_model.covar_module
+        new_base = new_kernel.base_kernel if hasattr(new_kernel, "base_kernel") else new_kernel
+        new_ls = new_base.lengthscale.detach()
+        torch.testing.assert_close(new_ls, orig_ls)
+
+    def test_load_gp_state_missing_file_noop(self, tmp_path):
+        """Verify graceful handling when state file does not exist."""
+        import torch
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+
+        n, d = 10, 3
+        train_X = torch.rand(n, d, dtype=torch.double)
+        train_Y = torch.rand(n, 2, dtype=torch.double)
+        model = SingleTaskGP(
+            train_X, train_Y,
+            input_transform=Normalize(d=d),
+            outcome_transform=Standardize(m=2),
+        )
+
+        # Get default values before
+        kernel = model.covar_module
+        base = kernel.base_kernel if hasattr(kernel, "base_kernel") else kernel
+        ls_before = base.lengthscale.detach().clone()
+
+        # Load from nonexistent path — should return False and not crash
+        result = step04.load_gp_state(model, tmp_path / "nonexistent.pt")
+        assert result is False
+
+        # Values should be unchanged
+        ls_after = base.lengthscale.detach()
+        torch.testing.assert_close(ls_after, ls_before)
+
+    def test_warm_start_dimension_mismatch_warning(self, simple_gp, tmp_path):
+        """Different data dims should warn and skip, not crash."""
+        import torch
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+
+        # Save state from 3-dim model
+        save_path = tmp_path / "round_1.pt"
+        step04.save_gp_state(simple_gp, save_path)
+
+        # Create a model with different input dimensions (5 instead of 3)
+        torch.manual_seed(99)
+        n, d_new = 10, 5
+        train_X = torch.rand(n, d_new, dtype=torch.double)
+        train_Y = torch.rand(n, 2, dtype=torch.double)
+        new_model = SingleTaskGP(
+            train_X, train_Y,
+            input_transform=Normalize(d=d_new),
+            outcome_transform=Standardize(m=2),
+        )
+
+        # Load should return False due to dimension mismatch
+        result = step04.load_gp_state(new_model, save_path)
+        assert result is False
+
+    def test_round_trip_state(self, simple_gp, tmp_path):
+        """Save then load should preserve all hyperparameter values."""
+        import torch
+
+        # Extract all hyperparams — covar_module may be bare RBFKernel
+        kernel = simple_gp.covar_module
+        base = kernel.base_kernel if hasattr(kernel, "base_kernel") else kernel
+        orig_ls = base.lengthscale.detach().clone()
+        orig_noise = simple_gp.likelihood.noise.detach().clone()
+        orig_mean = simple_gp.mean_module.constant.detach().clone()
+
+        # Save
+        save_path = tmp_path / "round_1.pt"
+        step04.save_gp_state(simple_gp, save_path)
+
+        # Load state file and verify raw values
+        state = torch.load(str(save_path), weights_only=True)
+        torch.testing.assert_close(state["lengthscales"], orig_ls)
+        torch.testing.assert_close(state["noise"], orig_noise)
+        torch.testing.assert_close(state["mean_constant"], orig_mean)
+
+    def test_save_creates_parent_directories(self, simple_gp, tmp_path):
+        """save_gp_state should create nested parent directories."""
+        save_path = tmp_path / "nested" / "deep" / "round_1.pt"
+        step04.save_gp_state(simple_gp, save_path)
+        assert save_path.exists()
+
+    def test_fit_gp_botorch_saves_state(self, tmp_path, monkeypatch):
+        """fit_gp_botorch should auto-save state after fitting."""
+        import torch
+        from gopro.config import GP_STATE_DIR
+
+        # Redirect GP_STATE_DIR to tmp_path
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+
+        n, d = 15, 4
+        np.random.seed(42)
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=[f"m{i}" for i in range(d)],
+        )
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=n),
+            columns=["ct_A", "ct_B", "ct_C"],
+        )
+
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, round_num=2,
+        )
+
+        # State file should have been created for round 2
+        state_path = tmp_path / "round_2.pt"
+        assert state_path.exists()
+
+        state = torch.load(str(state_path), weights_only=True)
+        assert "lengthscales" in state

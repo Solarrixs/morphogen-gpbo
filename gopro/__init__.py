@@ -55,6 +55,8 @@ _LAZY_IMPORTS: dict[str, str] = {
     "run_gpbo_loop": "04_gpbo_loop.py",
     "build_training_set": "04_gpbo_loop.py",
     "fit_gp_botorch": "04_gpbo_loop.py",
+    "save_gp_state": "04_gpbo_loop.py",
+    "load_gp_state": "04_gpbo_loop.py",
     "ilr_transform": "04_gpbo_loop.py",
     "ilr_inverse": "04_gpbo_loop.py",
     "merge_multi_fidelity_data": "04_gpbo_loop.py",
