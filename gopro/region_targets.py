@@ -577,6 +577,8 @@ def load_target_profile_csv(path: Path) -> pd.Series:
 #   Forebrain (prosencephalon): telencephalon, hypothalamus, thalamus
 #   Midbrain (mesencephalon): dorsal/ventral midbrain
 #   Hindbrain (rhombencephalon): cerebellum, pons, medulla
+AP_AXIS_REGION = "ap_axis"  # sentinel value for --target-region CLI dispatch
+
 BRAIN_REGION_AP_POSITIONS: dict[str, float] = {
     "Dorsal telencephalon": 0.0,
     "Ventral telencephalon": 0.1,
@@ -588,6 +590,13 @@ BRAIN_REGION_AP_POSITIONS: dict[str, float] = {
     "Pons": 0.85,
     "Medulla": 1.0,
 }
+
+# Validate that AP positions cover the same regions as the HNOCA mapping
+assert set(BRAIN_REGION_AP_POSITIONS.keys()) == set(HNOCA_TO_BRAUN_REGION.keys()), (
+    f"BRAIN_REGION_AP_POSITIONS and HNOCA_TO_BRAUN_REGION have mismatched keys: "
+    f"extra in AP={set(BRAIN_REGION_AP_POSITIONS.keys()) - set(HNOCA_TO_BRAUN_REGION.keys())}, "
+    f"missing from AP={set(HNOCA_TO_BRAUN_REGION.keys()) - set(BRAIN_REGION_AP_POSITIONS.keys())}"
+)
 
 
 def compute_fbaxis_rank(
@@ -641,9 +650,20 @@ def compute_fbaxis_rank(
         aligned_pos = ap_positions[shared_regions]
         # Normalize rows so they sum to 1 over the shared regions
         row_sums = aligned_fracs.sum(axis=1)
+        zero_rows = row_sums == 0
+        if zero_rows.any():
+            logger.warning(
+                "%d conditions have zero region fractions across known regions. "
+                "Assigning midpoint A-P score (0.5).",
+                zero_rows.sum(),
+            )
         row_sums = row_sums.replace(0, 1.0)  # avoid division by zero
         normalized = aligned_fracs.div(row_sums, axis=0)
         scores = normalized.dot(aligned_pos)
+        # Zero-row conditions got 0/1=0 for all entries → dot=0.0, which is
+        # indistinguishable from "purely anterior". Assign midpoint instead.
+        if zero_rows.any():
+            scores[zero_rows] = 0.5
         return scores.rename("fbaxis_rank")
 
     # Fallback: use dominant region column

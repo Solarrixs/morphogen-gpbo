@@ -1877,15 +1877,15 @@ if __name__ == "__main__":
 
     # Handle --list-regions
     if args.list_regions:
-        from gopro.region_targets import list_named_profiles
+        from gopro.region_targets import list_named_profiles, AP_AXIS_REGION
         profiles_df = list_named_profiles()
         print("\nAvailable region profiles:")
         print("=" * 80)
         for _, row in profiles_df.iterrows():
             print(f"  {row['name']:<30s} {row['description']}")
-        print(f"\n  {'ap_axis':<30s} Continuous A-P axis targeting (use with --target-fbaxis)")
+        print(f"\n  {AP_AXIS_REGION:<30s} Continuous A-P axis targeting (use with --target-fbaxis)")
         print(f"\nUse: --target-region <name>")
-        print(f"  or: --target-region ap_axis --target-fbaxis 0.7  (for hindbrain)")
+        print(f"  or: --target-region {AP_AXIS_REGION} --target-fbaxis 0.7  (for hindbrain)")
         raise SystemExit(0)
 
     # Handle --validate-fidelity
@@ -1988,7 +1988,8 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     if args.target_region:
-        if args.target_region == "ap_axis":
+        from gopro.region_targets import AP_AXIS_REGION
+        if args.target_region == AP_AXIS_REGION:
             from gopro.region_targets import build_ap_target_profile
             if args.target_fbaxis is None:
                 logger.error("--target-region ap_axis requires --target-fbaxis (0=anterior, 1=posterior)")
