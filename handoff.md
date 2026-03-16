@@ -1,10 +1,11 @@
 # Handoff to Iteration 4
 
-## Last Completed: FBaxis_rank Regionalization (Sanchis-Calleja 2025, Idea #12)
+## Last Completed: FBaxis_rank Regionalization + Simplify (Sanchis-Calleja 2025, Idea #12)
 - `BRAIN_REGION_AP_POSITIONS` mapping 9 HNOCA regions to A-P axis (0=forebrain, 1=hindbrain)
 - `compute_fbaxis_rank()` scores conditions by weighted A-P position
 - `build_ap_target_profile()` creates Gaussian-weighted region profiles for GP-BO targeting
 - `--target-region ap_axis --target-fbaxis 0.7` targets hindbrain protocols
+- Simplify pass fixed 3 issues: magic string, zero-row semantics, registry sync
 - 521 tests passing, 0 failures
 
 ## Next Up: Phase C Idea #8 — Additive + Interaction Kernel
