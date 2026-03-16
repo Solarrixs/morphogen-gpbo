@@ -1,2 +1,2 @@
-round,n_training_points,n_morphogens,n_cell_types,target_cell_types,lengthscale_CHIR99021_uM,lengthscale_BMP4_uM,lengthscale_SAG_uM,lengthscale_log_harvest_day,lengthscale_fidelity,model_type
-1,20,5,5,all,0.5841665106352437,0.3110400676755779,1.340183873936795,0.05998407497279479,0.45791698285674265,map
+round,n_training_points,n_morphogens,n_cell_types,target_cell_types,lengthscale_CHIR99021_uM,lengthscale_BMP4_uM,lengthscale_SAG_uM,lengthscale_log_harvest_day,model_type
+1,20,5,5,all,2.1786664290014577,2.068284756853623,2.3896740314817406,1.5341226680282771,map
