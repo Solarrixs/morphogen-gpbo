@@ -11,3 +11,4 @@
 | 3 | `af2d0ec` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 3 issues in FBaxis_rank: magic string, zero-row semantics, registry sync |
 | 3 | `80643a8` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 3 issues in FBaxis_rank: magic string, zero-row semantics, registry sync |
 | final | `1de4b09` | verified | ralph/production-readiness-phase2 | Bug hunter verified |
+| 4 | `51212d5` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 3 quality issues in additive kernel: Literal type, robust ARD detection, dedup guard |
