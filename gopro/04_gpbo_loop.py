@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import torch
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from gopro.config import (
     DATA_DIR,
@@ -422,14 +422,14 @@ def _extract_lengthscales(model, n_input_dims: int):
         # Standard GP (MAP)
         if hasattr(model, 'covar_module'):
             covar = model.covar_module
-            # Additive+interaction kernel: AdditiveKernel(ScaleKernel(...), ScaleKernel(Matern(ard)))
-            # Extract lengthscales from the interaction (ARD) sub-kernel
-            if hasattr(covar, 'kernels') and len(covar.kernels) == 2:
-                # Second kernel is the interaction ScaleKernel(MaternKernel(ard))
-                interaction = covar.kernels[1]
-                base = getattr(interaction, 'base_kernel', interaction)
-                if hasattr(base, 'lengthscale') and base.lengthscale is not None:
-                    return base.lengthscale.detach().cpu().numpy().flatten()
+            # Additive+interaction kernel: find the ARD sub-kernel by attribute
+            if hasattr(covar, 'kernels'):
+                for sub_k in covar.kernels:
+                    base = getattr(sub_k, 'base_kernel', sub_k)
+                    if getattr(base, 'ard_num_dims', None) is not None:
+                        ls = base.lengthscale
+                        if ls is not None:
+                            return ls.detach().cpu().numpy().flatten()
             if hasattr(covar, 'base_kernel') and covar.base_kernel is not None:
                 ls = covar.base_kernel.lengthscale
                 if ls is not None:
@@ -804,7 +804,7 @@ def fit_gp_botorch(
     warm_start: bool = False,
     round_num: int = 1,
     warm_start_state: Optional[dict] = None,
-    kernel_type: str = "ard",
+    kernel_type: Literal["ard", "additive_interaction"] = "ard",
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
 
@@ -842,6 +842,12 @@ def fit_gp_botorch(
     else:
         Y_selected = Y
     cell_type_cols = list(Y_selected.columns)
+
+    _VALID_KERNEL_TYPES = ("ard", "additive_interaction")
+    if kernel_type not in _VALID_KERNEL_TYPES:
+        raise ValueError(
+            f"Unknown kernel_type={kernel_type!r}. Must be one of {_VALID_KERNEL_TYPES}"
+        )
 
     # Prepare tensors
     train_X = torch.tensor(X.values, dtype=DTYPE, device=DEVICE)
@@ -939,7 +945,7 @@ def fit_gp_botorch(
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
         )
-        if kernel_type != "additive_interaction":
+        if covar_module is None:
             _set_dim_scaled_lengthscale_prior(model, train_X.shape[1])
         # Warm-start: load hyperparameters from previous round
         if warm_start:
@@ -1659,7 +1665,7 @@ def run_gpbo_loop(
     warm_start: bool = False,
     refine_target: bool = False,
     refine_lr: float = 0.3,
-    kernel_type: str = "ard",
+    kernel_type: Literal["ard", "additive_interaction"] = "ard",
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
