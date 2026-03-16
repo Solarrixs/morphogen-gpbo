@@ -560,7 +560,6 @@ def fit_tvr_models(
 
     # Fit one GP per fidelity level
     per_fidelity_models = {}
-    per_fidelity_stats = {}  # For min-max normalization of means
     for fid in fidelity_levels:
         mask = X["fidelity"] == fid
         X_fid = X.loc[mask, morph_cols]
@@ -582,15 +581,6 @@ def fit_tvr_models(
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
         fit_gpytorch_mll(mll)
 
-        # Compute min/max of predictions on training data for normalization
-        with torch.no_grad():
-            post = model.posterior(X_tensor)
-            pred_mean = post.mean
-        per_fidelity_stats[fid] = {
-            "min": pred_mean.min(dim=0).values,
-            "max": pred_mean.max(dim=0).values,
-        }
-
         per_fidelity_models[fid] = model
         noise_val = model.likelihood.noise.mean().item()
         logger.info("  Fitted GP for fidelity=%.1f (noise=%.4f)", fid, noise_val)
@@ -598,7 +588,6 @@ def fit_tvr_models(
     # Build ensemble
     ensemble = TVRModelEnsemble(
         models=per_fidelity_models,
-        stats=per_fidelity_stats,
         cost_ratios={fid: FIDELITY_COSTS.get(fid, 1.0) for fid in fidelity_levels},
     )
 
@@ -613,8 +602,8 @@ class TVRModelEnsemble:
     """Ensemble of per-fidelity GPs for Targeted Variance Reduction.
 
     At each candidate point, selects the model with the lowest
-    cost-scaled posterior variance. Mean predictions are min-max
-    normalized per model before comparison.
+    cost-scaled posterior variance (variance * cost). Cheaper models
+    are preferred when raw variance is similar.
 
     This class provides a ``posterior()`` method compatible with
     BoTorch's acquisition function interface.
@@ -623,11 +612,9 @@ class TVRModelEnsemble:
     def __init__(
         self,
         models: dict[float, object],
-        stats: dict[float, dict],
         cost_ratios: dict[float, float],
     ):
         self.models = models
-        self.stats = stats
         self.cost_ratios = cost_ratios
         self._fidelity_levels = sorted(models.keys())
 
@@ -641,73 +628,62 @@ class TVRModelEnsemble:
         """Return a posterior that combines per-fidelity models via TVR.
 
         For each candidate point, selects the model with the lowest
-        variance scaled by inverse cost. Returns that model's posterior
-        mean and variance.
+        cost-scaled variance (variance * cost). Returns that model's
+        posterior mean and variance.
         """
-        from botorch.posteriors import GPyTorchPosterior
-        from gpytorch.distributions import MultivariateNormal
-
-        # Collect posteriors from all models
+        # Collect posteriors from all models (no torch.no_grad — gradients
+        # must flow for BoTorch acquisition function optimization)
         posteriors = {}
         for fid in self._fidelity_levels:
-            with torch.no_grad():
-                posteriors[fid] = self.models[fid].posterior(X)
+            posteriors[fid] = self.models[fid].posterior(X)
 
         # For each point, pick the model with lowest cost-scaled variance
         # Shape: X is (..., d), posterior mean is (..., m)
         batch_shape = X.shape[:-1]
         n_outputs = self.num_outputs
 
-        best_means = []
-        best_vars = []
+        all_means = []
+        all_raw_vars = []
+        all_scaled_vars = []
 
         for fid in self._fidelity_levels:
             post = posteriors[fid]
             mean = post.mean  # (..., m)
             var = post.variance  # (..., m)
 
-            # Scale variance by inverse cost (cheaper models get downweighted)
+            # Scale variance by cost (cheaper models → lower scaled variance)
             cost = self.cost_ratios.get(fid, 1.0)
-            scaled_var = var / max(cost, 1e-10)
+            scaled_var = var * cost
 
-            best_means.append(mean)
-            best_vars.append(scaled_var)
+            all_means.append(mean)
+            all_raw_vars.append(var)
+            all_scaled_vars.append(scaled_var)
 
         # Stack: (n_fidelities, ..., m)
-        all_means = torch.stack(best_means, dim=0)
-        all_scaled_vars = torch.stack(best_vars, dim=0)
+        stacked_means = torch.stack(all_means, dim=0)
+        stacked_raw_vars = torch.stack(all_raw_vars, dim=0)
+        stacked_scaled_vars = torch.stack(all_scaled_vars, dim=0)
 
         # For each point and output, pick the fidelity with lowest scaled var
         # Mean of scaled_var across outputs for selection
-        mean_scaled_var = all_scaled_vars.mean(dim=-1)  # (n_fid, ...)
+        mean_scaled_var = stacked_scaled_vars.mean(dim=-1)  # (n_fid, ...)
         best_fid_idx = mean_scaled_var.argmin(dim=0)  # (...)
 
         # Gather the best mean and variance
-        # Expand best_fid_idx for gathering across the output dim
         idx_expanded = best_fid_idx.unsqueeze(0).unsqueeze(-1).expand(
             1, *batch_shape, n_outputs
         )
-        selected_mean = torch.gather(all_means, 0, idx_expanded).squeeze(0)
-        selected_var = torch.gather(
-            torch.stack([posteriors[fid].variance for fid in self._fidelity_levels], dim=0),
-            0, idx_expanded,
-        ).squeeze(0)
+        selected_mean = torch.gather(stacked_means, 0, idx_expanded).squeeze(0)
+        selected_var = torch.gather(stacked_raw_vars, 0, idx_expanded).squeeze(0)
 
-        # Build a GPyTorchPosterior-like object
-        # Create a MultivariateNormal with diagonal covariance
-        # Flatten for MVN then reshape
-        flat_mean = selected_mean.reshape(-1, n_outputs)
-        flat_var = selected_var.reshape(-1, n_outputs)
-
-        # For BoTorch compatibility, wrap in a simple posterior
         return _TVRPosterior(selected_mean, selected_var)
 
 
 class _TVRPosterior:
     """Lightweight posterior wrapper for TVR ensemble predictions.
 
-    Provides the ``mean``, ``variance``, and ``sample()`` interface
-    that BoTorch acquisition functions expect.
+    Provides the ``mean``, ``variance``, ``rsample()``, and ``sample()``
+    interface that BoTorch acquisition functions expect.
     """
 
     def __init__(self, mean: torch.Tensor, variance: torch.Tensor):
@@ -730,15 +706,18 @@ class _TVRPosterior:
     def dtype(self) -> torch.dtype:
         return self._mean.dtype
 
-    def sample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
-        """Draw samples from the posterior (used by MC acquisition functions)."""
+    def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
+        """Reparameterized samples (called by BoTorch MC acquisition functions)."""
         std = self._variance.sqrt()
-        # sample_shape + batch_shape + (m,)
         eps = torch.randn(
             *sample_shape, *self._mean.shape,
             device=self._mean.device, dtype=self._mean.dtype,
         )
-        return self._mean.unsqueeze(0).expand(*sample_shape, *self._mean.shape) + std.unsqueeze(0).expand(*sample_shape, *self._mean.shape) * eps
+        return self._mean + std * eps
+
+    def sample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
+        """Draw samples from the posterior."""
+        return self.rsample(sample_shape)
 
     @property
     def batch_shape(self) -> torch.Size:
