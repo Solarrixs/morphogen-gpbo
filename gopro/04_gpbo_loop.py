@@ -20,7 +20,9 @@ Outputs:
 
 from __future__ import annotations
 
+import functools
 import math
+from collections import namedtuple
 import numpy as np
 import pandas as pd
 import torch
@@ -438,6 +440,7 @@ def _select_kernel_complexity(
         }
 
 
+@functools.lru_cache(maxsize=8)
 def _helmert_basis(D: int) -> np.ndarray:
     """Construct the Helmert ILR basis matrix.
 
@@ -542,13 +545,9 @@ def _helmert_basis_torch(D: int) -> torch.Tensor:
     """Construct the Helmert ILR basis matrix as a torch tensor.
 
     Used inside the differentiable ILR-inverse objective for scalarization.
+    Delegates to the cached numpy version to avoid duplicated loop logic.
     """
-    V = torch.zeros(D, D - 1, dtype=DTYPE, device=DEVICE)
-    for j in range(D - 1):
-        V[:j + 1, j] = -1.0 / (j + 1)
-        V[j + 1, j] = 1.0
-        V[:, j] *= (float((j + 1) / (j + 2))) ** 0.5
-    return V
+    return torch.tensor(_helmert_basis(D), dtype=DTYPE, device=DEVICE)
 
 
 def build_training_set(
@@ -597,7 +596,7 @@ def _sobol_eval_points(
     """Generate Sobol evaluation points scaled to [lower, upper]."""
     from torch.quasirandom import SobolEngine
 
-    sobol = SobolEngine(dimension=d, scramble=True)
+    sobol = SobolEngine(dimension=d, scramble=True, seed=42)
     unit = sobol.draw(n_points).to(dtype=DTYPE, device=DEVICE)
     return lower + unit * (upper - lower)
 
@@ -1342,7 +1341,7 @@ def fit_gp_botorch(
     logger.info("GP Kernel Parameters:")
     lengthscales = _extract_lengthscales(model, train_X.shape[1])
     if lengthscales is not None:
-        importance = 1.0 / lengthscales
+        importance = 1.0 / np.maximum(lengthscales, 1e-6)
         morph_importance = pd.Series(importance[:len(X.columns)], index=X.columns)
         morph_importance = morph_importance.sort_values(ascending=False)
         logger.info("Morphogen importance (1/lengthscale):")
@@ -1464,7 +1463,7 @@ def recommend_next_experiments(
         if train_Y.shape[1] > 1:
             from botorch.acquisition.objective import GenericMCObjective
 
-            if use_ilr and n_composition_parts > 0:
+            if use_ilr and n_composition_parts > 1:
                 D = n_composition_parts
                 V_T = _helmert_basis_torch(D).T  # (D-1, D)
 
@@ -2685,13 +2684,18 @@ def run_gpbo_loop(
             logger.warning("Timing windows: all timing columns are constant; skipping")
 
     # Adaptive complexity: auto-select kernel based on N/d ratio
-    effective_kernel_type = kernel_type
-    effective_saasbo = use_saasbo
-    if adaptive_complexity:
-        d_morph = len([c for c in active_cols if c != "fidelity"])
+    # KernelSpec bundles the two variables that must stay in sync (A-C-001 fix).
+    KernelSpec = namedtuple("KernelSpec", ["kernel_type", "use_saasbo"])
+
+    def _resolve_kernel_spec(
+        kernel_type: str, use_saasbo: bool, adaptive_complexity: bool,
+        n_conditions: int, d_active: int,
+    ) -> KernelSpec:
+        """Return a single KernelSpec, resolving adaptive complexity if enabled."""
+        if not adaptive_complexity:
+            return KernelSpec(kernel_type=kernel_type, use_saasbo=use_saasbo)
         complexity = _select_kernel_complexity(
-            n_conditions=X_active.shape[0],
-            d_active=d_morph,
+            n_conditions=n_conditions, d_active=d_active,
         )
         logger.info("Adaptive complexity: %s", complexity["reason"])
         if kernel_type != "ard" or use_saasbo:
@@ -2701,11 +2705,14 @@ def run_gpbo_loop(
                 kernel_type, use_saasbo, complexity["kernel_type"],
             )
         if complexity["use_saasbo"]:
-            effective_saasbo = True
-            effective_kernel_type = "ard"  # SAASBO uses its own kernel
-        else:
-            effective_kernel_type = complexity["kernel_type"]
-            effective_saasbo = False
+            return KernelSpec(kernel_type="ard", use_saasbo=True)
+        return KernelSpec(kernel_type=complexity["kernel_type"], use_saasbo=False)
+
+    d_morph = len([c for c in active_cols if c != "fidelity"])
+    kernel_spec = _resolve_kernel_spec(
+        kernel_type, use_saasbo, adaptive_complexity,
+        n_conditions=X_active.shape[0], d_active=d_morph,
+    )
 
     # Load bootstrap noise variance if provided
     noise_var_df = None
@@ -2747,12 +2754,12 @@ def run_gpbo_loop(
             X_active, Y,
             target_cell_types=target_cell_types,
             use_ilr=use_ilr,
-            use_saasbo=effective_saasbo,
+            use_saasbo=kernel_spec.use_saasbo,
             use_lassobo=use_lassobo,
             lassobo_alpha=lassobo_alpha,
             warm_start=warm_start,
             round_num=round_num,
-            kernel_type=effective_kernel_type,
+            kernel_type=kernel_spec.kernel_type,
             cat_dims=timing_cat_dims,
             per_type_gp=per_type_gp,
             noise_variance=noise_var_df,
@@ -2855,7 +2862,7 @@ def run_gpbo_loop(
                     diagnostics[f"lengthscale_{col}"] = float(ls[i])
         if timing_cat_dims:
             diagnostics["model_type"] = "mixed_categorical"
-        elif effective_saasbo:
+        elif kernel_spec.use_saasbo:
             diagnostics["model_type"] = "saasbo"
         elif use_lassobo:
             diagnostics["model_type"] = "lassobo"
@@ -2894,7 +2901,7 @@ def run_gpbo_loop(
                 X_active, Y,
                 n_restarts=ensemble_restarts,
                 use_ilr=use_ilr,
-                kernel_type=effective_kernel_type,
+                kernel_type=kernel_spec.kernel_type,
                 cat_dims=timing_cat_dims,
                 per_type_gp=per_type_gp,
                 existing_model=model,

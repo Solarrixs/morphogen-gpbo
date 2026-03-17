@@ -4,7 +4,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 **Last updated:** 2026-03-17
 **Branch:** ralph/production-readiness-phase2
-**Tests:** 575 passing
+**Tests:** 580 passing
 
 ---
 
@@ -24,9 +24,9 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 - [x] Phase D Idea #17: Ensemble disagreement (GPerturb 2025) — `compute_ensemble_disagreement()`, `--ensemble-restarts` flag.
 - [x] LassoBO — L1-regularized MAP variable selection. `--lassobo` flag. 571 tests.
 - [x] Bootstrap uncertainty — `compute_bootstrap_uncertainty()` in step 02, `--bootstrap-noise` flag. 575 tests.
-- [ ] **Data-driven entropy center** — Replace arbitrary 0.55 entropy weight in composite fidelity with Braun reference mean entropy. File: `gopro/03_fidelity_scoring.py` ~L395. Acceptance: entropy center matches Braun; 2+ tests.
-- [ ] **/simplify pass** on all Phase B/C/D changes — 3-agent code review. Fix HIGH/MEDIUM issues. Acceptance: all tests pass.
-- [ ] **/bug-hunter final sweep** — Adversarial QA swarm across `gopro/`. Fix confirmed criticals.
+- [x] **Data-driven entropy center** — Replace arbitrary 0.55 entropy weight in composite fidelity with Braun reference mean entropy. File: `gopro/03_fidelity_scoring.py` ~L395. Acceptance: entropy center matches Braun; 2+ tests.
+- [x] **/simplify pass** on all Phase B/C/D changes — 3-agent code review. Fix HIGH/MEDIUM issues. Acceptance: all tests pass.
+- [x] **/bug-hunter final sweep** — Adversarial QA swarm across `gopro/`. Fixed 1 new critical (KernelSpec) + 6 warnings. 580 tests pass. 5 remaining criticals are test coverage gaps only.
 
 ### 1.2 Critical Bug Fixes (from paper deep-reads)
 

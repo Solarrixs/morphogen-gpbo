@@ -185,29 +185,6 @@ def compute_condition_composition(
     return fractions
 
 
-def compute_condition_region_fractions(
-    obs: pd.DataFrame,
-    condition_key: str = "condition",
-    region_key: str = "predicted_annot_region_rev2",
-) -> pd.DataFrame:
-    """Compute brain region fraction vectors per condition.
-
-    Args:
-        obs: Cell metadata with condition and predicted region columns.
-        condition_key: Column identifying experimental conditions.
-        region_key: Column with predicted brain region labels.
-
-    Returns:
-        DataFrame: rows=conditions, columns=regions, values=fractions.
-    """
-    fractions = (
-        obs
-        .groupby(condition_key)[region_key]
-        .value_counts(normalize=True)
-        .unstack(fill_value=0.0)
-    )
-    return fractions
-
 
 # ---------------------------------------------------------------------------
 # Fidelity scoring functions
