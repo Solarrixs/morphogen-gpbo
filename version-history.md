@@ -1,2 +1,3 @@
 | 4 | `8bd0fe1` | working | ralph/production-readiness-phase2 | Bug-hunter final sweep: KernelSpec + 6 fixes, 580 tests |
 | 3 | `578f3f6` | working | ralph/production-readiness-phase2 | Consolidate docs: single task_plan.md, remove 27 stale files |
+| 4 | `d21fb52` | working | ralph/production-readiness-phase2 | [ralph-simplify] Hoist KernelSpec to module level, harden zero-guards in viz |
