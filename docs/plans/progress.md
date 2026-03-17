@@ -33,6 +33,7 @@
 | 2026-03-16 | 526 | +5 | Additive+interaction kernel (NAIAD 2025, Idea #8) |
 | 2026-03-16 | 534 | +8 | Adaptive complexity schedule (NAIAD 2025, Idea #9) |
 | 2026-03-16 | 541 | +7 | Timing window encoding (Sanchis-Calleja 2025, Idea #10) |
+| 2026-03-17 | 547 | +6 | Per-cell-type GP models (GPerturb 2025, Idea #11) |
 
 ## Iteration Log
 
@@ -123,12 +124,27 @@
 - Quality: /simplify pass fixed 2 issues — removed unused `round_number` parameter from `_select_kernel_complexity()`, changed threshold assertions to fail-loud (raise ValueError) instead of silent fallback
 - Notes: `_select_kernel_complexity()` and `--adaptive-complexity` CLI flag already existed from Iteration 4. This iteration added 8 tests covering all 3 regimes (shared/ARD/SAASBO), boundary conditions, custom thresholds, zero-dim safety, and reason string content. Simplify pass cleaned up the implementation.
 
-## Iteration 6 — 2026-03-16
-- Task: Phase C Idea #10: Morphogen timing window encoding (Sanchis-Calleja 2025)
+## Iteration 6 — 2026-03-17T01:28:49Z
+- Task: Phase C Idea #10: Morphogen timing window encoding (Sanchis-Calleja 2025, Idea #10)
 - Result: PASS (541 tests, 0 failures)
+- Commits:
+  - 91abe1b [ralph-6] Task 6: Morphogen timing window encoding (Sanchis-Calleja 2025, Idea #10) — 541 tests
+  - 5b23a87 [ralph-simplify] Fix 4 quality issues in timing window encoding
 - Files changed:
   - gopro/config.py | 15 additions (TIMING_WINDOW_COLUMNS, TIMING_* constants)
-  - gopro/morphogen_parser.py | 60 additions (compute_timing_windows(), _TIMING_WINDOW_LOOKUP)
-  - gopro/04_gpbo_loop.py | 40 additions (--timing-windows flag, MixedSingleTaskGP branch, cat_dims)
+  - gopro/morphogen_parser.py | 60+32 changes (compute_timing_windows(), _TIMING_WINDOW_LOOKUP + simplify fixes)
+  - gopro/04_gpbo_loop.py | 40+9 changes (--timing-windows flag, MixedSingleTaskGP branch, cat_dims + simplify fixes)
   - gopro/tests/test_unit.py | 90 additions (7 new tests: TestTimingWindowEncoding)
+  - data/gp_recommendations_round1.csv | updated
+- Quality: /simplify pass fixed 4 issues in timing window encoding (from git diff HEAD~1)
 - Notes: Categorical timing encoding for CHIR99021, SAG, BMP4 (5 categories: not_applied/early/mid/late/full). MixedSingleTaskGP uses separate Hamming kernel for categorical dims + Matern for continuous. Only non-constant timing columns are added. Lookup table covers 13 known sub-windowed conditions; others auto-inferred from concentration.
+
+## Iteration 7 — 2026-03-17
+- Task: Phase C Idea #11: Per-cell-type GP models (GPerturb 2025, Idea #11)
+- Result: PASS (547 tests, 0 failures)
+- Commits:
+  - af45a7f [ralph-7] Task 7: Per-cell-type GP models (GPerturb 2025, Idea #11) — 547 tests
+- Files changed:
+  - gopro/04_gpbo_loop.py | ~100 additions (per_type_gp branch, _extract_per_output_lengthscales, --per-type-gp CLI flag)
+  - gopro/tests/test_unit.py | ~130 additions (6 new tests: TestPerTypeGP)
+- Notes: Fit separate SingleTaskGP per output via ModelListGP (MAP path only). Each sub-model has independent Matern 5/2 + ARD kernel with dim-scaled priors. _extract_per_output_lengthscales() returns (d x n_outputs) "morphogen sensitivity matrix". Falls back to standard GP for single-output. Only applies to standard MAP path (not SAASBO, multi-fidelity, TVR, or Mixed).

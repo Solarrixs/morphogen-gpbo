@@ -1,31 +1,29 @@
-# Handoff to Iteration 7
+# Handoff to Iteration 8
 
-## Last Completed: Phase C Idea #10 — Morphogen Timing Window Encoding
-- Categorical timing columns (CHIR99021_window, SAG_window, BMP4_window) added to morphogen matrix
-- MixedSingleTaskGP used when `--timing-windows` flag is set
-- /simplify pass fixed 4 quality issues
-- 7 tests added, 541 total passing, 0 failures
+## Last Completed: Phase C Idea #11 — Per-cell-type GP models (GPerturb 2025)
+- Separate SingleTaskGP per output dimension via ModelListGP
+- `_extract_per_output_lengthscales()` returns (d x n_outputs) morphogen sensitivity matrix
+- `--per-type-gp` CLI flag, wired through `run_gpbo_loop(per_type_gp=True)`
+- 6 tests added, 547 total passing, 0 failures
 
-## Next Up: Phase C Idea #11 — Per-cell-type GP models
-- **Task**: Fit separate GP per cell type (MAP path, GPerturb 2025). Per-output lengthscale matrix for interpretability. Compare to current multi-output approach.
-- **Acceptance**: per-type GPs produce predictions; 4+ tests
-- **Key files**: `gopro/04_gpbo_loop.py`
-- **Reference**: `docs/plans/ideas_from_gperturb_2025.md`
+## Next Up: Phase D Idea #13 — Per-round fidelity monitoring
+- **Task**: Re-evaluate cross-fidelity correlation each round. Auto-fallback to single-fidelity if correlation degrades. Add trend to visualization report.
+- **Acceptance**: monitoring runs per round; 2+ tests
+- **Key files**: `gopro/04_gpbo_loop.py`, `gopro/visualize_report.py`
 
 ## Warnings
-- MixedSingleTaskGP only activates on the standard GP path (not multi-fidelity, SAASBO, or TVR)
-- Timing window columns are only added when `--timing-windows` is set (not default)
-- `_compute_active_bounds()` runs BEFORE timing columns are added; timing bounds are added separately
-- Timing columns that are constant across all conditions are automatically dropped
-- The `cat_dims` parameter is passed through to `fit_gp_botorch()` — ignored when None
+- Per-type GP only activates on the standard MAP path (not SAASBO, multi-fidelity, TVR, or MixedSingleTaskGP)
+- Per-type GP requires `train_Y.shape[1] > 1`; single-output falls back to standard SingleTaskGP
+- ModelListGP from per-type GP works with existing acquisition functions (qLogEI, qLogNEHVI) via GenericMCObjective scalarization
+- `_extract_per_output_lengthscales()` returns None if any sub-model lacks accessible lengthscales
 - Import constants from `gopro.config` — never hardcode paths or columns
 - Use `.copy()` before mutating DataFrames passed as arguments
 - SAASBO + multi-output + scalarized qLogEI is guarded with NotImplementedError (iteration 5 fix)
 
 ## Key Context
 - Branch: `ralph/production-readiness-phase2`
-- Tests: `source .venv/bin/activate && python -m pytest gopro/tests/ -v` (541 passing)
-- Task list: `ralph-task.md` (9 tasks todo, 0 blocked, 6 complete)
-- Iterations 1-6: TVR, target profile refinement, FBaxis_rank, additive+interaction kernel, adaptive complexity, timing windows
+- Tests: `source .venv/bin/activate && python -m pytest gopro/tests/ -v` (547 passing)
+- Task list: `ralph-task.md` (8 tasks todo, 0 blocked, 7 complete)
+- Iterations 1-7: TVR, target profile refinement, FBaxis_rank, additive+interaction kernel, adaptive complexity, timing windows, per-type GP
 
-## Remaining: 9 tasks todo, 0 blocked, 6 complete
+## Remaining: 8 tasks todo, 0 blocked, 7 complete
