@@ -233,7 +233,8 @@ def _build_additive_interaction_kernel(d: int):
         ScaleKernel(MaternKernel(nu=2.5, active_dims=(i,)))
         for i in range(d)
     ]
-    k_additive = ScaleKernel(AdditiveKernel(*additive_kernels))
+    # No outer ScaleKernel — per-dim ScaleKernels already provide variance params
+    k_additive = AdditiveKernel(*additive_kernels)
 
     # Interaction: full ARD Matern 5/2 over all dimensions
     k_interaction = ScaleKernel(
@@ -817,9 +818,11 @@ class TVRModelEnsemble:
             mean = post.mean  # (..., m)
             var = post.variance  # (..., m)
 
-            # Scale variance by cost (cheaper models → lower scaled variance)
+            # Scale variance by cost: cheaper models get lower scaled variance
+            # cost=0.001 (CellFlow) → scaled_var = var * 0.001 (very small → preferred)
+            # cost=1.0 (real) → scaled_var = var * 1.0 (full penalty)
             cost = self.cost_ratios.get(fid, 1.0)
-            scaled_var = var / max(cost, 1e-10)
+            scaled_var = var * cost
 
             all_means.append(mean)
             all_raw_vars.append(var)
@@ -1917,6 +1920,12 @@ def _select_replicate_conditions(
     """
     if n_replicates <= 0:
         return pd.DataFrame(columns=[c for c in train_X.columns if c != "fidelity"])
+
+    # Only select replicates from real-fidelity conditions (physically executable)
+    if "fidelity" in train_X.columns:
+        real_mask = train_X["fidelity"] == 1.0
+        train_X = train_X.loc[real_mask].copy()
+        train_Y = train_Y.loc[real_mask].copy()
 
     n_available = len(train_X)
     n_replicates = min(n_replicates, n_available)

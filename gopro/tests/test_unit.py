@@ -1873,38 +1873,33 @@ class TestAdditiveInteractionKernel:
     """Tests for additive + interaction kernel (NAIAD 2025, Idea #8)."""
 
     def test_build_kernel_structure(self):
-        """Kernel should have additive + interaction sub-kernels."""
+        """Kernel should have d additive + 1 interaction sub-kernels."""
         from gpytorch.kernels import AdditiveKernel, ScaleKernel, MaternKernel
 
         kernel = step04._build_additive_interaction_kernel(d=5)
-        # Should be an AdditiveKernel with 2 sub-kernels
-        assert hasattr(kernel, 'kernels')
-        assert len(kernel.kernels) == 2
-        # First is ScaleKernel(AdditiveKernel(...)) — the additive part
-        additive_part = kernel.kernels[0]
-        assert isinstance(additive_part, ScaleKernel)
-        assert isinstance(additive_part.base_kernel, AdditiveKernel)
-        # AdditiveKernel should have d=5 sub-kernels
-        assert len(additive_part.base_kernel.kernels) == 5
-        # Second is ScaleKernel(MaternKernel(ard)) — the interaction part
-        interaction_part = kernel.kernels[1]
-        assert isinstance(interaction_part, ScaleKernel)
-        assert isinstance(interaction_part.base_kernel, MaternKernel)
+        # GPyTorch flattens AdditiveKernel + ScaleKernel into one AdditiveKernel
+        assert isinstance(kernel, AdditiveKernel)
+        # d per-dim ScaleKernel(Matern) + 1 interaction ScaleKernel(Matern ARD)
+        assert len(kernel.kernels) == 6  # 5 additive + 1 interaction
+        # All sub-kernels should be ScaleKernel wrapping MaternKernel
+        for sk in kernel.kernels:
+            assert isinstance(sk, ScaleKernel)
+            assert isinstance(sk.base_kernel, MaternKernel)
 
     def test_interaction_scale_initialized_small(self):
         """Interaction outputscale should start small (prior toward additivity)."""
         kernel = step04._build_additive_interaction_kernel(d=4)
-        interaction_part = kernel.kernels[1]
+        # Last kernel is the interaction ScaleKernel(Matern ARD)
+        interaction_part = kernel.kernels[-1]
+        # Interaction has ARD (ard_num_dims > 1), additive kernels have active_dims=(i,)
+        assert interaction_part.base_kernel.ard_num_dims == 4
         assert interaction_part.outputscale.item() == pytest.approx(0.1, abs=1e-6)
 
     def test_additive_kernels_have_correct_active_dims(self):
         """Each additive sub-kernel should operate on exactly one dimension."""
-        from gpytorch.kernels import AdditiveKernel
-
         kernel = step04._build_additive_interaction_kernel(d=3)
-        additive_part = kernel.kernels[0].base_kernel
-        assert isinstance(additive_part, AdditiveKernel)
-        for i, sub_k in enumerate(additive_part.kernels):
+        # First d kernels are per-dim additive, last is interaction
+        for i, sub_k in enumerate(kernel.kernels[:3]):
             # ScaleKernel wraps MaternKernel; active_dims is on the Matern
             matern = sub_k.base_kernel
             assert tuple(matern.active_dims) == (i,)
