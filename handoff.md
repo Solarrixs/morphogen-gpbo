@@ -7,6 +7,7 @@
 - `build_convergence_diagnostics_figure()` added to visualize_report.py (3-panel subplot)
 - Wired into `run_gpbo_loop()`: called after recommendations, metrics added to gp_diagnostics CSV
 - Constants in `gopro/config.py`: CONVERGENCE_ACQUISITION_DECAY_THRESHOLD, CONVERGENCE_CLUSTER_SPREAD_THRESHOLD, CONVERGENCE_POSTERIOR_EVAL_POINTS
+- /simplify pass fixed 5 quality issues (net -22 lines)
 - 561 tests passing, 0 failures
 
 ## Next Up: Phase D Idea #17 — Ensemble disagreement
@@ -20,6 +21,7 @@
 - SAASBO + multi-output + scalarized qLogEI is guarded with NotImplementedError
 - TVR + `high_variance` replicate strategy strips fidelity from `active_cols`
 - Convergence diagnostics uses SobolEngine for posterior variance estimation (512 points default)
+- 04_gpbo_loop.py is large (~2000+ lines) — read relevant sections before modifying
 - Import constants from `gopro.config` — never hardcode paths or columns
 - Use `.copy()` before mutating DataFrames passed as arguments
 
