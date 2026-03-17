@@ -970,6 +970,101 @@ class TestSAASBO:
         assert isinstance(model, SaasFullyBayesianSingleTaskGP)
 
 
+class TestLassoBO:
+    """Tests for LassoBO (L1-regularized MAP variable selection)."""
+
+    @pytest.fixture
+    def small_data(self):
+        np.random.seed(42)
+        n, d, m = 15, 4, 3
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM", "log_harvest_day"],
+            index=[f"cond_{i}" for i in range(n)],
+        )
+        X["fidelity"] = 1.0
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(m), size=n),
+            columns=["ct_A", "ct_B", "ct_C"],
+            index=X.index,
+        )
+        return X, Y
+
+    def test_lassobo_returns_single_task_gp(self, small_data):
+        """LassoBO should return a standard SingleTaskGP (not ModelListGP)."""
+        from botorch.models import SingleTaskGP
+        X, Y = small_data
+        model, _, train_Y, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_lassobo=True, lassobo_alpha=0.1,
+        )
+        assert isinstance(model, SingleTaskGP)
+        assert train_Y.shape[1] == 2  # ILR: 3 -> 2
+
+    def test_lassobo_lengthscales_extractable(self, small_data):
+        """Lengthscales should be extractable from a LassoBO-fitted model."""
+        X, Y = small_data
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_lassobo=True, lassobo_alpha=0.1,
+        )
+        ls = step04._extract_lengthscales(model, X.shape[1])
+        assert ls is not None
+        # Multi-output GP has batch lengthscales (n_outputs x 1 x d) → flattened
+        assert len(ls) >= X.shape[1]
+        assert all(l > 0 for l in ls)
+
+    def test_lassobo_posterior_works(self, small_data):
+        """Model fitted with LassoBO should produce valid posteriors."""
+        import torch
+        X, Y = small_data
+        model, train_X, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_lassobo=True, lassobo_alpha=0.1,
+        )
+        with torch.no_grad():
+            post = model.posterior(train_X[:2])
+        assert post.mean.shape[-1] == 2  # ILR-transformed outputs
+
+    def test_lassobo_alpha_affects_lengthscales(self, small_data):
+        """Different alpha values should produce different lengthscale distributions."""
+        X, Y = small_data
+        # Zero alpha — no L1 penalty (just MLL)
+        model_zero, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_lassobo=True, lassobo_alpha=0.0,
+        )
+        ls_zero = step04._extract_lengthscales(model_zero, X.shape[1])
+
+        # Nonzero alpha — L1 penalty active
+        model_reg, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, use_lassobo=True, lassobo_alpha=0.1,
+        )
+        ls_reg = step04._extract_lengthscales(model_reg, X.shape[1])
+
+        # Both should produce valid non-None lengthscales
+        assert ls_zero is not None and ls_reg is not None
+        # With regularization, at least some lengthscales should differ
+        assert not np.allclose(ls_zero, ls_reg, atol=1e-3)
+
+    def test_lassobo_mutually_exclusive_with_saasbo(self, small_data):
+        """LassoBO + SAASBO should raise ValueError."""
+        X, Y = small_data
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            step04.fit_gp_botorch(X, Y, use_saasbo=True, use_lassobo=True)
+
+    def test_lassobo_mutually_exclusive_with_per_type_gp(self, small_data):
+        """LassoBO + per_type_gp should raise ValueError."""
+        X, Y = small_data
+        with pytest.raises(ValueError, match="incompatible with use_lassobo"):
+            step04.fit_gp_botorch(X, Y, use_lassobo=True, per_type_gp=True)
+
+    def test_lassobo_ignored_for_multi_fidelity(self, small_data):
+        """Multi-fidelity should take priority over LassoBO."""
+        from botorch.models import SingleTaskMultiFidelityGP
+        X, Y = small_data
+        X = X.copy()
+        X.loc[X.index[:5], "fidelity"] = 0.5
+        model, _, _, _ = step04.fit_gp_botorch(X, Y, use_ilr=True, use_lassobo=True)
+        assert isinstance(model, SingleTaskMultiFidelityGP)
+
+
 class TestSoftKNNFractions:
     """Tests for soft probability output from KNN label transfer."""
 

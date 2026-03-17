@@ -207,6 +207,107 @@ def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
                 )
 
 
+def _fit_lassobo(
+    train_X: torch.Tensor,
+    train_Y: torch.Tensor,
+    lasso_alpha: float = 0.1,
+    n_steps: int = 200,
+    lr: float = 0.05,
+) -> "SingleTaskGP":
+    """Fit a GP with Lasso-regularized lengthscale estimation.
+
+    LassoBO (AISTATS 2025) applies an L1 penalty to the inverse lengthscales
+    during MAP optimization, encouraging sparsity.  This achieves similar
+    variable selection to SAASBO but via gradient-based optimization rather
+    than NUTS sampling, making it much faster (~10x) while giving comparable
+    variable selection.
+
+    The penalized objective is::
+
+        loss = -MLL + alpha * sum(1 / lengthscale_i)
+
+    Small lengthscales → large penalties, so the optimizer drives irrelevant
+    dimensions' lengthscales toward infinity (effectively removing them).
+
+    Args:
+        train_X: Training inputs tensor (N x d).
+        train_Y: Training targets tensor (N x m).
+        lasso_alpha: L1 penalty strength on inverse lengthscales.
+            Higher values → more aggressive variable pruning. (default: 0.1)
+        n_steps: Number of Adam optimization steps. (default: 200)
+        lr: Learning rate for Adam optimizer. (default: 0.05)
+
+    Returns:
+        Fitted SingleTaskGP model with sparse lengthscales.
+    """
+    from botorch.models import SingleTaskGP
+    from botorch.models.transforms import Normalize, Standardize
+    from gpytorch.mlls import ExactMarginalLogLikelihood
+
+    d = train_X.shape[1]
+    m = train_Y.shape[1]
+
+    model = SingleTaskGP(
+        train_X,
+        train_Y,
+        input_transform=Normalize(d=d),
+        outcome_transform=Standardize(m=m),
+    )
+    # Remove default lengthscale and noise priors — the L1 penalty already
+    # regularizes lengthscales, and LogNormalPrior's validate_args check
+    # can raise during Adam optimization when parameter values temporarily
+    # exit the support region.
+    covar = model.covar_module
+    base = getattr(covar, "base_kernel", covar)
+    for prior_name in list(base._priors.keys()):
+        del base._priors[prior_name]
+    for prior_name in list(model.likelihood.noise_covar._priors.keys()):
+        del model.likelihood.noise_covar._priors[prior_name]
+
+    mll = ExactMarginalLogLikelihood(model.likelihood, model)
+
+    model.train()
+    model.likelihood.train()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    import gpytorch
+    with gpytorch.settings.debug(False):
+        for step in range(n_steps):
+            optimizer.zero_grad()
+            output = model(*model.train_inputs)
+            target = model.train_targets
+            mll_value = mll(output, target)
+            loss = -mll_value.sum()  # sum for multi-output
+
+            # L1 penalty on inverse lengthscales → drives irrelevant dims to ∞
+            covar = model.covar_module
+            base = getattr(covar, "base_kernel", covar)
+            if hasattr(base, "lengthscale"):
+                inv_ls = 1.0 / base.lengthscale.clamp(min=1e-6)
+                l1_penalty = lasso_alpha * inv_ls.sum()
+                loss = loss + l1_penalty
+
+            loss.backward()
+            optimizer.step()
+
+    model.eval()
+    model.likelihood.eval()
+
+    # Log which dimensions were effectively pruned
+    ls = _extract_lengthscales(model, d)
+    if ls is not None:
+        median_ls = float(np.median(ls))
+        # Dimensions with lengthscale > 10x median are considered pruned
+        pruned = np.sum(ls > 10 * median_ls)
+        logger.info(
+            "LassoBO: %d/%d dimensions pruned (alpha=%.3f, median_ls=%.3f)",
+            pruned, d, lasso_alpha, median_ls,
+        )
+
+    return model
+
+
 def _build_additive_interaction_kernel(d: int):
     """Build an additive + interaction kernel for GP fitting.
 
@@ -919,6 +1020,8 @@ def fit_gp_botorch(
     saasbo_warmup: int = 256,
     saasbo_num_samples: int = 128,
     saasbo_thinning: int = 16,
+    use_lassobo: bool = False,
+    lassobo_alpha: float = 0.1,
     warm_start: bool = False,
     round_num: int = 1,
     warm_start_state: Optional[dict] = None,
@@ -926,7 +1029,7 @@ def fit_gp_botorch(
     cat_dims: Optional[list[int]] = None,
     per_type_gp: bool = False,
 ) -> tuple:
-    """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
+    """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
 
     Args:
         X: Morphogen concentration matrix with fidelity column.
@@ -938,6 +1041,12 @@ def fit_gp_botorch(
         saasbo_warmup: NUTS warmup steps for SAASBO.
         saasbo_num_samples: NUTS posterior samples for SAASBO.
         saasbo_thinning: NUTS thinning factor for SAASBO.
+        use_lassobo: Use LassoBO (L1-regularized MAP variable selection,
+            AISTATS 2025). Much faster than SAASBO — gradient-based
+            optimization instead of NUTS sampling. Mutually exclusive
+            with use_saasbo.
+        lassobo_alpha: L1 penalty strength for LassoBO. Higher values →
+            more aggressive variable pruning. (default: 0.1)
         warm_start: If True, load hyperparameters from previous round's
             saved state as initialization (further fitting still occurs).
         round_num: Current optimization round number (used to locate the
@@ -998,9 +1107,17 @@ def fit_gp_botorch(
     logger.info("X: %s, Y: %s", train_X.shape, train_Y.shape)
 
     # Validate mutually exclusive fitting strategies
+    if use_saasbo and use_lassobo:
+        raise ValueError(
+            "use_saasbo and use_lassobo are mutually exclusive — choose one variable selection method"
+        )
     if per_type_gp and use_saasbo:
         raise ValueError(
             "per_type_gp is incompatible with use_saasbo — choose one fitting strategy"
+        )
+    if per_type_gp and use_lassobo:
+        raise ValueError(
+            "per_type_gp is incompatible with use_lassobo — choose one fitting strategy"
         )
     if per_type_gp and cat_dims:
         raise ValueError(
@@ -1016,6 +1133,8 @@ def fit_gp_botorch(
         logger.info("Using multi-fidelity GP (fidelity column detected)")
         if use_saasbo:
             logger.info("SAASBO ignored — multi-fidelity takes priority")
+        if use_lassobo:
+            logger.info("LassoBO ignored — multi-fidelity takes priority")
         if per_type_gp:
             logger.info("per_type_gp ignored — multi-fidelity takes priority")
         model = SingleTaskMultiFidelityGP(
@@ -1076,6 +1195,17 @@ def fit_gp_botorch(
                 )
                 saas_models.append(m)
             model = ModelListGP(*saas_models)
+    elif use_lassobo:
+        if cat_dims:
+            logger.warning(
+                "LassoBO does not support categorical dims; ignoring cat_dims=%s",
+                cat_dims,
+            )
+        logger.info("Using LassoBO (L1-regularized MAP, alpha=%.3f)", lassobo_alpha)
+        model = _fit_lassobo(
+            train_X, train_Y,
+            lasso_alpha=lassobo_alpha,
+        )
     elif cat_dims:
         # Mixed continuous+categorical GP (timing window encoding)
         from botorch.models import MixedSingleTaskGP
@@ -2301,6 +2431,8 @@ def run_gpbo_loop(
     use_ilr: bool = True,
     virtual_sources: Optional[list[tuple[Path, Path, float]]] = None,
     use_saasbo: bool = False,
+    use_lassobo: bool = False,
+    lassobo_alpha: float = 0.1,
     use_tvr: bool = False,
     target_profile: Optional[pd.Series] = None,
     n_replicates: int = 2,
@@ -2329,6 +2461,9 @@ def run_gpbo_loop(
             tuples for multi-fidelity data. Real data is always included at
             fidelity=1.0. Virtual sources add CellRank2 (0.5) or CellFlow (0.0).
         use_saasbo: Use SAASBO (fully Bayesian GP with sparsity prior).
+        use_lassobo: Use LassoBO (L1-regularized MAP variable selection).
+            Much faster than SAASBO. Mutually exclusive with use_saasbo.
+        lassobo_alpha: L1 penalty strength for LassoBO (default: 0.1).
         use_tvr: Use Targeted Variance Reduction (TVR) instead of
             SingleTaskMultiFidelityGP. Fits separate GPs per fidelity level
             and selects the model with lowest cost-scaled variance at each
@@ -2534,6 +2669,8 @@ def run_gpbo_loop(
             target_cell_types=target_cell_types,
             use_ilr=use_ilr,
             use_saasbo=effective_saasbo,
+            use_lassobo=use_lassobo,
+            lassobo_alpha=lassobo_alpha,
             warm_start=warm_start,
             round_num=round_num,
             kernel_type=effective_kernel_type,
@@ -2640,6 +2777,8 @@ def run_gpbo_loop(
             diagnostics["model_type"] = "mixed_categorical"
         elif effective_saasbo:
             diagnostics["model_type"] = "saasbo"
+        elif use_lassobo:
+            diagnostics["model_type"] = "lassobo"
         else:
             diagnostics["model_type"] = "map"
     except (AttributeError, RuntimeError):
@@ -2730,6 +2869,12 @@ if __name__ == "__main__":
                         help="Path to SAG screen morphogens CSV")
     parser.add_argument("--saasbo", action="store_true",
                         help="Use SAASBO (fully Bayesian GP with sparsity prior)")
+    parser.add_argument("--lassobo", action="store_true",
+                        help="Use LassoBO (L1-regularized MAP variable selection, AISTATS 2025). "
+                             "Faster alternative to SAASBO for automatic variable selection.")
+    parser.add_argument("--lassobo-alpha", type=float, default=0.1,
+                        help="L1 penalty strength for LassoBO (default: 0.1). "
+                             "Higher → more aggressive pruning.")
     parser.add_argument("--tvr", action="store_true",
                         help="Use Targeted Variance Reduction (fit per-fidelity GPs, "
                              "select by lowest cost-scaled variance)")
@@ -2928,6 +3073,8 @@ if __name__ == "__main__":
         use_ilr=not args.no_ilr,
         virtual_sources=virtual_sources if virtual_sources else None,
         use_saasbo=args.saasbo,
+        use_lassobo=args.lassobo,
+        lassobo_alpha=args.lassobo_alpha,
         use_tvr=args.tvr,
         target_profile=target_profile,
         n_replicates=args.n_replicates,
