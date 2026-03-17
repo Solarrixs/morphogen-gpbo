@@ -22,3 +22,4 @@
 | 7 | `72d5876` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 4 quality issues in per-type GP models |
 | 8 | `d1890d0` | PASS | ralph/production-readiness-phase2 | Per-round fidelity monitoring — 6 new tests (555 total) |
 | 8 | `99e8b58` | working | ralph/production-readiness-phase2 | [ralph-simplify] Extract fidelity constants, remove redundant sort and str() wrapping |
+| 9 | `179b6fd` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 5 quality issues in convergence diagnostics |
