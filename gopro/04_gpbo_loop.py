@@ -1122,22 +1122,22 @@ def fit_gp_botorch(
     # Build heteroscedastic noise tensor from bootstrap variance
     train_Yvar = None
     if noise_variance is not None:
-        # Align noise_variance to Y's index and selected columns
-        nv = noise_variance.reindex(index=Y.index, columns=Y_selected.columns).fillna(0.0)
+        # Align columns to selected cell types (index already aligned by caller)
+        nv = noise_variance.reindex(columns=Y_selected.columns).fillna(0.0)
         nv_values = nv.values
         if use_ilr and nv_values.shape[1] > 1:
-            # Propagate variance through ILR: use delta-method approximation.
-            # For small variances, ILR variance ≈ J @ diag(var) @ J^T per row,
-            # but that's expensive. Use a simpler bootstrap-on-ILR approach:
-            # transform the variance directly (conservative upper bound).
-            # Actually, just use the mean variance as a scalar per row since
-            # ILR mixes columns. This is a reasonable first-order approximation.
-            nv_values = np.broadcast_to(
-                nv_values.mean(axis=1, keepdims=True),
-                (nv_values.shape[0], Y_values.shape[1]),
-            ).copy()
+            # Delta-method: Var_ilr = J @ diag(var_comp) @ J^T per row,
+            # where J = diag(1/y) @ V is the Jacobian of log(y) @ V.
+            D = nv_values.shape[1]
+            V = _helmert_basis(D)  # (D, D-1)
+            Y_safe = _multiplicative_replacement(Y_selected.values)
+            ilr_var = np.empty((nv_values.shape[0], D - 1))
+            for i in range(nv_values.shape[0]):
+                J = np.diag(1.0 / Y_safe[i]) @ V  # (D, D-1)
+                cov_ilr = J.T @ np.diag(nv_values[i]) @ J  # (D-1, D-1)
+                ilr_var[i] = np.diag(cov_ilr)
+            nv_values = ilr_var
         train_Yvar = torch.tensor(nv_values, dtype=DTYPE, device=DEVICE)
-        # Clamp to minimum noise floor to avoid numerical issues
         train_Yvar = torch.clamp(train_Yvar, min=1e-6)
         logger.info(
             "Using heteroscedastic noise (train_Yvar): mean=%.2e, range=[%.2e, %.2e]",
@@ -2711,8 +2711,8 @@ def run_gpbo_loop(
     noise_var_df = None
     if noise_variance_csv is not None:
         nv_path = Path(noise_variance_csv)
-        if nv_path.exists():
-            noise_var_df = pd.read_csv(str(nv_path), index_col=0)
+        try:
+            noise_var_df = pd.read_csv(nv_path, index_col=0)
             # Align to Y's index (conditions in merged training set)
             noise_var_df = noise_var_df.reindex(Y.index)
             n_matched = noise_var_df.dropna(how="all").shape[0]
@@ -2720,9 +2720,15 @@ def run_gpbo_loop(
                 "Loaded bootstrap noise variance: %d/%d conditions matched",
                 n_matched, len(Y),
             )
+            if n_matched < len(Y) * 0.5:
+                logger.warning(
+                    "Low noise variance match rate (%d/%d). "
+                    "Unmatched conditions will use column-mean variance.",
+                    n_matched, len(Y),
+                )
             # Fill unmatched conditions (e.g. virtual data) with column means
             noise_var_df = noise_var_df.fillna(noise_var_df.mean())
-        else:
+        except FileNotFoundError:
             logger.warning("Noise variance CSV not found: %s", nv_path)
 
     # Fit GP on active dimensions only (save/load handled inside fit_gp_botorch)

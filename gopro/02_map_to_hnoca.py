@@ -476,20 +476,17 @@ def compute_bootstrap_uncertainty(
 
     for cond, group_df in grouped:
         n_cells = len(group_df)
-        boot_means = np.empty((n_bootstrap, len(cell_types)))
         values = group_df.values  # (n_cells, n_types)
 
-        for b in range(n_bootstrap):
-            idx = rng.integers(0, n_cells, size=n_cells)
-            sample = values[idx]
-            means = sample.mean(axis=0)
-            # Renormalize to simplex
-            total = means.sum()
-            if total > 0:
-                means /= total
-            boot_means[b] = means
+        # Vectorized bootstrap: draw all indices at once
+        idx = rng.integers(0, n_cells, size=(n_bootstrap, n_cells))
+        boot_means = values[idx].mean(axis=1)  # (n_bootstrap, n_types)
+        # Renormalize each resample to the simplex
+        totals = boot_means.sum(axis=1, keepdims=True)
+        totals = np.where(totals > 0, totals, 1.0)
+        boot_means /= totals
 
-        result_rows[cond] = np.var(boot_means, axis=0, ddof=1)
+        result_rows[cond] = np.var(boot_means, axis=0, ddof=0)
 
     variance_df = pd.DataFrame.from_dict(
         result_rows, orient="index", columns=cell_types,
