@@ -17,3 +17,6 @@
 | 5 | `28e7789` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 2 quality issues in adaptive complexity: remove unused param, fail-loud thresholds |
 | final | `143f3db` | verified | ralph/production-readiness-phase2 | Bug hunter verified |
 | 6 | `af96884` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 4 quality issues in timing window encoding |
+| 7 | `af45a7f` | PASS | ralph/production-readiness-phase2 | Per-cell-type GP models (GPerturb 2025, Idea #11) — 6 new tests (547 total) |
+| 7 | `47a2f6d` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 4 quality issues in per-type GP models |
+| 7 | `72d5876` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 4 quality issues in per-type GP models |
