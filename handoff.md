@@ -1,27 +1,29 @@
-# Handoff to Iteration 6
+# Handoff to Iteration 7
 
-## Last Completed: Phase C Idea #9 — Adaptive Complexity Schedule tests + simplify fixes
-- 8 tests added covering all 3 regimes (shared/ARD/SAASBO), boundary conditions, custom thresholds, zero-dim safety
-- Simplify pass removed unused `round_number` param from `_select_kernel_complexity()`, added fail-loud thresholds
-- 534 tests passing, 0 failures
+## Last Completed: Phase C Idea #10 — Morphogen Timing Window Encoding
+- Categorical timing columns (CHIR99021_window, SAG_window, BMP4_window) added to morphogen matrix
+- MixedSingleTaskGP used when `--timing-windows` flag is set
+- 7 tests added, 541 total passing, 0 failures
 
-## Next Up: Phase C Idea #10 — Morphogen Timing Window Encoding
-- **Task**: Add temporal window categorical dimensions (early/mid/late patterning) to morphogen matrix. Use MixedSingleTaskGP for mixed continuous+categorical.
-- **Acceptance**: timing dims in training data; 3+ tests
-- **Key files**: `gopro/04_gpbo_loop.py`, `gopro/morphogen_parser.py`
-- **Reference**: `docs/plans/ideas_from_sanchis_calleja_2025.md`
+## Next Up: Phase C Idea #11 — Per-cell-type GP models
+- **Task**: Fit separate GP per cell type (MAP path, GPerturb 2025). Per-output lengthscale matrix for interpretability. Compare to current multi-output approach.
+- **Acceptance**: per-type GPs produce predictions; 4+ tests
+- **Key files**: `gopro/04_gpbo_loop.py`
+- **Reference**: `docs/plans/ideas_from_gperturb_2025.md`
 
 ## Warnings
-- Additive+interaction kernel only applies to standard SingleTaskGP path (not multi-fidelity or SAASBO)
-- Adaptive complexity overrides both `kernel_type` and `use_saasbo` when `--adaptive-complexity` is set
-- MixedSingleTaskGP requires `cat_dims` parameter — identify which columns are categorical vs continuous
+- MixedSingleTaskGP only activates on the standard GP path (not multi-fidelity, SAASBO, or TVR)
+- Timing window columns are only added when `--timing-windows` is set (not default)
+- `_compute_active_bounds()` runs BEFORE timing columns are added; timing bounds are added separately
+- Timing columns that are constant across all conditions are automatically dropped
+- The `cat_dims` parameter is passed through to `fit_gp_botorch()` — ignored when None
 - Import constants from `gopro.config` — never hardcode paths or columns
 - Use `.copy()` before mutating DataFrames passed as arguments
 
 ## Key Context
 - Branch: `ralph/production-readiness-phase2`
-- Tests: `source .venv/bin/activate && python -m pytest gopro/tests/ -v` (534 passing)
-- Task list: `ralph-task.md` (10 subtasks remaining, 5 complete)
-- Iterations 1-5: TVR, target profile refinement, FBaxis_rank, additive+interaction kernel, adaptive complexity
+- Tests: `source .venv/bin/activate && python -m pytest gopro/tests/ -v` (541 passing)
+- Task list: `ralph-task.md` (9 subtasks remaining, 6 complete)
+- Iterations 1-6: TVR, target profile refinement, FBaxis_rank, additive+interaction kernel, adaptive complexity, timing windows
 
-## Remaining: 10 tasks todo, 0 blocked, 5 complete
+## Remaining: 9 tasks todo, 0 blocked, 6 complete

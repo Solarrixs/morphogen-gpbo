@@ -32,6 +32,7 @@
 | 2026-03-16 | 521 | +11 | FBaxis_rank regionalization (Sanchis-Calleja 2025, Idea #12) |
 | 2026-03-16 | 526 | +5 | Additive+interaction kernel (NAIAD 2025, Idea #8) |
 | 2026-03-16 | 534 | +8 | Adaptive complexity schedule (NAIAD 2025, Idea #9) |
+| 2026-03-16 | 541 | +7 | Timing window encoding (Sanchis-Calleja 2025, Idea #10) |
 
 ## Iteration Log
 
@@ -108,9 +109,26 @@
 - Quality: /simplify pass fixed 3 issues — Literal type annotation for kernel_type, robust ARD detection using hasattr chain, dedup guard for additive kernel in recommendation output
 - Notes: Additive kernel = sum of d independent 1D Matern 5/2 (one per morphogen). Interaction kernel = full ARD Matern 5/2. Interaction outputscale initialized to 0.1 (prior toward additivity). Reduces effective params from O(d^2) to O(d). _extract_lengthscales extracts interaction kernel ARD lengthscales for importance ranking. Only applies to standard SingleTaskGP path (not multi-fidelity or SAASBO).
 
-## Iteration 5 — 2026-03-16
-- Task: Phase C Idea #9: Adaptive complexity schedule — auto-select kernel based on N/d ratio
+## Iteration 5 — 2026-03-16T23:58:01Z
+- Task: Phase C Idea #9: Adaptive complexity schedule tests + simplify fixes (NAIAD 2025, Idea #9)
 - Result: PASS (534 tests, 0 failures)
+- Commits:
+  - c4ca72a [ralph-5] Task 5: Adaptive complexity schedule tests (NAIAD 2025, Idea #9) — 534 tests
+  - 1fa86a1 [ralph-simplify] Fix 2 quality issues in adaptive complexity: remove unused param, fail-loud thresholds
 - Files changed:
+  - gopro/04_gpbo_loop.py | 128 ++++++++++++++++++++++++++++++++++++--- (simplify fixes: removed unused param, fail-loud thresholds)
+  - gopro/config.py | 11 ++++ (adaptive complexity constants)
+  - data/gp_recommendations_round1.csv | 8 +-- (updated)
   - gopro/tests/test_unit.py | 66 additions (8 new tests: TestAdaptiveComplexitySchedule)
-- Notes: _select_kernel_complexity() and --adaptive-complexity CLI flag already existed from prior iteration. This iteration adds 8 tests covering all 3 regimes (shared/ARD/SAASBO), boundary conditions, custom thresholds, zero-dim safety, and reason string content. No code changes needed — implementation was complete, just missing test coverage.
+- Quality: /simplify pass fixed 2 issues — removed unused `round_number` parameter from `_select_kernel_complexity()`, changed threshold assertions to fail-loud (raise ValueError) instead of silent fallback
+- Notes: `_select_kernel_complexity()` and `--adaptive-complexity` CLI flag already existed from Iteration 4. This iteration added 8 tests covering all 3 regimes (shared/ARD/SAASBO), boundary conditions, custom thresholds, zero-dim safety, and reason string content. Simplify pass cleaned up the implementation.
+
+## Iteration 6 — 2026-03-16
+- Task: Phase C Idea #10: Morphogen timing window encoding (Sanchis-Calleja 2025)
+- Result: PASS (541 tests, 0 failures)
+- Files changed:
+  - gopro/config.py | 15 additions (TIMING_WINDOW_COLUMNS, TIMING_* constants)
+  - gopro/morphogen_parser.py | 60 additions (compute_timing_windows(), _TIMING_WINDOW_LOOKUP)
+  - gopro/04_gpbo_loop.py | 40 additions (--timing-windows flag, MixedSingleTaskGP branch, cat_dims)
+  - gopro/tests/test_unit.py | 90 additions (7 new tests: TestTimingWindowEncoding)
+- Notes: Categorical timing encoding for CHIR99021, SAG, BMP4 (5 categories: not_applied/early/mid/late/full). MixedSingleTaskGP uses separate Hamming kernel for categorical dims + Matern for continuous. Only non-constant timing columns are added. Lookup table covers 13 known sub-windowed conditions; others auto-inferred from concentration.

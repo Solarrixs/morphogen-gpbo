@@ -35,6 +35,7 @@ from gopro.config import (
     KERNEL_COMPLEXITY_THRESHOLDS,
     MORPHOGEN_COLUMNS,
     PROTEIN_MW_KDA,
+    TIMING_WINDOW_COLUMNS,
     nM_to_uM,
     ng_mL_to_uM,
     get_logger,
@@ -877,6 +878,7 @@ def fit_gp_botorch(
     round_num: int = 1,
     warm_start_state: Optional[dict] = None,
     kernel_type: Literal["ard", "additive_interaction", "shared"] = "ard",
+    cat_dims: Optional[list[int]] = None,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
 
@@ -901,6 +903,10 @@ def fit_gp_botorch(
             plus a full ARD interaction kernel (NAIAD, Qin et al. ICML 2025).
             ``"shared"`` uses Matern 5/2 with a single shared lengthscale
             (fewest parameters, best for sparse data regimes).
+        cat_dims: List of column indices in X that are categorical (integer-
+            coded). When provided, uses MixedSingleTaskGP instead of
+            SingleTaskGP to handle mixed continuous+categorical inputs
+            (Sanchis-Calleja timing windows).
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -1003,6 +1009,28 @@ def fit_gp_botorch(
                 )
                 saas_models.append(m)
             model = ModelListGP(*saas_models)
+    elif cat_dims:
+        # Mixed continuous+categorical GP (timing window encoding)
+        from botorch.models import MixedSingleTaskGP
+        logger.info(
+            "Using MixedSingleTaskGP with %d categorical dims at indices %s",
+            len(cat_dims), cat_dims,
+        )
+        model = MixedSingleTaskGP(
+            train_X,
+            train_Y,
+            cat_dims=cat_dims,
+            input_transform=Normalize(
+                d=train_X.shape[1],
+                indices=[i for i in range(train_X.shape[1]) if i not in cat_dims],
+            ),
+            outcome_transform=Standardize(m=train_Y.shape[1]),
+        )
+        # Warm-start if requested
+        if warm_start:
+            load_gp_state(model, gp_state_path)
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
     else:
         # Build kernel based on kernel_type
         covar_module = None
@@ -1761,6 +1789,7 @@ def run_gpbo_loop(
     multi_objective: bool = False,
     n_duplicates: int = 0,
     adaptive_complexity: bool = False,
+    timing_windows: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -1806,6 +1835,9 @@ def run_gpbo_loop(
         adaptive_complexity: If True, auto-select kernel complexity based on
             the N/d ratio (NAIAD, Qin et al. ICML 2025). Overrides
             ``kernel_type`` and ``use_saasbo``. (default: False)
+        timing_windows: If True, append categorical timing window columns
+            to the training data and use MixedSingleTaskGP for mixed
+            continuous+categorical inputs (Sanchis-Calleja et al. 2025).
 
     Returns:
         DataFrame of recommended next experiments.
@@ -1880,6 +1912,31 @@ def run_gpbo_loop(
     X_active = X[active_cols]
     logger.info("Active X shape: %s (from %s)", X_active.shape, X.shape)
 
+    # Append categorical timing window columns if requested
+    timing_cat_dims = None
+    if timing_windows:
+        from gopro.morphogen_parser import compute_timing_windows
+        from gopro.config import TIMING_FULL
+        tw_df = compute_timing_windows(list(X_active.index))
+        # Only keep timing columns with >1 unique value (drop constant ones)
+        tw_active = tw_df.loc[:, tw_df.nunique() > 1]
+        if tw_active.shape[1] > 0:
+            X_active = X_active.copy()
+            for col in tw_active.columns:
+                X_active[col] = tw_active[col].values
+                # Add bounds for categorical columns (0..TIMING_FULL)
+                active_bounds[col] = (0.0, float(TIMING_FULL))
+            # Record indices of categorical columns for MixedSingleTaskGP
+            timing_cat_dims = [
+                list(X_active.columns).index(col) for col in tw_active.columns
+            ]
+            logger.info(
+                "Timing windows: added %d categorical dims %s at indices %s",
+                len(timing_cat_dims), list(tw_active.columns), timing_cat_dims,
+            )
+        else:
+            logger.warning("Timing windows: all timing columns are constant; skipping")
+
     # Adaptive complexity: auto-select kernel based on N/d ratio
     effective_kernel_type = kernel_type
     effective_saasbo = use_saasbo
@@ -1923,6 +1980,7 @@ def run_gpbo_loop(
             warm_start=warm_start,
             round_num=round_num,
             kernel_type=effective_kernel_type,
+            cat_dims=timing_cat_dims,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -2020,7 +2078,12 @@ def run_gpbo_loop(
             for i, col in enumerate(X_active.columns):
                 if i < len(ls):
                     diagnostics[f"lengthscale_{col}"] = float(ls[i])
-        diagnostics["model_type"] = "saasbo" if effective_saasbo else "map"
+        if timing_cat_dims:
+            diagnostics["model_type"] = "mixed_categorical"
+        elif effective_saasbo:
+            diagnostics["model_type"] = "saasbo"
+        else:
+            diagnostics["model_type"] = "map"
     except (AttributeError, RuntimeError):
         pass
 
@@ -2098,6 +2161,9 @@ if __name__ == "__main__":
     parser.add_argument("--adaptive-complexity", action="store_true",
                         help="Auto-select kernel complexity based on N/d ratio (NAIAD 2025). "
                              "Overrides --kernel and --saasbo.")
+    parser.add_argument("--timing-windows", action="store_true",
+                        help="Append categorical timing window columns (early/mid/late) to "
+                             "morphogen matrix and use MixedSingleTaskGP (Sanchis-Calleja 2025)")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -2265,6 +2331,7 @@ if __name__ == "__main__":
         multi_objective=args.multi_objective,
         n_duplicates=args.n_duplicates,
         adaptive_complexity=args.adaptive_complexity,
+        timing_windows=args.timing_windows,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

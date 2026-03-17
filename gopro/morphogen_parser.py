@@ -23,6 +23,13 @@ import pandas as pd
 from gopro.config import (
     MORPHOGEN_COLUMNS,
     PROTEIN_MW_KDA,
+    TIMING_WINDOW_MORPHOGENS,
+    TIMING_WINDOW_COLUMNS,
+    TIMING_NOT_APPLIED,
+    TIMING_EARLY,
+    TIMING_MID,
+    TIMING_LATE,
+    TIMING_FULL,
     nM_to_uM,
     ng_mL_to_uM,
     get_logger,
@@ -433,6 +440,70 @@ ALL_CONDITIONS: list[str] = sorted(_CONDITION_PARSERS.keys())
 
 SAG_SECONDARY_CONDITIONS: list[str] = ["SAG_50nM", "SAG_2uM"]
 """SAG secondary screen conditions (non-duplicate only)."""
+
+
+# ==============================================================================
+# Timing window encoding (Sanchis-Calleja et al. 2025)
+# ==============================================================================
+# Maps condition names to categorical timing windows for morphogens with
+# temporal variation. Window categories are defined in config.py:
+#   0=not applied, 1=early (D6-11), 2=mid (D11-16), 3=late (D16-21), 4=full (D6-21)
+#
+# Only morphogens with observed timing variation get columns:
+#   CHIR99021, SAG, BMP4
+
+_TIMING_WINDOW_LOOKUP: dict[str, dict[str, int]] = {
+    # --- Conditions with CHIR sub-windows ---
+    "CHIR-d6-11":        {"CHIR99021": TIMING_EARLY, "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
+    "CHIR-d11-16":       {"CHIR99021": TIMING_MID,   "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
+    "CHIR-d16-21":       {"CHIR99021": TIMING_LATE,  "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
+    "CHIR switch IWP2":  {"CHIR99021": TIMING_EARLY, "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
+    "IWP2 switch CHIR":  {"CHIR99021": TIMING_LATE,  "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
+    # --- Conditions with SAG sub-windows ---
+    "SAG-d6-11":         {"CHIR99021": TIMING_NOT_APPLIED, "SAG": TIMING_EARLY, "BMP4": TIMING_NOT_APPLIED},
+    "SAG-d11-16":        {"CHIR99021": TIMING_NOT_APPLIED, "SAG": TIMING_MID,   "BMP4": TIMING_NOT_APPLIED},
+    "SAG-d16-21":        {"CHIR99021": TIMING_NOT_APPLIED, "SAG": TIMING_LATE,  "BMP4": TIMING_NOT_APPLIED},
+    "CHIR-SAGd10-21":    {"CHIR99021": TIMING_FULL,        "SAG": TIMING_LATE,  "BMP4": TIMING_NOT_APPLIED},
+    "CHIR-SAG-d16-21":   {"CHIR99021": TIMING_LATE,        "SAG": TIMING_LATE,  "BMP4": TIMING_NOT_APPLIED},
+    "SAG-CHIR-d16-21":   {"CHIR99021": TIMING_LATE,        "SAG": TIMING_FULL,  "BMP4": TIMING_NOT_APPLIED},
+    "SAG-CHIRd10-21":    {"CHIR99021": TIMING_LATE,        "SAG": TIMING_FULL,  "BMP4": TIMING_NOT_APPLIED},
+    # --- BMP4 sub-windows ---
+    "BMP4 CHIR d11-16":  {"CHIR99021": TIMING_MID,  "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_MID},
+}
+
+
+def compute_timing_windows(conditions: list[str]) -> pd.DataFrame:
+    """Compute categorical timing window encoding for a list of conditions.
+
+    For each condition and each timing-variable morphogen, assigns a
+    categorical value indicating during which temporal window the
+    morphogen is applied. This enables the GP to distinguish protocols
+    that differ only in timing (Sanchis-Calleja et al. 2025).
+
+    Args:
+        conditions: List of condition name strings.
+
+    Returns:
+        DataFrame of shape (len(conditions), len(TIMING_WINDOW_COLUMNS))
+        with integer-coded categorical values.
+    """
+    rows = []
+    for cond in conditions:
+        if cond in _TIMING_WINDOW_LOOKUP:
+            tw = _TIMING_WINDOW_LOOKUP[cond]
+        else:
+            # Infer from concentration: if morphogen is active, assign FULL;
+            # if zero, assign NOT_APPLIED.
+            vec = parse_condition_name(cond)
+            tw = {}
+            for morph in TIMING_WINDOW_MORPHOGENS:
+                conc_col = f"{morph}_uM"
+                tw[morph] = TIMING_FULL if vec.get(conc_col, 0.0) > 0 else TIMING_NOT_APPLIED
+        rows.append({
+            f"{morph}_window": tw[morph]
+            for morph in TIMING_WINDOW_MORPHOGENS
+        })
+    return pd.DataFrame(rows, index=conditions, columns=TIMING_WINDOW_COLUMNS)
 
 
 # ==============================================================================

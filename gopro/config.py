@@ -150,6 +150,24 @@ KERNEL_COMPLEXITY_THRESHOLDS: dict[str, float] = {
                       # N/d ≥ 15 → SAASBO
 }
 
+# --- Morphogen timing window encoding (Sanchis-Calleja et al. 2025) ---
+# Categorical encoding for when each morphogen is applied during the
+# standard patterning window (Day 6-21).
+TIMING_NOT_APPLIED = 0   # morphogen not used in this condition
+TIMING_EARLY = 1          # Day 6-11 only
+TIMING_MID = 2            # Day 11-16 only
+TIMING_LATE = 3            # Day 16-21 only
+TIMING_FULL = 4            # Full window (Day 6-21)
+
+# Morphogens with observed timing variation in the Amin/Kelley dataset.
+# These get categorical timing columns when --timing-windows is enabled.
+TIMING_WINDOW_MORPHOGENS: list[str] = ["CHIR99021", "SAG", "BMP4"]
+
+# Column names for timing window categoricals
+TIMING_WINDOW_COLUMNS: list[str] = [
+    f"{m}_window" for m in TIMING_WINDOW_MORPHOGENS
+]
+
 # --- Gruffi stress-filtering defaults ---
 GRUFFI_DEFAULT_THRESHOLD = 0.15
 GRUFFI_DEFAULT_RESOLUTION = 2.0

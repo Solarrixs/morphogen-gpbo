@@ -2002,3 +2002,101 @@ class TestAdaptiveComplexitySchedule:
         assert "N=48" in result["reason"]
         assert "d=8" in result["reason"]
         assert "N/d=" in result["reason"]
+
+
+class TestTimingWindowEncoding:
+    """Tests for morphogen timing window categorical encoding (Sanchis-Calleja 2025, Idea #10)."""
+
+    def test_compute_timing_windows_shape(self):
+        """Output shape should match (n_conditions, n_timing_cols)."""
+        from gopro.morphogen_parser import compute_timing_windows, ALL_CONDITIONS
+        from gopro.config import TIMING_WINDOW_COLUMNS
+        tw = compute_timing_windows(ALL_CONDITIONS)
+        assert tw.shape == (len(ALL_CONDITIONS), len(TIMING_WINDOW_COLUMNS))
+        assert list(tw.columns) == TIMING_WINDOW_COLUMNS
+
+    def test_timing_windows_known_conditions(self):
+        """Conditions with known sub-windows should get correct categorical values."""
+        from gopro.morphogen_parser import compute_timing_windows
+        from gopro.config import (
+            TIMING_EARLY, TIMING_MID, TIMING_LATE, TIMING_FULL, TIMING_NOT_APPLIED,
+        )
+        tw = compute_timing_windows(["CHIR-d6-11", "CHIR-d11-16", "CHIR-d16-21", "CHIR1.5"])
+        # CHIR-d6-11: CHIR=early, SAG=not applied, BMP4=not applied
+        assert tw.loc["CHIR-d6-11", "CHIR99021_window"] == TIMING_EARLY
+        assert tw.loc["CHIR-d6-11", "SAG_window"] == TIMING_NOT_APPLIED
+        # CHIR-d11-16: CHIR=mid
+        assert tw.loc["CHIR-d11-16", "CHIR99021_window"] == TIMING_MID
+        # CHIR-d16-21: CHIR=late
+        assert tw.loc["CHIR-d16-21", "CHIR99021_window"] == TIMING_LATE
+        # CHIR1.5: CHIR=full window (default for non-sub-windowed conditions)
+        assert tw.loc["CHIR1.5", "CHIR99021_window"] == TIMING_FULL
+
+    def test_timing_windows_sag_conditions(self):
+        """SAG sub-window conditions should be correctly encoded."""
+        from gopro.morphogen_parser import compute_timing_windows
+        from gopro.config import TIMING_EARLY, TIMING_MID, TIMING_LATE, TIMING_FULL
+        tw = compute_timing_windows(["SAG-d6-11", "SAG-d11-16", "SAG-d16-21"])
+        assert tw.loc["SAG-d6-11", "SAG_window"] == TIMING_EARLY
+        assert tw.loc["SAG-d11-16", "SAG_window"] == TIMING_MID
+        assert tw.loc["SAG-d16-21", "SAG_window"] == TIMING_LATE
+
+    def test_timing_windows_not_applied(self):
+        """Conditions without a morphogen should get TIMING_NOT_APPLIED."""
+        from gopro.morphogen_parser import compute_timing_windows
+        from gopro.config import TIMING_NOT_APPLIED, TIMING_FULL
+        # DAPT uses neither CHIR, SAG, nor BMP4
+        tw = compute_timing_windows(["DAPT"])
+        assert tw.loc["DAPT", "CHIR99021_window"] == TIMING_NOT_APPLIED
+        assert tw.loc["DAPT", "SAG_window"] == TIMING_NOT_APPLIED
+        assert tw.loc["DAPT", "BMP4_window"] == TIMING_NOT_APPLIED
+
+    def test_timing_windows_bmp4_subwindow(self):
+        """BMP4 CHIR d11-16 should have BMP4=mid, CHIR=mid."""
+        from gopro.morphogen_parser import compute_timing_windows
+        from gopro.config import TIMING_MID
+        tw = compute_timing_windows(["BMP4 CHIR d11-16"])
+        assert tw.loc["BMP4 CHIR d11-16", "BMP4_window"] == TIMING_MID
+        assert tw.loc["BMP4 CHIR d11-16", "CHIR99021_window"] == TIMING_MID
+
+    def test_timing_windows_integer_coded(self):
+        """All timing window values should be integers in [0, 4]."""
+        from gopro.morphogen_parser import compute_timing_windows, ALL_CONDITIONS
+        tw = compute_timing_windows(ALL_CONDITIONS)
+        for col in tw.columns:
+            assert tw[col].between(0, 4).all(), f"Column {col} has values outside [0, 4]"
+
+    def test_fit_gp_with_cat_dims(self):
+        """MixedSingleTaskGP should fit successfully with categorical timing dims."""
+        from botorch.models import MixedSingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+        from gpytorch.mlls import ExactMarginalLogLikelihood
+        from botorch.fit import fit_gpytorch_mll
+        import torch
+
+        np.random.seed(42)
+        n, d_cont = 20, 3
+        X_cont = np.random.rand(n, d_cont)
+        # Add one categorical column with values in {0, 1, 2, 3, 4}
+        X_cat = np.random.randint(0, 5, size=(n, 1)).astype(float)
+        X = np.hstack([X_cont, X_cat])
+        Y = np.random.rand(n, 2)
+
+        train_X = torch.tensor(X, dtype=torch.float64)
+        train_Y = torch.tensor(Y, dtype=torch.float64)
+
+        cat_dims = [3]  # last column is categorical
+        cont_indices = [i for i in range(4) if i not in cat_dims]
+        model = MixedSingleTaskGP(
+            train_X, train_Y,
+            cat_dims=cat_dims,
+            input_transform=Normalize(d=4, indices=cont_indices),
+            outcome_transform=Standardize(m=2),
+        )
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+
+        # Model should produce predictions
+        test_X = torch.tensor([[0.5, 0.5, 0.5, 2.0]], dtype=torch.float64)
+        posterior = model.posterior(test_X)
+        assert posterior.mean.shape == (1, 2)
