@@ -2100,3 +2100,152 @@ class TestTimingWindowEncoding:
         test_X = torch.tensor([[0.5, 0.5, 0.5, 2.0]], dtype=torch.float64)
         posterior = model.posterior(test_X)
         assert posterior.mean.shape == (1, 2)
+
+
+class TestPerTypeGP:
+    """Tests for per-cell-type GP models (GPerturb, Xing & Yau 2025, Idea #11)."""
+
+    def test_per_type_gp_produces_model_list(self, tmp_path, monkeypatch):
+        """--per-type-gp should produce a ModelListGP with one model per output."""
+        import torch
+        from botorch.models import ModelListGP
+
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+
+        np.random.seed(42)
+        n, d = 20, 4
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=[f"m{i}" for i in range(d)],
+        )
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=n),
+            columns=["ct_A", "ct_B", "ct_C"],
+        )
+
+        model, train_X, train_Y, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, round_num=1, per_type_gp=True,
+        )
+
+        assert isinstance(model, ModelListGP)
+        # ILR: 3 cell types -> 2 ILR components -> 2 sub-models
+        assert len(model.models) == 2
+        assert cols == ["ct_A", "ct_B", "ct_C"]
+
+    def test_per_type_gp_predictions(self, tmp_path, monkeypatch):
+        """Per-type GP should produce correct-shaped predictions."""
+        import torch
+
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+
+        np.random.seed(42)
+        n, d = 20, 4
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=[f"m{i}" for i in range(d)],
+        )
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=n),
+            columns=["ct_A", "ct_B", "ct_C"],
+        )
+
+        model, train_X, train_Y, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, round_num=1, per_type_gp=True,
+        )
+
+        model.eval()
+        with torch.no_grad():
+            test_X = torch.tensor(
+                np.random.rand(5, d), dtype=torch.float64
+            )
+            posterior = model.posterior(test_X)
+            mean = posterior.mean
+            # ModelListGP concatenates outputs: shape (5, 2)
+            assert mean.shape == (5, 2)
+
+    def test_per_output_lengthscale_matrix(self, tmp_path, monkeypatch):
+        """_extract_per_output_lengthscales should return (d x n_outputs) matrix."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+
+        np.random.seed(42)
+        n, d = 20, 4
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=[f"m{i}" for i in range(d)],
+        )
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(3), size=n),
+            columns=["ct_A", "ct_B", "ct_C"],
+        )
+
+        model, train_X, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, round_num=1, per_type_gp=True,
+        )
+
+        ls_matrix = step04._extract_per_output_lengthscales(model, d)
+        assert ls_matrix is not None
+        assert ls_matrix.shape == (d, 2)  # d morphogens x 2 ILR components
+        assert np.all(ls_matrix > 0)
+
+    def test_per_output_lengthscales_differ_across_outputs(self, tmp_path, monkeypatch):
+        """Each output should have different lengthscales (not shared)."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+
+        np.random.seed(42)
+        n, d = 25, 3
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=[f"m{i}" for i in range(d)],
+        )
+        # Create Y where different outputs depend on different inputs
+        Y_vals = np.column_stack([
+            np.sin(2 * np.pi * X["m0"].values) * 0.3 + 0.5,
+            np.cos(2 * np.pi * X["m1"].values) * 0.3 + 0.5,
+            np.ones(n) * 0.0,  # remainder to sum to 1
+        ])
+        Y_vals[:, 2] = 1.0 - Y_vals[:, 0] - Y_vals[:, 1]
+        Y_vals = np.clip(Y_vals, 0.01, 0.98)
+        row_sums = Y_vals.sum(axis=1, keepdims=True)
+        Y_vals = Y_vals / row_sums
+        Y = pd.DataFrame(Y_vals, columns=["ct_A", "ct_B", "ct_C"])
+
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, round_num=1, per_type_gp=True,
+        )
+
+        ls_matrix = step04._extract_per_output_lengthscales(model, d)
+        assert ls_matrix is not None
+        # Lengthscales across the two ILR components should not be identical
+        assert not np.allclose(ls_matrix[:, 0], ls_matrix[:, 1], atol=0.01)
+
+    def test_per_type_gp_single_output_fallback(self, tmp_path, monkeypatch):
+        """With single output, per_type_gp should fall back to standard GP."""
+        import torch
+        from botorch.models import SingleTaskGP
+
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+
+        np.random.seed(42)
+        n, d = 20, 3
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=[f"m{i}" for i in range(d)],
+        )
+        Y = pd.DataFrame(
+            np.random.rand(n, 1),
+            columns=["ct_A"],
+        )
+
+        model, _, _, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, round_num=1, per_type_gp=True,
+        )
+
+        # Single output + per_type_gp: Y.shape[1]=1, condition
+        # `per_type_gp and train_Y.shape[1] > 1` is False → falls to else
+        assert isinstance(model, SingleTaskGP)
+        assert cols == ["ct_A"]
+
+    def test_extract_per_output_on_non_modellist_returns_none(self):
+        """_extract_per_output_lengthscales returns None for non-ModelListGP."""
+        result = step04._extract_per_output_lengthscales(object(), 5)
+        assert result is None

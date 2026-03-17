@@ -517,6 +517,29 @@ def _extract_lengthscales(model, n_input_dims: int):
     return None
 
 
+def _extract_per_output_lengthscales(model, n_input_dims: int):
+    """Extract per-output lengthscale matrix from a ModelListGP.
+
+    Returns a (n_input_dims x n_outputs) numpy array where entry [d, k]
+    is the ARD lengthscale of morphogen d for output k. Shorter lengthscales
+    mean higher sensitivity. Returns None if extraction fails.
+
+    This matrix answers "which morphogens drive which cell types?" and is
+    the primary interpretability output of per-type GP models (GPerturb,
+    Xing & Yau, Nature Communications 2025).
+    """
+    if not hasattr(model, 'models'):
+        return None
+    all_ls = []
+    for sub_model in model.models:
+        ls = _extract_lengthscales(sub_model, n_input_dims)
+        if ls is None:
+            return None
+        all_ls.append(ls)
+    # Stack: each row is a sub-model's lengthscales → transpose to (d x n_outputs)
+    return np.column_stack(all_ls)
+
+
 def save_gp_state(model, path: Path) -> None:
     """Save GP hyperparameters for warm-starting next round.
 
@@ -880,6 +903,7 @@ def fit_gp_botorch(
     warm_start_state: Optional[dict] = None,
     kernel_type: Literal["ard", "additive_interaction", "shared"] = "ard",
     cat_dims: Optional[list[int]] = None,
+    per_type_gp: bool = False,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, or multi-fidelity).
 
@@ -908,6 +932,10 @@ def fit_gp_botorch(
             coded). When provided, uses MixedSingleTaskGP instead of
             SingleTaskGP to handle mixed continuous+categorical inputs
             (Sanchis-Calleja timing windows).
+        per_type_gp: If True, fit separate GP per output dimension (MAP path
+            only). Produces a ModelListGP with per-output lengthscales for
+            interpretability (GPerturb, Xing & Yau 2025). Each sub-model
+            gets its own Matern 5/2 + ARD kernel.
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -1037,6 +1065,27 @@ def fit_gp_botorch(
             load_gp_state(model, gp_state_path)
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
         fit_gpytorch_mll(mll)
+    elif per_type_gp and train_Y.shape[1] > 1:
+        # Per-cell-type GP models (GPerturb, Xing & Yau 2025):
+        # Fit separate SingleTaskGP per output → ModelListGP.
+        # Each sub-model has its own ARD lengthscales for interpretability.
+        from botorch.models import ModelListGP
+        n_outputs = train_Y.shape[1]
+        logger.info("Using per-type GP (ModelListGP, %d outputs, MAP)", n_outputs)
+        per_type_models = []
+        for i in range(n_outputs):
+            m = SingleTaskGP(
+                train_X,
+                train_Y[:, i:i+1],
+                input_transform=Normalize(d=train_X.shape[1]),
+                outcome_transform=Standardize(m=1),
+            )
+            _set_dim_scaled_lengthscale_prior(m, train_X.shape[1])
+            mll = ExactMarginalLogLikelihood(m.likelihood, m)
+            fit_gpytorch_mll(mll)
+            per_type_models.append(m)
+            logger.info("  Fitted per-type GP %d/%d", i + 1, n_outputs)
+        model = ModelListGP(*per_type_models)
     else:
         # Build kernel based on kernel_type
         covar_module = None
@@ -1088,6 +1137,22 @@ def fit_gp_botorch(
             logger.info("  %s: %.4f", morph, imp)
     else:
         logger.info("(lengthscales not directly accessible for this model type)")
+
+    # Per-output lengthscale matrix for per-type GP interpretability
+    if per_type_gp and hasattr(model, 'models'):
+        ls_matrix = _extract_per_output_lengthscales(model, train_X.shape[1])
+        if ls_matrix is not None:
+            ls_df = pd.DataFrame(
+                ls_matrix,
+                index=X.columns[:ls_matrix.shape[0]] if ls_matrix.shape[0] <= len(X.columns) else None,
+                columns=cell_type_cols[:ls_matrix.shape[1]] if ls_matrix.shape[1] <= len(cell_type_cols) else None,
+            )
+            logger.info("Per-output lengthscale matrix (morphogen x cell type):")
+            # Log top-3 most sensitive morphogens per cell type
+            for ct in ls_df.columns:
+                sensitivity = (1.0 / ls_df[ct]).sort_values(ascending=False)
+                top3 = ", ".join(f"{m}={v:.3f}" for m, v in sensitivity.head(3).items())
+                logger.info("  %s: %s", ct, top3)
 
     return model, train_X, train_Y, cell_type_cols
 
@@ -1796,6 +1861,7 @@ def run_gpbo_loop(
     n_duplicates: int = 0,
     adaptive_complexity: bool = False,
     timing_windows: bool = False,
+    per_type_gp: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -1844,6 +1910,11 @@ def run_gpbo_loop(
         timing_windows: If True, append categorical timing window columns
             to the training data and use MixedSingleTaskGP for mixed
             continuous+categorical inputs (Sanchis-Calleja et al. 2025).
+        per_type_gp: If True, fit separate GP per cell type (or ILR
+            component) using ModelListGP instead of a single multi-output GP.
+            Produces per-output lengthscale matrix for interpretability
+            (GPerturb, Xing & Yau 2025). Only applies to the standard MAP
+            path (not SAASBO, multi-fidelity, or TVR). (default: False)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -1986,6 +2057,7 @@ def run_gpbo_loop(
             round_num=round_num,
             kernel_type=effective_kernel_type,
             cat_dims=timing_cat_dims,
+            per_type_gp=per_type_gp,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -2169,6 +2241,10 @@ if __name__ == "__main__":
     parser.add_argument("--timing-windows", action="store_true",
                         help="Append categorical timing window columns (early/mid/late) to "
                              "morphogen matrix and use MixedSingleTaskGP (Sanchis-Calleja 2025)")
+    parser.add_argument("--per-type-gp", action="store_true",
+                        help="Fit separate GP per cell type (ModelListGP) instead of single "
+                             "multi-output GP. Produces per-output lengthscale matrix for "
+                             "interpretability (GPerturb, Xing & Yau 2025)")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -2337,6 +2413,7 @@ if __name__ == "__main__":
         n_duplicates=args.n_duplicates,
         adaptive_complexity=args.adaptive_complexity,
         timing_windows=args.timing_windows,
+        per_type_gp=args.per_type_gp,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
