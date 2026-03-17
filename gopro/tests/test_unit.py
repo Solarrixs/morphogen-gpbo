@@ -2105,27 +2105,27 @@ class TestTimingWindowEncoding:
 class TestPerTypeGP:
     """Tests for per-cell-type GP models (GPerturb, Xing & Yau 2025, Idea #11)."""
 
-    def test_per_type_gp_produces_model_list(self, tmp_path, monkeypatch):
-        """--per-type-gp should produce a ModelListGP with one model per output."""
-        import torch
-        from botorch.models import ModelListGP
-
+    @staticmethod
+    def _fit_per_type_model(tmp_path, monkeypatch):
+        """Shared setup: fit a per-type GP model (reused across tests)."""
         monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
-
         np.random.seed(42)
         n, d = 20, 4
-        X = pd.DataFrame(
-            np.random.rand(n, d),
-            columns=[f"m{i}" for i in range(d)],
-        )
+        X = pd.DataFrame(np.random.rand(n, d), columns=[f"m{i}" for i in range(d)])
         Y = pd.DataFrame(
             np.random.dirichlet(np.ones(3), size=n),
             columns=["ct_A", "ct_B", "ct_C"],
         )
-
         model, train_X, train_Y, cols = step04.fit_gp_botorch(
             X, Y, use_ilr=True, round_num=1, per_type_gp=True,
         )
+        return model, train_X, train_Y, cols, X, d
+
+    def test_per_type_gp_produces_model_list(self, tmp_path, monkeypatch):
+        """--per-type-gp should produce a ModelListGP with one model per output."""
+        from botorch.models import ModelListGP
+
+        model, _, _, cols, _, _ = self._fit_per_type_model(tmp_path, monkeypatch)
 
         assert isinstance(model, ModelListGP)
         # ILR: 3 cell types -> 2 ILR components -> 2 sub-models
@@ -2136,22 +2136,7 @@ class TestPerTypeGP:
         """Per-type GP should produce correct-shaped predictions."""
         import torch
 
-        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
-
-        np.random.seed(42)
-        n, d = 20, 4
-        X = pd.DataFrame(
-            np.random.rand(n, d),
-            columns=[f"m{i}" for i in range(d)],
-        )
-        Y = pd.DataFrame(
-            np.random.dirichlet(np.ones(3), size=n),
-            columns=["ct_A", "ct_B", "ct_C"],
-        )
-
-        model, train_X, train_Y, cols = step04.fit_gp_botorch(
-            X, Y, use_ilr=True, round_num=1, per_type_gp=True,
-        )
+        model, _, _, _, _, d = self._fit_per_type_model(tmp_path, monkeypatch)
 
         model.eval()
         with torch.no_grad():
@@ -2165,22 +2150,7 @@ class TestPerTypeGP:
 
     def test_per_output_lengthscale_matrix(self, tmp_path, monkeypatch):
         """_extract_per_output_lengthscales should return (d x n_outputs) matrix."""
-        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
-
-        np.random.seed(42)
-        n, d = 20, 4
-        X = pd.DataFrame(
-            np.random.rand(n, d),
-            columns=[f"m{i}" for i in range(d)],
-        )
-        Y = pd.DataFrame(
-            np.random.dirichlet(np.ones(3), size=n),
-            columns=["ct_A", "ct_B", "ct_C"],
-        )
-
-        model, train_X, _, _ = step04.fit_gp_botorch(
-            X, Y, use_ilr=True, round_num=1, per_type_gp=True,
-        )
+        model, _, _, _, _, d = self._fit_per_type_model(tmp_path, monkeypatch)
 
         ls_matrix = step04._extract_per_output_lengthscales(model, d)
         assert ls_matrix is not None
@@ -2249,3 +2219,19 @@ class TestPerTypeGP:
         """_extract_per_output_lengthscales returns None for non-ModelListGP."""
         result = step04._extract_per_output_lengthscales(object(), 5)
         assert result is None
+
+    def test_per_type_gp_rejects_saasbo(self, tmp_path, monkeypatch):
+        """per_type_gp + use_saasbo should raise ValueError."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        X = pd.DataFrame(np.random.rand(10, 3), columns=["a", "b", "c"])
+        Y = pd.DataFrame(np.random.rand(10, 2), columns=["ct_A", "ct_B"])
+        with pytest.raises(ValueError, match="per_type_gp is incompatible with use_saasbo"):
+            step04.fit_gp_botorch(X, Y, use_saasbo=True, per_type_gp=True, round_num=1)
+
+    def test_per_type_gp_rejects_cat_dims(self, tmp_path, monkeypatch):
+        """per_type_gp + cat_dims should raise ValueError."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        X = pd.DataFrame(np.random.rand(10, 3), columns=["a", "b", "c"])
+        Y = pd.DataFrame(np.random.rand(10, 2), columns=["ct_A", "ct_B"])
+        with pytest.raises(ValueError, match="per_type_gp is incompatible with cat_dims"):
+            step04.fit_gp_botorch(X, Y, cat_dims=[0], per_type_gp=True, round_num=1)

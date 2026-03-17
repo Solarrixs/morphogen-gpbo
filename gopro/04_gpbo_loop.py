@@ -976,6 +976,16 @@ def fit_gp_botorch(
     logger.info("Fitting BoTorch GP...")
     logger.info("X: %s, Y: %s", train_X.shape, train_Y.shape)
 
+    # Validate mutually exclusive fitting strategies
+    if per_type_gp and use_saasbo:
+        raise ValueError(
+            "per_type_gp is incompatible with use_saasbo — choose one fitting strategy"
+        )
+    if per_type_gp and cat_dims:
+        raise ValueError(
+            "per_type_gp is incompatible with cat_dims (MixedSingleTaskGP) — choose one fitting strategy"
+        )
+
     # Check if we have fidelity column
     has_fidelity = "fidelity" in X.columns
     fidelity_idx = list(X.columns).index("fidelity") if has_fidelity else None
@@ -985,6 +995,8 @@ def fit_gp_botorch(
         logger.info("Using multi-fidelity GP (fidelity column detected)")
         if use_saasbo:
             logger.info("SAASBO ignored — multi-fidelity takes priority")
+        if per_type_gp:
+            logger.info("per_type_gp ignored — multi-fidelity takes priority")
         model = SingleTaskMultiFidelityGP(
             train_X,
             train_Y,
@@ -1142,17 +1154,20 @@ def fit_gp_botorch(
     if per_type_gp and hasattr(model, 'models'):
         ls_matrix = _extract_per_output_lengthscales(model, train_X.shape[1])
         if ls_matrix is not None:
+            # Label columns as ILR components (not cell types) since each
+            # ILR component is a linear combination of all cell types
+            ilr_labels = [f"ILR_{j+1}" for j in range(ls_matrix.shape[1])]
             ls_df = pd.DataFrame(
                 ls_matrix,
                 index=X.columns[:ls_matrix.shape[0]] if ls_matrix.shape[0] <= len(X.columns) else None,
-                columns=cell_type_cols[:ls_matrix.shape[1]] if ls_matrix.shape[1] <= len(cell_type_cols) else None,
+                columns=ilr_labels,
             )
-            logger.info("Per-output lengthscale matrix (morphogen x cell type):")
-            # Log top-3 most sensitive morphogens per cell type
-            for ct in ls_df.columns:
-                sensitivity = (1.0 / ls_df[ct]).sort_values(ascending=False)
+            logger.info("Per-output lengthscale matrix (morphogen x ILR component):")
+            # Log top-3 most sensitive morphogens per ILR component
+            for comp in ls_df.columns:
+                sensitivity = (1.0 / ls_df[comp].clip(lower=1e-6)).sort_values(ascending=False)
                 top3 = ", ".join(f"{m}={v:.3f}" for m, v in sensitivity.head(3).items())
-                logger.info("  %s: %s", ct, top3)
+                logger.info("  %s: %s", comp, top3)
 
     return model, train_X, train_Y, cell_type_cols
 
