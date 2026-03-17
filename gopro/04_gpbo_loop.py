@@ -35,6 +35,7 @@ from gopro.config import (
     KERNEL_COMPLEXITY_THRESHOLDS,
     MORPHOGEN_COLUMNS,
     PROTEIN_MW_KDA,
+    TIMING_FULL,
     TIMING_WINDOW_COLUMNS,
     nM_to_uM,
     ng_mL_to_uM,
@@ -971,6 +972,11 @@ def fit_gp_botorch(
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
         fit_gpytorch_mll(mll)
     elif use_saasbo:
+        if cat_dims:
+            logger.warning(
+                "SAASBO does not support categorical dims; ignoring cat_dims=%s",
+                cat_dims,
+            )
         from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
         from botorch.fit import fit_fully_bayesian_model_nuts
 
@@ -1916,7 +1922,6 @@ def run_gpbo_loop(
     timing_cat_dims = None
     if timing_windows:
         from gopro.morphogen_parser import compute_timing_windows
-        from gopro.config import TIMING_FULL
         tw_df = compute_timing_windows(list(X_active.index))
         # Only keep timing columns with >1 unique value (drop constant ones)
         tw_active = tw_df.loc[:, tw_df.nunique() > 1]
@@ -1928,7 +1933,7 @@ def run_gpbo_loop(
                 active_bounds[col] = (0.0, float(TIMING_FULL))
             # Record indices of categorical columns for MixedSingleTaskGP
             timing_cat_dims = [
-                list(X_active.columns).index(col) for col in tw_active.columns
+                X_active.columns.get_loc(col) for col in tw_active.columns
             ]
             logger.info(
                 "Timing windows: added %d categorical dims %s at indices %s",

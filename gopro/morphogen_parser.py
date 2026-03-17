@@ -452,23 +452,25 @@ SAG_SECONDARY_CONDITIONS: list[str] = ["SAG_50nM", "SAG_2uM"]
 # Only morphogens with observed timing variation get columns:
 #   CHIR99021, SAG, BMP4
 
+# Sparse lookup: only specify non-default windows (default = TIMING_NOT_APPLIED).
+# compute_timing_windows() fills in TIMING_NOT_APPLIED for unspecified morphogens.
 _TIMING_WINDOW_LOOKUP: dict[str, dict[str, int]] = {
     # --- Conditions with CHIR sub-windows ---
-    "CHIR-d6-11":        {"CHIR99021": TIMING_EARLY, "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
-    "CHIR-d11-16":       {"CHIR99021": TIMING_MID,   "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
-    "CHIR-d16-21":       {"CHIR99021": TIMING_LATE,  "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
-    "CHIR switch IWP2":  {"CHIR99021": TIMING_EARLY, "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
-    "IWP2 switch CHIR":  {"CHIR99021": TIMING_LATE,  "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_NOT_APPLIED},
+    "CHIR-d6-11":        {"CHIR99021": TIMING_EARLY},
+    "CHIR-d11-16":       {"CHIR99021": TIMING_MID},
+    "CHIR-d16-21":       {"CHIR99021": TIMING_LATE},
+    "CHIR switch IWP2":  {"CHIR99021": TIMING_EARLY},
+    "IWP2 switch CHIR":  {"CHIR99021": TIMING_LATE},
     # --- Conditions with SAG sub-windows ---
-    "SAG-d6-11":         {"CHIR99021": TIMING_NOT_APPLIED, "SAG": TIMING_EARLY, "BMP4": TIMING_NOT_APPLIED},
-    "SAG-d11-16":        {"CHIR99021": TIMING_NOT_APPLIED, "SAG": TIMING_MID,   "BMP4": TIMING_NOT_APPLIED},
-    "SAG-d16-21":        {"CHIR99021": TIMING_NOT_APPLIED, "SAG": TIMING_LATE,  "BMP4": TIMING_NOT_APPLIED},
-    "CHIR-SAGd10-21":    {"CHIR99021": TIMING_FULL,        "SAG": TIMING_LATE,  "BMP4": TIMING_NOT_APPLIED},
-    "CHIR-SAG-d16-21":   {"CHIR99021": TIMING_LATE,        "SAG": TIMING_LATE,  "BMP4": TIMING_NOT_APPLIED},
-    "SAG-CHIR-d16-21":   {"CHIR99021": TIMING_LATE,        "SAG": TIMING_FULL,  "BMP4": TIMING_NOT_APPLIED},
-    "SAG-CHIRd10-21":    {"CHIR99021": TIMING_LATE,        "SAG": TIMING_FULL,  "BMP4": TIMING_NOT_APPLIED},
+    "SAG-d6-11":         {"SAG": TIMING_EARLY},
+    "SAG-d11-16":        {"SAG": TIMING_MID},
+    "SAG-d16-21":        {"SAG": TIMING_LATE},
+    "CHIR-SAGd10-21":    {"CHIR99021": TIMING_FULL, "SAG": TIMING_FULL},
+    "CHIR-SAG-d16-21":   {"CHIR99021": TIMING_LATE, "SAG": TIMING_LATE},
+    "SAG-CHIR-d16-21":   {"CHIR99021": TIMING_LATE, "SAG": TIMING_FULL},
+    "SAG-CHIRd10-21":    {"CHIR99021": TIMING_LATE, "SAG": TIMING_FULL},
     # --- BMP4 sub-windows ---
-    "BMP4 CHIR d11-16":  {"CHIR99021": TIMING_MID,  "SAG": TIMING_NOT_APPLIED, "BMP4": TIMING_MID},
+    "BMP4 CHIR d11-16":  {"CHIR99021": TIMING_MID, "BMP4": TIMING_MID},
 }
 
 
@@ -490,7 +492,9 @@ def compute_timing_windows(conditions: list[str]) -> pd.DataFrame:
     rows = []
     for cond in conditions:
         if cond in _TIMING_WINDOW_LOOKUP:
-            tw = _TIMING_WINDOW_LOOKUP[cond]
+            # Sparse lookup: fill in TIMING_NOT_APPLIED for unspecified morphogens
+            tw = {morph: TIMING_NOT_APPLIED for morph in TIMING_WINDOW_MORPHOGENS}
+            tw.update(_TIMING_WINDOW_LOOKUP[cond])
         else:
             # Infer from concentration: if morphogen is active, assign FULL;
             # if zero, assign NOT_APPLIED.
