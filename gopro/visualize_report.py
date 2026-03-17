@@ -821,38 +821,21 @@ def build_convergence_diagnostics_figure(
     conv_df = conv_df.sort_values("round")
     rounds = conv_df["round"].tolist()
 
-    # Panel 1: Mean posterior std
-    if "mean_posterior_std" in conv_df.columns:
-        fig.add_trace(go.Scatter(
-            x=rounds,
-            y=conv_df["mean_posterior_std"].tolist(),
-            mode="lines+markers",
-            marker=dict(size=8, color="steelblue"),
-            line=dict(width=2, color="steelblue"),
-            name="Posterior Std",
-        ), row=1, col=1)
-
-    # Panel 2: Max acquisition value
-    if "max_acquisition_value" in conv_df.columns:
-        fig.add_trace(go.Scatter(
-            x=rounds,
-            y=conv_df["max_acquisition_value"].tolist(),
-            mode="lines+markers",
-            marker=dict(size=8, color="darkorange"),
-            line=dict(width=2, color="darkorange"),
-            name="Max Acq Value",
-        ), row=2, col=1)
-
-    # Panel 3: Recommendation spread
-    if "recommendation_spread" in conv_df.columns:
-        fig.add_trace(go.Scatter(
-            x=rounds,
-            y=conv_df["recommendation_spread"].tolist(),
-            mode="lines+markers",
-            marker=dict(size=8, color="mediumseagreen"),
-            line=dict(width=2, color="mediumseagreen"),
-            name="Rec Spread",
-        ), row=3, col=1)
+    metrics = [
+        ("mean_posterior_std", "steelblue", "Posterior Std"),
+        ("max_acquisition_value", "darkorange", "Max Acq Value"),
+        ("recommendation_spread", "mediumseagreen", "Rec Spread"),
+    ]
+    for row_idx, (col, color, name) in enumerate(metrics, start=1):
+        if col in conv_df.columns:
+            fig.add_trace(go.Scatter(
+                x=rounds,
+                y=conv_df[col].tolist(),
+                mode="lines+markers",
+                marker=dict(size=8, color=color),
+                line=dict(width=2, color=color),
+                name=name,
+            ), row=row_idx, col=1)
 
     fig.update_layout(
         title="Convergence Diagnostics",

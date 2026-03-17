@@ -2293,7 +2293,6 @@ class TestConvergenceDiagnostics:
         result = step04.compute_convergence_diagnostics(
             model=model,
             train_X=train_X,
-            train_Y=train_Y,
             recommendations=recs,
             bounds_tensor=bounds,
             columns=cols,
@@ -2305,7 +2304,6 @@ class TestConvergenceDiagnostics:
         assert "max_acquisition_value" in result
         assert "recommendation_spread" in result
         assert "suggested_batch_size" in result
-        assert "history" in result
         assert result["mean_posterior_std"] > 0
         assert result["recommendation_spread"] >= 0
 
@@ -2323,7 +2321,7 @@ class TestConvergenceDiagnostics:
 
         for rnd in [1, 2, 3]:
             result = step04.compute_convergence_diagnostics(
-                model=model, train_X=train_X, train_Y=train_Y,
+                model=model, train_X=train_X,
                 recommendations=recs, bounds_tensor=bounds,
                 columns=cols, round_num=rnd,
                 history_path=history_path,
@@ -2347,7 +2345,7 @@ class TestConvergenceDiagnostics:
 
         for _ in range(3):
             step04.compute_convergence_diagnostics(
-                model=model, train_X=train_X, train_Y=train_Y,
+                model=model, train_X=train_X,
                 recommendations=recs, bounds_tensor=bounds,
                 columns=cols, round_num=1,
                 history_path=history_path,
@@ -2383,7 +2381,7 @@ class TestConvergenceDiagnostics:
         recs["acquisition_value"] = 0.001  # very low
 
         result = step04.compute_convergence_diagnostics(
-            model=model, train_X=train_X, train_Y=train_Y,
+            model=model, train_X=train_X,
             recommendations=recs, bounds_tensor=bounds,
             columns=cols, round_num=2,
             history_path=history_path,
@@ -2406,7 +2404,7 @@ class TestConvergenceDiagnostics:
         bounds = torch.tensor([[0.0] * 3, [1.0] * 3], dtype=torch.double)
 
         result = step04.compute_convergence_diagnostics(
-            model=model, train_X=train_X, train_Y=train_Y,
+            model=model, train_X=train_X,
             recommendations=recs, bounds_tensor=bounds,
             columns=cols, round_num=1,
             history_path=tmp_path / "conv.csv",

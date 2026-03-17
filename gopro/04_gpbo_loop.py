@@ -1524,6 +1524,26 @@ def validate_fidelity_correlation(
     }
 
 
+def _append_round_to_csv(
+    history_path: Path,
+    new_df: pd.DataFrame,
+    round_num: int,
+    sort_keys: list[str],
+) -> pd.DataFrame:
+    """Append rows for a round to a persistent CSV, replacing any existing rows
+    for the same round (idempotent re-runs)."""
+    if history_path.exists():
+        history = pd.read_csv(history_path)
+        history = history[history["round"] != round_num]
+        history = pd.concat([history, new_df], ignore_index=True)
+    else:
+        history = new_df
+    history = history.sort_values(sort_keys).reset_index(drop=True)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history.to_csv(history_path, index=False)
+    return history
+
+
 def monitor_fidelity_per_round(
     val_results: dict[str, dict],
     round_num: int,
@@ -1568,20 +1588,10 @@ def monitor_fidelity_per_round(
 
     new_df = pd.DataFrame(rows)
 
-    # Load existing history and append
-    if history_path.exists():
-        history = pd.read_csv(history_path)
-        # Drop any existing rows for this round (idempotent re-runs)
-        history = history[history["round"] != round_num]
-        history = pd.concat([history, new_df], ignore_index=True)
-    else:
-        history = new_df
-
-    history = history.sort_values(["fidelity_label", "round"]).reset_index(drop=True)
-
-    # Save updated history
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    history.to_csv(history_path, index=False)
+    history = _append_round_to_csv(
+        history_path, new_df, round_num,
+        sort_keys=["fidelity_label", "round"],
+    )
     logger.info("Fidelity monitoring history saved to %s (%d rows)", history_path, len(history))
 
     # Detect degradation: correlation declining for N consecutive rounds
@@ -1623,7 +1633,6 @@ def monitor_fidelity_per_round(
 def compute_convergence_diagnostics(
     model,
     train_X: torch.Tensor,
-    train_Y: torch.Tensor,
     recommendations: pd.DataFrame,
     bounds_tensor: torch.Tensor,
     columns: list[str],
@@ -1650,8 +1659,7 @@ def compute_convergence_diagnostics(
 
     Args:
         model: Fitted BoTorch GP model.
-        train_X: Training X tensor.
-        train_Y: Training Y tensor.
+        train_X: Training X tensor (used for dimensionality and size).
         recommendations: DataFrame from ``recommend_next_experiments``.
         bounds_tensor: (2, d) bounds tensor used for normalisation.
         columns: Column names for morphogen dimensions.
@@ -1718,20 +1726,9 @@ def compute_convergence_diagnostics(
         "n_training_points": int(train_X.shape[0]),
     }
 
-    new_df = pd.DataFrame([row])
-
-    if history_path.exists():
-        history = pd.read_csv(history_path)
-        # Drop existing rows for this round (idempotent re-runs)
-        history = history[history["round"] != round_num]
-        history = pd.concat([history, new_df], ignore_index=True)
-    else:
-        history = new_df
-
-    history = history.sort_values("round").reset_index(drop=True)
-
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    history.to_csv(history_path, index=False)
+    history = _append_round_to_csv(
+        history_path, pd.DataFrame([row]), round_num, sort_keys=["round"],
+    )
     logger.info(
         "Convergence diagnostics saved to %s — posterior_std=%.4f, "
         "max_acq=%.4f, spread=%.4f",
@@ -1739,11 +1736,13 @@ def compute_convergence_diagnostics(
     )
 
     # --- 4. Adaptive batch suggestion ---
+    # Use absolute values for decay ratio since qLogEI returns log-space
+    # (negative) acquisition values.
     suggested_batch = None
     if len(history) >= 2:
         acq_vals = history["max_acquisition_value"].dropna().values
-        if len(acq_vals) >= 2 and acq_vals[0] > 0:
-            decay_ratio = acq_vals[-1] / acq_vals[0]
+        if len(acq_vals) >= 2 and abs(acq_vals[0]) > 1e-12:
+            decay_ratio = abs(acq_vals[-1]) / abs(acq_vals[0])
             spread_vals = history["recommendation_spread"].dropna().values
             low_spread = (
                 len(spread_vals) > 0
@@ -1764,7 +1763,6 @@ def compute_convergence_diagnostics(
         "max_acquisition_value": max_acq,
         "recommendation_spread": rec_spread,
         "suggested_batch_size": suggested_batch,
-        "history": history,
     }
 
 
@@ -2462,7 +2460,6 @@ def run_gpbo_loop(
         conv_diag = compute_convergence_diagnostics(
             model=model,
             train_X=train_X,
-            train_Y=train_Y,
             recommendations=recommendations,
             bounds_tensor=conv_bounds,
             columns=rec_cols,
@@ -2473,8 +2470,8 @@ def run_gpbo_loop(
         diagnostics["recommendation_spread"] = conv_diag["recommendation_spread"]
         if conv_diag["suggested_batch_size"] is not None:
             diagnostics["suggested_batch_size"] = conv_diag["suggested_batch_size"]
-    except Exception as e:
-        logger.warning("Convergence diagnostics failed: %s", e)
+    except (RuntimeError, ValueError) as e:
+        logger.warning("Convergence diagnostics failed: %s", e, exc_info=True)
 
     diag_df = pd.DataFrame([diagnostics])
     diag_path = DATA_DIR / f"gp_diagnostics_round{round_num}.csv"
