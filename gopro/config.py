@@ -139,6 +139,17 @@ FIDELITY_COSTS: dict[float, float] = {
     0.0: 0.001,   # CellFlow generative prediction
 }
 
+# --- Adaptive kernel complexity schedule (NAIAD, Qin et al. ICML 2025) ---
+# N/d ratio thresholds for auto-selecting GP kernel complexity.
+# Below SHARED: use shared lengthscale (fewest params, avoids overfitting).
+# Between SHARED and ARD: use per-dim ARD (standard BoTorch default).
+# Above ARD: use SAASBO (fully Bayesian with sparsity prior).
+KERNEL_COMPLEXITY_THRESHOLDS: dict[str, float] = {
+    "shared": 8.0,   # N/d < 8  → shared lengthscale
+    "ard": 15.0,     # 8 ≤ N/d < 15 → ARD
+                      # N/d ≥ 15 → SAASBO
+}
+
 # --- Gruffi stress-filtering defaults ---
 GRUFFI_DEFAULT_THRESHOLD = 0.15
 GRUFFI_DEFAULT_RESOLUTION = 2.0
