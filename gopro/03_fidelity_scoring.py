@@ -418,16 +418,17 @@ def compute_braun_entropy_center(braun_profiles: pd.DataFrame) -> float:
     Returns:
         Mean normalized entropy across all regions, in [0, 1].
     """
-    entropies = []
     n_types = braun_profiles.shape[1]
-    for _region, row in braun_profiles.iterrows():
-        fracs = row.values.astype(float)
-        entropies.append(normalized_entropy(fracs, total_types=n_types))
-    return float(np.mean(entropies))
+    entropies = braun_profiles.apply(
+        lambda row: normalized_entropy(row.values.astype(float), total_types=n_types),
+        axis=1,
+    )
+    return float(entropies.mean())
 
 
 # Fallback when no Braun reference is available
 _DEFAULT_ENTROPY_CENTER = 0.55
+_ENTROPY_SIGMA = 0.2
 
 
 def compute_composite_fidelity(
@@ -479,7 +480,7 @@ def compute_composite_fidelity(
 
     # Entropy contribution: penalize both too low (monoculture) and too high
     # (disorganized). Center is data-driven from Braun fetal brain reference.
-    entropy_score = np.exp(-((norm_entropy - entropy_center) ** 2) / (2 * 0.2 ** 2))
+    entropy_score = np.exp(-((norm_entropy - entropy_center) ** 2) / (2 * _ENTROPY_SIGMA ** 2))
 
     score = (
         weights["rss"] * rss_score
