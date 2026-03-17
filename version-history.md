@@ -16,3 +16,4 @@
 | 5 | (pending) | PASS | ralph/production-readiness-phase2 | Adaptive complexity schedule tests — 8 new tests (534 total) |
 | 5 | `28e7789` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 2 quality issues in adaptive complexity: remove unused param, fail-loud thresholds |
 | final | `143f3db` | verified | ralph/production-readiness-phase2 | Bug hunter verified |
+| 6 | `af96884` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 4 quality issues in timing window encoding |
