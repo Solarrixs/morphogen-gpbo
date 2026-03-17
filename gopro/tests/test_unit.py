@@ -1478,6 +1478,77 @@ class TestFidelityCosts:
         assert step04.FIDELITY_COSTS[1.0] == 1.0
 
 
+class TestFidelityKernelRemap:
+    """Tests for fidelity remap to prevent MF-GP kernel boundary collapse (TODO-24)."""
+
+    def test_remap_known_values(self):
+        """Standard fidelity levels map to open interval (0, 1)."""
+        fid = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
+        remapped = step04._remap_fidelity(fid)
+        expected = torch.tensor([1 / 3, 1 / 2, 2 / 3], dtype=torch.float64)
+        torch.testing.assert_close(remapped, expected)
+
+    def test_remap_excludes_boundaries(self):
+        """Remapped values must be strictly in (0, 1)."""
+        fid = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
+        remapped = step04._remap_fidelity(fid)
+        assert (remapped > 0).all()
+        assert (remapped < 1).all()
+
+    def test_remap_preserves_ordering(self):
+        """Higher fidelity → higher remapped value."""
+        fid = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
+        remapped = step04._remap_fidelity(fid)
+        assert remapped[0] < remapped[1] < remapped[2]
+
+    def test_unmap_roundtrip(self):
+        """remap → unmap is identity for known fidelity values."""
+        fid = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
+        remapped = step04._remap_fidelity(fid)
+        recovered = step04._unmap_fidelity(remapped)
+        torch.testing.assert_close(recovered, fid)
+
+    def test_remap_constants_exported(self):
+        """FIDELITY_KERNEL_REMAP and FIDELITY_KERNEL_UNMAP are accessible."""
+        assert hasattr(step04, "FIDELITY_KERNEL_REMAP")
+        assert hasattr(step04, "FIDELITY_KERNEL_UNMAP")
+        assert len(step04.FIDELITY_KERNEL_REMAP) == 3
+        # All mapped values in (0, 1)
+        for v in step04.FIDELITY_KERNEL_REMAP.values():
+            assert 0 < v < 1
+
+    def test_mf_gp_receives_remapped_fidelity(self):
+        """When fitting MF-GP, the model should see remapped fidelity values."""
+        np.random.seed(42)
+        n, d, m = 20, 3, 2
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM"],
+            index=[f"cond_{i}" for i in range(n)],
+        )
+        X["fidelity"] = 1.0
+        X.loc[X.index[:8], "fidelity"] = 0.5
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(m), size=n),
+            columns=["ct_A", "ct_B"],
+            index=X.index,
+        )
+        from botorch.models import SingleTaskMultiFidelityGP
+        model, train_X, _, _ = step04.fit_gp_botorch(X, Y, use_ilr=False)
+        assert isinstance(model, SingleTaskMultiFidelityGP)
+        # Fidelity column in train_X should contain remapped values, not raw
+        fid_col = train_X[:, -1]
+        # Should NOT contain 1.0 or 0.5 (raw values)
+        assert not torch.any(torch.isclose(fid_col, torch.tensor(1.0, dtype=torch.float64)))
+        # Should contain remapped values ≈ 1/2 and 2/3
+        unique_fids = sorted(fid_col.unique().tolist())
+        assert len(unique_fids) == 2
+        torch.testing.assert_close(
+            torch.tensor(unique_fids, dtype=torch.float64),
+            torch.tensor([1 / 2, 2 / 3], dtype=torch.float64),
+        )
+
+
 class TestSelectReplicateConditions:
     """Tests for _select_replicate_conditions (Idea #7)."""
 

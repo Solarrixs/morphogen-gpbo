@@ -58,6 +58,44 @@ logger = get_logger(__name__)
 DEVICE = torch.device("cpu")
 DTYPE = torch.double
 
+# --- Fidelity kernel remap ---
+# SingleTaskMultiFidelityGP uses LinearTruncatedFidelityKernel which collapses
+# when fidelity ∈ {0.0, 1.0} (boundary values annihilate the inter-fidelity
+# kernel component). Remap to the open interval (0, 1) to avoid this.
+FIDELITY_KERNEL_REMAP: dict[float, float] = {
+    0.0: 1 / 3,   # CellFlow → 0.333
+    0.5: 1 / 2,   # CellRank2 → 0.500
+    1.0: 2 / 3,   # real → 0.667
+}
+FIDELITY_KERNEL_UNMAP: dict[float, float] = {v: k for k, v in FIDELITY_KERNEL_REMAP.items()}
+
+
+def _remap_fidelity(fidelity_values: torch.Tensor) -> torch.Tensor:
+    """Remap fidelity values from {0.0, 0.5, 1.0} → open interval (0, 1).
+
+    Prevents boundary collapse in LinearTruncatedFidelityKernel.  Unknown
+    fidelity values are linearly interpolated between 0→1/3 and 1→2/3.
+    """
+    out = fidelity_values.clone()
+    for orig, mapped in FIDELITY_KERNEL_REMAP.items():
+        out[fidelity_values == orig] = mapped
+    # Fallback: linearly remap any unseen values from [0, 1] → [1/3, 2/3]
+    known = set(FIDELITY_KERNEL_REMAP.keys())
+    mask = torch.ones_like(out, dtype=torch.bool)
+    for orig in known:
+        mask &= fidelity_values != orig
+    if mask.any():
+        out[mask] = 1 / 3 + fidelity_values[mask] * (2 / 3 - 1 / 3)
+    return out
+
+
+def _unmap_fidelity(remapped_values: torch.Tensor) -> torch.Tensor:
+    """Inverse of ``_remap_fidelity``: (0, 1) → {0.0, 0.5, 1.0}."""
+    out = remapped_values.clone()
+    for mapped, orig in FIDELITY_KERNEL_UNMAP.items():
+        out[torch.isclose(remapped_values, torch.tensor(mapped, dtype=remapped_values.dtype))] = orig
+    return out
+
 # Literature-based morphogen bounds (all in µM).
 # These serve as fallback maxima; actual bounds used during optimization
 # are computed dynamically from training data (see _compute_active_bounds).
@@ -1209,6 +1247,14 @@ def fit_gp_botorch(
             logger.info("LassoBO ignored — multi-fidelity takes priority")
         if per_type_gp:
             logger.info("per_type_gp ignored — multi-fidelity takes priority")
+        # Remap fidelity values to open interval (0, 1) to prevent boundary
+        # collapse in LinearTruncatedFidelityKernel (TODO-24).
+        train_X = train_X.clone()
+        train_X[:, fidelity_idx] = _remap_fidelity(train_X[:, fidelity_idx])
+        logger.info(
+            "Remapped fidelity for MF kernel: %s",
+            sorted(train_X[:, fidelity_idx].unique().tolist()),
+        )
         model = SingleTaskMultiFidelityGP(
             train_X,
             train_Y,
@@ -1448,7 +1494,9 @@ def recommend_next_experiments(
         if col in bounds:
             lo, hi = bounds[col]
         elif col == "fidelity":
-            lo, hi = 1.0, 1.0  # always recommend at highest fidelity
+            # Fix fidelity to remapped highest-fidelity value (TODO-24).
+            remapped_hf = FIDELITY_KERNEL_REMAP.get(1.0, 1.0)
+            lo, hi = remapped_hf, remapped_hf
         else:
             lo, hi = 0.0, 1.0
         lower.append(lo)

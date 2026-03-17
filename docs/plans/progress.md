@@ -1,5 +1,27 @@
 # Progress Log
 
+## Iteration 5 (Ralph Pipeline) — 2026-03-17
+- Task: TODO-24 — Remap fidelity encodings for MF-GP kernel (§1.2)
+- Result: pass
+- Changes:
+  - Added `FIDELITY_KERNEL_REMAP` / `FIDELITY_KERNEL_UNMAP` constants and `_remap_fidelity()` / `_unmap_fidelity()` helpers to `04_gpbo_loop.py`
+  - MF-GP fitting path now remaps fidelity values from {0.0, 0.5, 1.0} → {1/3, 1/2, 2/3} before passing to `SingleTaskMultiFidelityGP`, preventing `LinearTruncatedFidelityKernel` boundary collapse
+  - `recommend_next_experiments()` sets fidelity bounds to remapped value (2/3) instead of raw 1.0
+  - Unknown fidelity values handled via linear interpolation fallback
+- Tests: 586 passing (was 580). 6 new tests in `TestFidelityKernelRemap`.
+- Files: `gopro/04_gpbo_loop.py`, `gopro/tests/test_unit.py`
+
+## Post-Ralph Audit — 2026-03-17
+- Task: Manual audit of all competitive landscape changes
+- Result: 3 bugs found and fixed
+- Fixes:
+  - **CRITICAL**: TVR cost-scaling inverted (`var / cost` → `var * cost`). Was always selecting expensive model, making `--tvr` useless.
+  - **MEDIUM**: `_select_replicate_conditions` now filters `fidelity == 1.0` — was potentially selecting unexecutable virtual conditions.
+  - **LOW**: Removed redundant outer `ScaleKernel` on additive kernel (over-parameterized but didn't produce wrong results).
+- Validated as correct: Aitchison distance, multiplicative replacement, GP warm-start, adaptive complexity, FBaxis A-P positions, cross-fidelity Spearman, noise estimation
+- Tests: 561 → 561 (no new tests, existing tests updated for kernel structure)
+- Commit: `db8eda2`
+
 ## Iteration 4 — 2026-03-17
 - Task: /bug-hunter final sweep (task_plan §1.1)
 - Result: pass
