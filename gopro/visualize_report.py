@@ -27,7 +27,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from gopro.config import get_logger
+from gopro.config import (
+    FIDELITY_CORRELATION_THRESHOLD,
+    FIDELITY_SKIP_MFBO_THRESHOLD,
+    get_logger,
+)
 
 logger = get_logger(__name__)
 
@@ -765,10 +769,10 @@ def build_fidelity_trend_figure(
         ))
 
     # Threshold lines
-    fig.add_hline(y=0.9, line_dash="dash", line_color="green",
-                  annotation_text="Skip MF-BO (>0.9)")
-    fig.add_hline(y=0.3, line_dash="dash", line_color="red",
-                  annotation_text="Drop source (<0.3)")
+    fig.add_hline(y=FIDELITY_SKIP_MFBO_THRESHOLD, line_dash="dash", line_color="green",
+                  annotation_text=f"Skip MF-BO (>{FIDELITY_SKIP_MFBO_THRESHOLD})")
+    fig.add_hline(y=FIDELITY_CORRELATION_THRESHOLD, line_dash="dash", line_color="red",
+                  annotation_text=f"Drop source (<{FIDELITY_CORRELATION_THRESHOLD})")
 
     fig.update_layout(
         title="Cross-Fidelity Correlation by Round",
@@ -956,7 +960,7 @@ def generate_report(
     if fidelity_monitor_path.exists():
         logger.info("Building section: Fidelity Monitoring")
         try:
-            monitor_df = pd.read_csv(str(fidelity_monitor_path))
+            monitor_df = pd.read_csv(fidelity_monitor_path)
             if len(monitor_df) > 0:
                 sections["Fidelity Monitoring"] = (
                     "Cross-fidelity correlation between real and virtual data sources "
@@ -966,7 +970,7 @@ def generate_report(
                     build_fidelity_trend_figure(monitor_df),
                 )
         except Exception as e:
-            logger.warning("Fidelity monitoring section failed: %s", e)
+            logger.warning("Fidelity monitoring section failed: %s", e, exc_info=True)
 
     # 3. Morphogen-space PCA — use all 20 training dimensions,
     #    zero-pad recommendations for missing columns

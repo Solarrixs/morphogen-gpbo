@@ -31,6 +31,8 @@ from gopro.config import (
     DATA_DIR,
     FIDELITY_CORRELATION_THRESHOLD,
     FIDELITY_COSTS,
+    FIDELITY_LABELS,
+    FIDELITY_SKIP_MFBO_THRESHOLD,
     GP_STATE_DIR,
     KERNEL_COMPLEXITY_THRESHOLDS,
     MORPHOGEN_COLUMNS,
@@ -1408,10 +1410,10 @@ def validate_fidelity_correlation(
         - details: str (human-readable explanation)
         - n_overlap: int (number of overlapping conditions)
 
-    Decision gate (per McDonald et al. 2025):
-        - correlation > 0.9 everywhere: skip MF-BO, just use cheap fidelity as pre-filter
-        - correlation < 0.3 everywhere: skip MF-BO, use single-fidelity GP on real data only
-        - correlation 0.3-0.9: MF-BO is appropriate
+    Decision gate (per McDonald et al. 2025, thresholds from config):
+        - correlation > FIDELITY_SKIP_MFBO_THRESHOLD: skip MF-BO, use cheap fidelity as pre-filter
+        - correlation < FIDELITY_CORRELATION_THRESHOLD: skip MF-BO, use single-fidelity GP on real data only
+        - in between: MF-BO is appropriate
     """
     from scipy.stats import spearmanr, pearsonr
 
@@ -1482,11 +1484,11 @@ def validate_fidelity_correlation(
             "Overall correlation is NaN (constant data). "
             f"Defaulting to MF-BO for {fidelity_label} data."
         )
-    elif overall_corr > 0.9:
+    elif overall_corr > FIDELITY_SKIP_MFBO_THRESHOLD:
         recommendation = "skip_mfbo_use_cheap"
         details = (
             f"Cross-fidelity correlation with {fidelity_label} is very high "
-            f"({overall_corr:.3f} > 0.9). MF-BO adds overhead without benefit — "
+            f"({overall_corr:.3f} > {FIDELITY_SKIP_MFBO_THRESHOLD}). MF-BO adds overhead without benefit — "
             f"consider using {fidelity_label} data as a cheap pre-filter instead."
         )
     elif overall_corr < FIDELITY_CORRELATION_THRESHOLD:
@@ -1501,7 +1503,7 @@ def validate_fidelity_correlation(
         recommendation = "use_mfbo"
         details = (
             f"Cross-fidelity correlation with {fidelity_label} is moderate "
-            f"({overall_corr:.3f}), within [0.3, 0.9]. MF-BO is appropriate."
+            f"({overall_corr:.3f}), within [{FIDELITY_CORRELATION_THRESHOLD}, {FIDELITY_SKIP_MFBO_THRESHOLD}]. MF-BO is appropriate."
         )
 
     logger.info(
@@ -1565,7 +1567,7 @@ def monitor_fidelity_per_round(
 
     # Load existing history and append
     if history_path.exists():
-        history = pd.read_csv(str(history_path))
+        history = pd.read_csv(history_path)
         # Drop any existing rows for this round (idempotent re-runs)
         history = history[history["round"] != round_num]
         history = pd.concat([history, new_df], ignore_index=True)
@@ -1576,13 +1578,13 @@ def monitor_fidelity_per_round(
 
     # Save updated history
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    history.to_csv(str(history_path), index=False)
+    history.to_csv(history_path, index=False)
     logger.info("Fidelity monitoring history saved to %s (%d rows)", history_path, len(history))
 
     # Detect degradation: correlation declining for N consecutive rounds
     degraded_sources = []
     for label in history["fidelity_label"].unique():
-        label_hist = history[history["fidelity_label"] == label].sort_values("round")
+        label_hist = history[history["fidelity_label"] == label]
         corrs = label_hist["overall_correlation"].values
 
         if len(corrs) < degradation_window + 1:
@@ -1722,7 +1724,7 @@ def merge_multi_fidelity_data(
     fidelity_counts = merged_X["fidelity"].value_counts().sort_index(ascending=False)
     total_cost = 0.0
     for fid, count in fidelity_counts.items():
-        label = {1.0: "real", 0.5: "CellRank2", 0.0: "CellFlow"}.get(fid, f"fid={fid}")
+        label = FIDELITY_LABELS.get(fid, f"fid={fid}")
         cost_per = FIDELITY_COSTS.get(fid, 1.0)
         level_cost = count * cost_per
         total_cost += level_cost
@@ -2049,7 +2051,7 @@ def run_gpbo_loop(
             # Only validate non-real fidelity sources
             if v_fidelity < 1.0:
                 v_Y = pd.read_csv(str(v_frac_csv), index_col=0)
-                fid_label = {0.5: "CellRank2", 0.0: "CellFlow"}.get(
+                fid_label = FIDELITY_LABELS.get(
                     v_fidelity, f"fidelity={v_fidelity}"
                 )
                 val_result = validate_fidelity_correlation(
@@ -2075,7 +2077,7 @@ def run_gpbo_loop(
                 before = len(validated_virtual)
                 validated_virtual = [
                     (vf, vm, vfid) for vf, vm, vfid in validated_virtual
-                    if {0.5: "CellRank2", 0.0: "CellFlow"}.get(
+                    if FIDELITY_LABELS.get(
                         vfid, f"fidelity={vfid}"
                     ) not in degraded
                 ]

@@ -130,6 +130,14 @@ def md5_file(path, chunk_size: int = 8 * 1024 * 1024) -> str:
 
 # --- Fidelity correlation thresholds ---
 FIDELITY_CORRELATION_THRESHOLD = 0.3  # Below this, fall back to single-fidelity GP
+FIDELITY_SKIP_MFBO_THRESHOLD = 0.9   # Above this, MF-BO adds no benefit
+
+# Human-readable labels for fidelity levels
+FIDELITY_LABELS: dict[float, str] = {
+    1.0: "real",
+    0.5: "CellRank2",
+    0.0: "CellFlow",
+}
 
 # --- Cost ratios for fidelity levels (relative to real experiment = 1.0) ---
 # Real scRNA-seq: ~$2,000 + 72 days; CellRank2: ~2 hours compute; CellFlow: ~10 min
