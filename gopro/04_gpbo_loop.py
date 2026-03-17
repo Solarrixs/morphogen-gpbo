@@ -789,7 +789,7 @@ class TVRModelEnsemble:
 
             # Scale variance by cost (cheaper models → lower scaled variance)
             cost = self.cost_ratios.get(fid, 1.0)
-            scaled_var = var * cost
+            scaled_var = var / max(cost, 1e-10)
 
             all_means.append(mean)
             all_raw_vars.append(var)
@@ -1136,6 +1136,15 @@ def recommend_next_experiments(
             X_baseline=train_X,
         )
     else:
+        # Guard: SAASBO ModelListGP with scalarized qLogEI is unsupported —
+        # independent MCMC samples per sub-model cause batch dimension mismatch
+        if (hasattr(model, 'models') and train_Y.shape[1] > 1
+                and any(hasattr(m, 'median_lengthscale') for m in model.models)):
+            raise NotImplementedError(
+                "SAASBO (ModelListGP of fully Bayesian sub-models) is not compatible "
+                "with scalarized qLogEI. Use --multi-objective to route through "
+                "qLogNEHVI, or disable --saasbo for multi-output optimization."
+            )
         # For multi-output models, use a scalarization posterior transform
         if train_Y.shape[1] > 1:
             from botorch.acquisition.objective import GenericMCObjective
@@ -1444,7 +1453,7 @@ def merge_multi_fidelity_data(
                         keep_conditions = common_idx[keep_mask]
                         # Also keep any conditions not in the report
                         extra = X.index.difference(report.index)
-                        keep_all = keep_conditions.append(extra)
+                        keep_all = keep_conditions.union(extra)
                         X = X.loc[X.index.intersection(keep_all)]
                         Y = Y.loc[Y.index.intersection(keep_all)]
                         n_filtered = n_before - len(X)
@@ -1554,7 +1563,12 @@ def _select_replicate_conditions(
     morph_cols = [c for c in train_X.columns if c != "fidelity"]
 
     if strategy == "high_variance" and model is not None and active_cols is not None:
-        X_active = train_X[active_cols].copy()
+        # Strip fidelity from active_cols for TVR models (sub-GPs trained without fidelity)
+        if hasattr(model, '_fidelity_levels'):  # TVRModelEnsemble
+            cols = [c for c in active_cols if c != "fidelity"]
+        else:
+            cols = active_cols
+        X_active = train_X[cols].copy()
         X_tensor = torch.tensor(X_active.values, dtype=DTYPE, device=DEVICE)
         with torch.no_grad():
             posterior = model.posterior(X_tensor)
@@ -2006,7 +2020,7 @@ def run_gpbo_loop(
             for i, col in enumerate(X_active.columns):
                 if i < len(ls):
                     diagnostics[f"lengthscale_{col}"] = float(ls[i])
-        diagnostics["model_type"] = "saasbo" if use_saasbo else "map"
+        diagnostics["model_type"] = "saasbo" if effective_saasbo else "map"
     except (AttributeError, RuntimeError):
         pass
 

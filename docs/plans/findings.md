@@ -228,3 +228,15 @@ Verified 8 critical findings from bug-hunter swarm. 3 confirmed, 2 false positiv
 - **C-06** (deprecated Index.append): FALSE POSITIVE — `Index.append()` is not deprecated in pandas 2.x.
 - **C-07** (Zero-width fidelity bounds): FALSE POSITIVE — already fixed in prior audit (lines 139-152: `nunique() > 1` guard).
 - **C-08/C-09** (performance loops): WONT FIX — not correctness bugs, negligible at current scale.
+
+## Bug Hunter Fixes (Round 5, 2026-03-16)
+
+4 confirmed critical issues fixed in `04_gpbo_loop.py`:
+
+1. **C-06** `Index.append()` → `.union()` (line 1447) — deprecated pandas API, forward-compat fix
+2. **C-08** TVR + `high_variance` replicate strategy — strip fidelity from `active_cols` for TVR models to prevent dimension mismatch crash (line 1556)
+3. **C-03** SAASBO + multi-output + scalarized qLogEI — added `NotImplementedError` guard for unsupported combination (line 1138)
+4. **BF-R5-W-3** TVR cost ratio `var * cost` → `var / cost` — inverted formula now correctly favors cheaper models (line 792)
+5. **BF-R5-W-1** Diagnostic `model_type` now uses `effective_saasbo` instead of `use_saasbo` (line 2023)
+
+All 534 tests passing after fixes.
