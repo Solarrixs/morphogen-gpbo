@@ -1,17 +1,17 @@
-# Handoff to Iteration 8
+# Handoff to Iteration 9
 
-## Last Completed: Phase C Idea #11 — Per-cell-type GP models (GPerturb 2025)
-- Separate SingleTaskGP per output dimension via ModelListGP (MAP path only)
-- `_extract_per_output_lengthscales()` returns (d x n_outputs) morphogen sensitivity matrix
-- `--per-type-gp` CLI flag, wired through `run_gpbo_loop(per_type_gp=True)`
-- Simplify pass fixed 4 quality issues (commit 47a2f6d)
-- 6 tests added, 547 total passing, 0 failures
+## Last Completed: Phase D Idea #13 — Per-round fidelity monitoring
+- `monitor_fidelity_per_round()` tracks cross-fidelity correlation across rounds in `fidelity_monitoring.csv`
+- Detects sustained degradation (2+ consecutive declining rounds) and triggers auto-fallback
+- Wired into `run_gpbo_loop()`: after validation gate, before merge decision
+- `build_fidelity_trend_figure()` in visualize_report.py shows correlation trend per source
+- 6 new tests (5 monitoring + 1 viz), 555 total passing, 0 failures
 
-## Next Up: Phase D Idea #13 — Per-round fidelity monitoring
-- **Task**: Re-evaluate cross-fidelity correlation each round. Auto-fallback to single-fidelity if correlation degrades. Add trend to visualization report.
-- **Acceptance**: monitoring runs per round; 2+ tests
-- **Key files**: `gopro/04_gpbo_loop.py` (existing `validate_fidelity_correlation()`), `gopro/visualize_report.py`
-- **Tip**: `validate_fidelity_correlation()` already exists — extend it with per-round tracking and auto-fallback logic
+## Next Up: Phase D Idea #16 — Convergence diagnostics
+- **Task**: Track posterior variance, acquisition decay, recommendation clustering. Adaptive batch sizing. Add to gp_model_diagnostics CSV and viz report.
+- **Acceptance**: diagnostics in CSV; 4+ tests
+- **Key files**: `gopro/04_gpbo_loop.py` (diagnostics dict near line 2250), `gopro/visualize_report.py`
+- **Tip**: The diagnostics dict is already written to `gp_diagnostics_round{N}.csv` — extend it with posterior_variance_mean, acquisition_value_decay, recommendation_cluster_spread
 
 ## Warnings
 - Per-type GP only activates on the standard MAP path (not SAASBO, multi-fidelity, TVR, or MixedSingleTaskGP)
@@ -23,8 +23,8 @@
 
 ## Key Context
 - Branch: `ralph/production-readiness-phase2`
-- Tests: `source .venv/bin/activate && python -m pytest gopro/tests/ -v` (547 passing)
-- Task list: `ralph-task.md` (8 tasks todo, 0 blocked, 7 complete)
-- Iterations 1-7: TVR, target profile refinement, FBaxis_rank, additive+interaction kernel, adaptive complexity, timing windows, per-type GP
+- Tests: `source .venv/bin/activate && python -m pytest gopro/tests/ -v` (555 passing)
+- Task list: `ralph-task.md` (7 tasks todo, 0 blocked, 8 complete)
+- Iterations 1-8: TVR, target profile refinement, FBaxis_rank, additive+interaction kernel, adaptive complexity, timing windows, per-type GP, per-round fidelity monitoring
 
-## Remaining: 8 tasks todo, 0 blocked, 7 complete
+## Remaining: 7 tasks todo, 0 blocked, 8 complete

@@ -1519,6 +1519,102 @@ def validate_fidelity_correlation(
     }
 
 
+def monitor_fidelity_per_round(
+    val_results: dict[str, dict],
+    round_num: int,
+    history_path: Path | None = None,
+    degradation_window: int = 2,
+) -> dict:
+    """Track cross-fidelity correlation across rounds and detect degradation.
+
+    Appends the current round's validation results to a persistent CSV and
+    checks for correlation degradation over consecutive rounds.  If correlation
+    declines for ``degradation_window`` consecutive rounds, recommends
+    auto-fallback to single-fidelity GP.
+
+    Args:
+        val_results: Dict mapping fidelity label (e.g. "CellRank2") to the
+            dict returned by ``validate_fidelity_correlation()``.
+        round_num: Current optimization round number.
+        history_path: Path for the persistent monitoring CSV.
+            Default: ``DATA_DIR / "fidelity_monitoring.csv"``.
+        degradation_window: Number of consecutive declining rounds before
+            recommending fallback. (default: 2)
+
+    Returns:
+        Dict with:
+            - history: DataFrame of all rounds' monitoring data
+            - degraded_sources: list of fidelity labels with sustained decline
+            - auto_fallback: bool — True if any source should be dropped
+    """
+    if history_path is None:
+        history_path = DATA_DIR / "fidelity_monitoring.csv"
+
+    # Build rows for this round
+    rows = []
+    for label, res in val_results.items():
+        rows.append({
+            "round": round_num,
+            "fidelity_label": label,
+            "overall_correlation": res.get("overall_correlation", float("nan")),
+            "recommendation": res.get("recommendation", "unknown"),
+            "n_overlap": res.get("n_overlap", 0),
+        })
+
+    new_df = pd.DataFrame(rows)
+
+    # Load existing history and append
+    if history_path.exists():
+        history = pd.read_csv(str(history_path))
+        # Drop any existing rows for this round (idempotent re-runs)
+        history = history[history["round"] != round_num]
+        history = pd.concat([history, new_df], ignore_index=True)
+    else:
+        history = new_df
+
+    history = history.sort_values(["fidelity_label", "round"]).reset_index(drop=True)
+
+    # Save updated history
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history.to_csv(str(history_path), index=False)
+    logger.info("Fidelity monitoring history saved to %s (%d rows)", history_path, len(history))
+
+    # Detect degradation: correlation declining for N consecutive rounds
+    degraded_sources = []
+    for label in history["fidelity_label"].unique():
+        label_hist = history[history["fidelity_label"] == label].sort_values("round")
+        corrs = label_hist["overall_correlation"].values
+
+        if len(corrs) < degradation_window + 1:
+            # Not enough history to detect a trend
+            continue
+
+        # Check last `degradation_window` deltas
+        recent = corrs[-(degradation_window + 1):]
+        deltas = np.diff(recent)
+        if np.all(deltas < 0) and not np.any(np.isnan(recent)):
+            degraded_sources.append(label)
+            logger.warning(
+                "Fidelity degradation detected for %s: "
+                "correlation declined for %d consecutive rounds (%.3f → %.3f)",
+                label, degradation_window,
+                float(recent[0]), float(recent[-1]),
+            )
+
+    auto_fallback = len(degraded_sources) > 0
+    if auto_fallback:
+        logger.warning(
+            "Auto-fallback to single-fidelity recommended for: %s",
+            degraded_sources,
+        )
+
+    return {
+        "history": history,
+        "degraded_sources": degraded_sources,
+        "auto_fallback": auto_fallback,
+    }
+
+
 def merge_multi_fidelity_data(
     data_sources: list[tuple[Path, Path, float]],
     cellflow_confidence_threshold: float = 0.3,
@@ -1946,6 +2042,7 @@ def run_gpbo_loop(
         # Cross-fidelity correlation validation gate
         # Validate each virtual source against real data before merging
         validated_virtual = []
+        round_val_results: dict[str, dict] = {}
         for v_frac_csv, v_morph_csv, v_fidelity in virtual_sources:
             if not v_frac_csv.exists():
                 continue
@@ -1958,6 +2055,7 @@ def run_gpbo_loop(
                 val_result = validate_fidelity_correlation(
                     Y_real, v_Y, fidelity_label=fid_label,
                 )
+                round_val_results[fid_label] = val_result
                 if val_result["recommendation"] == "single_fidelity":
                     logger.warning(
                         "Dropping %s data: cross-fidelity correlation too low (%.3f)",
@@ -1965,6 +2063,28 @@ def run_gpbo_loop(
                     )
                     continue
             validated_virtual.append((v_frac_csv, v_morph_csv, v_fidelity))
+
+        # Per-round fidelity monitoring: track trend and detect degradation
+        if round_val_results:
+            monitor_result = monitor_fidelity_per_round(
+                round_val_results, round_num=round_num,
+            )
+            # Auto-fallback: drop sources with sustained correlation decline
+            if monitor_result["auto_fallback"]:
+                degraded = set(monitor_result["degraded_sources"])
+                before = len(validated_virtual)
+                validated_virtual = [
+                    (vf, vm, vfid) for vf, vm, vfid in validated_virtual
+                    if {0.5: "CellRank2", 0.0: "CellFlow"}.get(
+                        vfid, f"fidelity={vfid}"
+                    ) not in degraded
+                ]
+                dropped = before - len(validated_virtual)
+                if dropped > 0:
+                    logger.warning(
+                        "Fidelity monitoring auto-fallback: dropped %d degraded "
+                        "source(s): %s", dropped, list(degraded),
+                    )
 
         if validated_virtual:
             all_sources = [(fractions_csv, morphogen_csv, 1.0)] + validated_virtual

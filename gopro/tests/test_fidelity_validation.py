@@ -212,3 +212,107 @@ class TestFidelityCorrelationThreshold:
     def test_threshold_default_value(self):
         from gopro.config import FIDELITY_CORRELATION_THRESHOLD
         assert FIDELITY_CORRELATION_THRESHOLD == 0.3
+
+
+class TestMonitorFidelityPerRound:
+    """Tests for monitor_fidelity_per_round()."""
+
+    def test_single_round_no_degradation(self, tmp_path):
+        """First round should never trigger degradation (not enough history)."""
+        val_results = {
+            "CellRank2": {
+                "overall_correlation": 0.75,
+                "recommendation": "use_mfbo",
+                "n_overlap": 5,
+            },
+        }
+        history_path = tmp_path / "fidelity_monitoring.csv"
+        result = step04.monitor_fidelity_per_round(
+            val_results, round_num=1, history_path=history_path,
+        )
+        assert history_path.exists()
+        assert len(result["history"]) == 1
+        assert result["degraded_sources"] == []
+        assert result["auto_fallback"] is False
+
+    def test_stable_correlation_no_fallback(self, tmp_path):
+        """Stable or improving correlation should not trigger fallback."""
+        history_path = tmp_path / "fidelity_monitoring.csv"
+        # Round 1: moderate correlation
+        step04.monitor_fidelity_per_round(
+            {"CellRank2": {"overall_correlation": 0.6, "recommendation": "use_mfbo", "n_overlap": 5}},
+            round_num=1, history_path=history_path,
+        )
+        # Round 2: improved
+        step04.monitor_fidelity_per_round(
+            {"CellRank2": {"overall_correlation": 0.7, "recommendation": "use_mfbo", "n_overlap": 5}},
+            round_num=2, history_path=history_path,
+        )
+        # Round 3: still good
+        result = step04.monitor_fidelity_per_round(
+            {"CellRank2": {"overall_correlation": 0.72, "recommendation": "use_mfbo", "n_overlap": 5}},
+            round_num=3, history_path=history_path,
+        )
+        assert len(result["history"]) == 3
+        assert result["degraded_sources"] == []
+        assert result["auto_fallback"] is False
+
+    def test_degrading_correlation_triggers_fallback(self, tmp_path):
+        """Two consecutive declining rounds should trigger auto-fallback."""
+        history_path = tmp_path / "fidelity_monitoring.csv"
+        # Round 1: good
+        step04.monitor_fidelity_per_round(
+            {"CellRank2": {"overall_correlation": 0.8, "recommendation": "use_mfbo", "n_overlap": 5}},
+            round_num=1, history_path=history_path,
+        )
+        # Round 2: declining
+        step04.monitor_fidelity_per_round(
+            {"CellRank2": {"overall_correlation": 0.65, "recommendation": "use_mfbo", "n_overlap": 5}},
+            round_num=2, history_path=history_path,
+        )
+        # Round 3: declining further
+        result = step04.monitor_fidelity_per_round(
+            {"CellRank2": {"overall_correlation": 0.5, "recommendation": "use_mfbo", "n_overlap": 5}},
+            round_num=3, history_path=history_path,
+        )
+        assert "CellRank2" in result["degraded_sources"]
+        assert result["auto_fallback"] is True
+
+    def test_idempotent_rerun(self, tmp_path):
+        """Re-running same round should replace, not duplicate rows."""
+        history_path = tmp_path / "fidelity_monitoring.csv"
+        val = {"CellRank2": {"overall_correlation": 0.7, "recommendation": "use_mfbo", "n_overlap": 5}}
+        step04.monitor_fidelity_per_round(val, round_num=1, history_path=history_path)
+        result = step04.monitor_fidelity_per_round(val, round_num=1, history_path=history_path)
+        assert len(result["history"]) == 1  # Not 2
+
+    def test_multiple_sources_tracked_independently(self, tmp_path):
+        """Each fidelity source is tracked and evaluated independently."""
+        history_path = tmp_path / "fidelity_monitoring.csv"
+        # Both sources start good
+        step04.monitor_fidelity_per_round(
+            {
+                "CellRank2": {"overall_correlation": 0.8, "recommendation": "use_mfbo", "n_overlap": 5},
+                "CellFlow": {"overall_correlation": 0.6, "recommendation": "use_mfbo", "n_overlap": 3},
+            },
+            round_num=1, history_path=history_path,
+        )
+        # CellRank2 stable, CellFlow declining
+        step04.monitor_fidelity_per_round(
+            {
+                "CellRank2": {"overall_correlation": 0.82, "recommendation": "use_mfbo", "n_overlap": 5},
+                "CellFlow": {"overall_correlation": 0.45, "recommendation": "use_mfbo", "n_overlap": 3},
+            },
+            round_num=2, history_path=history_path,
+        )
+        # CellFlow declining further
+        result = step04.monitor_fidelity_per_round(
+            {
+                "CellRank2": {"overall_correlation": 0.80, "recommendation": "use_mfbo", "n_overlap": 5},
+                "CellFlow": {"overall_correlation": 0.35, "recommendation": "use_mfbo", "n_overlap": 3},
+            },
+            round_num=3, history_path=history_path,
+        )
+        # Only CellFlow should be degraded
+        assert "CellFlow" in result["degraded_sources"]
+        assert "CellRank2" not in result["degraded_sources"]

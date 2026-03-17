@@ -533,6 +533,19 @@ class TestVisualizationReport:
         fig = build_cell_umap_figure(coords, cell_types, conditions)
         assert isinstance(fig, go.Figure)
 
+    def test_build_fidelity_trend_figure(self):
+        from gopro.visualize_report import build_fidelity_trend_figure
+        monitor_df = pd.DataFrame({
+            "round": [1, 2, 3, 1, 2, 3],
+            "fidelity_label": ["CellRank2"] * 3 + ["CellFlow"] * 3,
+            "overall_correlation": [0.8, 0.75, 0.7, 0.5, 0.45, 0.4],
+            "recommendation": ["use_mfbo"] * 6,
+        })
+        fig = build_fidelity_trend_figure(monitor_df)
+        assert isinstance(fig, go.Figure)
+        # Should have 2 traces (one per source)
+        assert len(fig.data) == 2
+
 
 class TestMorphogenColumns:
     """Tests for morphogen column consistency."""

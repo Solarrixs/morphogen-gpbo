@@ -737,6 +737,51 @@ def build_convergence_figure(
     return fig
 
 
+def build_fidelity_trend_figure(
+    monitoring_df: pd.DataFrame,
+) -> go.Figure:
+    """Build fidelity correlation trend line chart across rounds.
+
+    Args:
+        monitoring_df: DataFrame with columns ``round``, ``fidelity_label``,
+            ``overall_correlation``, ``recommendation``.
+
+    Returns:
+        Plotly Figure with one trace per fidelity source.
+    """
+    fig = go.Figure()
+
+    colors = {"CellRank2": "darkorange", "CellFlow": "mediumpurple"}
+    for label in monitoring_df["fidelity_label"].unique():
+        sub = monitoring_df[monitoring_df["fidelity_label"] == label].sort_values("round")
+        color = colors.get(label, "gray")
+        fig.add_trace(go.Scatter(
+            x=sub["round"].tolist(),
+            y=sub["overall_correlation"].tolist(),
+            mode="lines+markers",
+            name=label,
+            marker=dict(size=8, color=color),
+            line=dict(width=2, color=color),
+        ))
+
+    # Threshold lines
+    fig.add_hline(y=0.9, line_dash="dash", line_color="green",
+                  annotation_text="Skip MF-BO (>0.9)")
+    fig.add_hline(y=0.3, line_dash="dash", line_color="red",
+                  annotation_text="Drop source (<0.3)")
+
+    fig.update_layout(
+        title="Cross-Fidelity Correlation by Round",
+        xaxis_title="Round",
+        yaxis_title="Spearman Correlation",
+        yaxis=dict(range=[-0.1, 1.05]),
+        xaxis=dict(dtick=1),
+        template=PLOTLY_TEMPLATE,
+        legend=dict(yanchor="bottom", y=0.02, xanchor="right", x=0.98),
+    )
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Placeholder for missing data
 # ---------------------------------------------------------------------------
@@ -905,6 +950,23 @@ def generate_report(
         "With only round 1 data, this shows a single point; the trend emerges as more rounds are run.",
         build_convergence_figure(best_per_round),
     )
+
+    # 2b. Fidelity monitoring trend (if multi-fidelity history exists)
+    fidelity_monitor_path = data_dir / "fidelity_monitoring.csv"
+    if fidelity_monitor_path.exists():
+        logger.info("Building section: Fidelity Monitoring")
+        try:
+            monitor_df = pd.read_csv(str(fidelity_monitor_path))
+            if len(monitor_df) > 0:
+                sections["Fidelity Monitoring"] = (
+                    "Cross-fidelity correlation between real and virtual data sources "
+                    "across optimization rounds. Sustained decline triggers auto-fallback "
+                    "to single-fidelity GP. Green dashed line: correlation too high for "
+                    "MF-BO benefit. Red dashed line: correlation too low — source dropped.",
+                    build_fidelity_trend_figure(monitor_df),
+                )
+        except Exception as e:
+            logger.warning("Fidelity monitoring section failed: %s", e)
 
     # 3. Morphogen-space PCA — use all 20 training dimensions,
     #    zero-pad recommendations for missing columns
