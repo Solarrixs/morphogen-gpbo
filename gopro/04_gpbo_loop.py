@@ -1373,7 +1373,7 @@ def recommend_next_experiments(
     recommendations["is_qc_duplicate"] = is_duplicate[:len(recommendations)]
 
     # Add predictions: convert from ILR space back to composition space if applicable
-    if use_ilr and n_composition_parts > 0 and cell_type_cols is not None:
+    if use_ilr and n_composition_parts > 1 and cell_type_cols is not None:
         pred_compositions = ilr_inverse(pred_mean, n_composition_parts)
         for i, ct_name in enumerate(cell_type_cols):
             recommendations[f"predicted_{ct_name}"] = pred_compositions[:, i]
