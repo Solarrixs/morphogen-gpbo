@@ -2,10 +2,11 @@
 
 ## Last Completed: Phase D Idea #13 — Per-round fidelity monitoring
 - `monitor_fidelity_per_round()` tracks cross-fidelity correlation across rounds in `fidelity_monitoring.csv`
-- Detects sustained degradation (2+ consecutive declining rounds) and triggers auto-fallback
+- Detects sustained degradation (2+ consecutive declining rounds) and triggers auto-fallback to single-fidelity
 - Wired into `run_gpbo_loop()`: after validation gate, before merge decision
 - `build_fidelity_trend_figure()` in visualize_report.py shows correlation trend per source
-- 6 new tests (5 monitoring + 1 viz), 555 total passing, 0 failures
+- Simplify pass extracted fidelity constants to config.py, removed redundant sort and str() wrapping
+- 555 tests passing, 0 failures
 
 ## Next Up: Phase D Idea #16 — Convergence diagnostics
 - **Task**: Track posterior variance, acquisition decay, recommendation clustering. Adaptive batch sizing. Add to gp_model_diagnostics CSV and viz report.
@@ -18,6 +19,7 @@
 - Per-type GP requires `train_Y.shape[1] > 1`; single-output falls back to standard SingleTaskGP
 - SAASBO + multi-output + scalarized qLogEI is guarded with NotImplementedError (iteration 5 fix)
 - TVR + `high_variance` replicate strategy strips fidelity from `active_cols` (iteration 5 fix)
+- Fidelity monitoring constants now in `gopro/config.py` (FIDELITY_DEGRADATION_WINDOW, etc.)
 - Import constants from `gopro.config` — never hardcode paths or columns
 - Use `.copy()` before mutating DataFrames passed as arguments
 
