@@ -243,6 +243,7 @@ def _fit_lassobo(
     from botorch.models import SingleTaskGP
     from botorch.models.transforms import Normalize, Standardize
     from gpytorch.mlls import ExactMarginalLogLikelihood
+    import gpytorch
 
     d = train_X.shape[1]
     m = train_Y.shape[1]
@@ -257,12 +258,15 @@ def _fit_lassobo(
     # regularizes lengthscales, and LogNormalPrior's validate_args check
     # can raise during Adam optimization when parameter values temporarily
     # exit the support region.
-    covar = model.covar_module
-    base = getattr(covar, "base_kernel", covar)
-    for prior_name in list(base._priors.keys()):
-        del base._priors[prior_name]
+    base_kernel = getattr(model.covar_module, "base_kernel", model.covar_module)
+    for prior_name in list(base_kernel._priors.keys()):
+        del base_kernel._priors[prior_name]
     for prior_name in list(model.likelihood.noise_covar._priors.keys()):
         del model.likelihood.noise_covar._priors[prior_name]
+
+    has_lengthscale = hasattr(base_kernel, "lengthscale")
+    if not has_lengthscale:
+        logger.warning("LassoBO: kernel has no lengthscale attribute; L1 penalty disabled")
 
     mll = ExactMarginalLogLikelihood(model.likelihood, model)
 
@@ -270,26 +274,35 @@ def _fit_lassobo(
     model.likelihood.train()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    prev_loss = float("inf")
+    patience_counter = 0
+    convergence_tol = 1e-6
+    patience = 5
 
-    import gpytorch
     with gpytorch.settings.debug(False):
-        for step in range(n_steps):
+        for _ in range(n_steps):
             optimizer.zero_grad()
             output = model(*model.train_inputs)
-            target = model.train_targets
-            mll_value = mll(output, target)
+            mll_value = mll(output, model.train_targets)
             loss = -mll_value.sum()  # sum for multi-output
 
             # L1 penalty on inverse lengthscales → drives irrelevant dims to ∞
-            covar = model.covar_module
-            base = getattr(covar, "base_kernel", covar)
-            if hasattr(base, "lengthscale"):
-                inv_ls = 1.0 / base.lengthscale.clamp(min=1e-6)
-                l1_penalty = lasso_alpha * inv_ls.sum()
-                loss = loss + l1_penalty
+            if has_lengthscale:
+                inv_ls = 1.0 / base_kernel.lengthscale.clamp(min=1e-6)
+                loss = loss + lasso_alpha * inv_ls.sum()
 
             loss.backward()
             optimizer.step()
+
+            # Early exit on convergence
+            curr_loss = loss.item()
+            if abs(prev_loss - curr_loss) < convergence_tol:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            else:
+                patience_counter = 0
+            prev_loss = curr_loss
 
     model.eval()
     model.likelihood.eval()
