@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import torch
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from gopro.config import (
     CONVERGENCE_ACQUISITION_DECAY_THRESHOLD,
@@ -475,6 +475,17 @@ def build_training_set(
     logger.info("Y (cell type fractions): %s", Y.shape)
 
     return X, Y
+
+
+def _sobol_eval_points(
+    d: int, n_points: int, lower: torch.Tensor, upper: torch.Tensor,
+) -> torch.Tensor:
+    """Generate Sobol evaluation points scaled to [lower, upper]."""
+    from torch.quasirandom import SobolEngine
+
+    sobol = SobolEngine(dimension=d, scramble=True)
+    unit = sobol.draw(n_points).to(dtype=DTYPE, device=DEVICE)
+    return lower + unit * (upper - lower)
 
 
 def _extract_lengthscales(model, n_input_dims: int):
@@ -1681,15 +1692,8 @@ def compute_convergence_diagnostics(
         history_path = DATA_DIR / "convergence_diagnostics.csv"
 
     # --- 1. Mean posterior std across design space ---
-    from torch.quasirandom import SobolEngine
-
     d = train_X.shape[1]
-    sobol = SobolEngine(dimension=d, scramble=True)
-    eval_X = sobol.draw(n_eval_points).to(dtype=DTYPE, device=DEVICE)
-    # Scale from [0,1] to actual bounds
-    lower = bounds_tensor[0]
-    upper = bounds_tensor[1]
-    eval_X = lower + eval_X * (upper - lower)
+    eval_X = _sobol_eval_points(d, n_eval_points, bounds_tensor[0], bounds_tensor[1])
 
     with torch.no_grad():
         posterior = model.posterior(eval_X)
@@ -1779,7 +1783,8 @@ def compute_ensemble_disagreement(
     kernel_type: Literal["ard", "additive_interaction", "shared"] = "ard",
     cat_dims: Optional[list[int]] = None,
     per_type_gp: bool = False,
-    n_eval_points: int = 64,
+    n_eval_points: int = 128,
+    existing_model: Optional[Any] = None,
 ) -> dict:
     """Compute ensemble disagreement by fitting N independent GPs.
 
@@ -1806,11 +1811,15 @@ def compute_ensemble_disagreement(
         cat_dims: Categorical column indices (for MixedSingleTaskGP).
         per_type_gp: Fit per-output ModelListGP.
         n_eval_points: Sobol points for posterior comparison.
+        existing_model: Pre-fitted model to include as ensemble member #0,
+            avoiding one redundant fit. Pass the model from ``run_gpbo_loop``.
 
     Returns:
         Dict with stability_score, lengthscale_agreement,
         mean_pred_std_across_models, and is_stable flag.
     """
+    from itertools import combinations
+
     from scipy.stats import kendalltau
 
     if n_restarts < 2:
@@ -1824,44 +1833,57 @@ def compute_ensemble_disagreement(
 
     # Generate common evaluation points in the input space
     d = X.shape[1]
-    from torch.quasirandom import SobolEngine
-    sobol = SobolEngine(dimension=d, scramble=True)
-    eval_unit = sobol.draw(n_eval_points).to(dtype=DTYPE, device=DEVICE)
-
-    # Scale to training data range
     X_tensor = torch.tensor(X.values, dtype=DTYPE, device=DEVICE)
     x_min = X_tensor.min(dim=0).values
     x_max = X_tensor.max(dim=0).values
     span = x_max - x_min
     span[span < 1e-12] = 1.0
-    eval_X = x_min + eval_unit * span
+    eval_X = _sobol_eval_points(d, n_eval_points, x_min, x_min + span)
 
-    # Fit N independent models from different seeds
+    # Collect predictions and lengthscales from ensemble members
     pred_means = []
     lengthscales_list = []
 
-    for i in range(n_restarts):
-        torch.manual_seed(42 + i * 7)
-        np.random.seed(42 + i * 7)
-        try:
-            model_i, _, _, _ = fit_gp_botorch(
-                X, Y,
-                use_ilr=use_ilr,
-                kernel_type=kernel_type,
-                cat_dims=cat_dims,
-                per_type_gp=per_type_gp,
-                round_num=1,
-            )
-            with torch.no_grad():
-                posterior = model_i.posterior(eval_X)
-                pred_means.append(posterior.mean.cpu().numpy())
+    def _collect_from_model(model_i):
+        with torch.no_grad():
+            posterior = model_i.posterior(eval_X)
+            pred_means.append(posterior.mean.cpu().numpy())
+        ls = _extract_lengthscales(model_i, d)
+        if ls is not None:
+            lengthscales_list.append(ls)
 
-            ls = _extract_lengthscales(model_i, d)
-            if ls is not None:
-                lengthscales_list.append(ls)
+    # Reuse existing model as ensemble member #0
+    if existing_model is not None:
+        try:
+            _collect_from_model(existing_model)
         except (RuntimeError, ValueError) as e:
-            logger.warning("Ensemble restart %d failed: %s", i, e)
-            continue
+            logger.warning("Existing model prediction failed: %s", e)
+
+    # Save/restore RNG state to avoid corrupting downstream randomness
+    torch_rng_state = torch.random.get_rng_state()
+    np_rng_state = np.random.get_state()
+
+    fits_needed = n_restarts - len(pred_means)
+    try:
+        for i in range(fits_needed):
+            torch.manual_seed(42 + i * 7)
+            np.random.seed(42 + i * 7)
+            try:
+                model_i, _, _, _ = fit_gp_botorch(
+                    X, Y,
+                    use_ilr=use_ilr,
+                    kernel_type=kernel_type,
+                    cat_dims=cat_dims,
+                    per_type_gp=per_type_gp,
+                    round_num=1,
+                )
+                _collect_from_model(model_i)
+            except (RuntimeError, ValueError) as e:
+                logger.warning("Ensemble restart %d failed: %s", i, e)
+                continue
+    finally:
+        torch.random.set_rng_state(torch_rng_state)
+        np.random.set_state(np_rng_state)
 
     if len(pred_means) < 2:
         logger.warning(
@@ -1877,38 +1899,31 @@ def compute_ensemble_disagreement(
         }
 
     # --- Stability score: mean pairwise cosine similarity of pred vectors ---
-    # Flatten each model's predictions into a single vector
     flat_preds = [m.flatten() for m in pred_means]
-    n_models = len(flat_preds)
     cos_sims = []
-    for i in range(n_models):
-        for j in range(i + 1, n_models):
-            a, b = flat_preds[i], flat_preds[j]
-            dot = np.dot(a, b)
-            norm = np.linalg.norm(a) * np.linalg.norm(b)
-            if norm > 1e-12:
-                cos_sims.append(dot / norm)
+    for a, b in combinations(flat_preds, 2):
+        norm = np.linalg.norm(a) * np.linalg.norm(b)
+        if norm > 1e-12:
+            cos_sims.append(np.dot(a, b) / norm)
     stability_score = float(np.clip(np.mean(cos_sims), 0.0, 1.0)) if cos_sims else 1.0
 
     # --- Lengthscale agreement: Kendall's tau on importance rankings ---
     ls_agreement = float("nan")
     if len(lengthscales_list) >= 2:
-        # Importance = 1/lengthscale (shorter = more important)
         rankings = [np.argsort(ls) for ls in lengthscales_list]
         taus = []
-        for i in range(len(rankings)):
-            for j in range(i + 1, len(rankings)):
-                tau, _ = kendalltau(rankings[i], rankings[j])
-                if not np.isnan(tau):
-                    taus.append(tau)
+        for r_a, r_b in combinations(rankings, 2):
+            tau, _ = kendalltau(r_a, r_b)
+            if not np.isnan(tau):
+                taus.append(tau)
         if taus:
             ls_agreement = float(np.mean(taus))
 
     # --- Mean prediction std across models at eval points ---
     stacked = np.stack(pred_means, axis=0)  # (n_models, n_eval, n_outputs)
-    pred_std = stacked.std(axis=0).mean()
-    mean_pred_std = float(pred_std)
+    mean_pred_std = float(stacked.std(axis=0).mean())
 
+    n_models = len(pred_means)
     is_stable = stability_score >= ENSEMBLE_STABILITY_LOW_THRESHOLD
 
     if not is_stable:
@@ -2663,6 +2678,7 @@ def run_gpbo_loop(
                 kernel_type=effective_kernel_type,
                 cat_dims=timing_cat_dims,
                 per_type_gp=per_type_gp,
+                existing_model=model,
             )
             diagnostics["ensemble_stability_score"] = ens_diag["stability_score"]
             diagnostics["ensemble_ls_agreement"] = ens_diag["lengthscale_agreement"]
