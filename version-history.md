@@ -20,4 +20,4 @@
 | 7 | `af45a7f` | PASS | ralph/production-readiness-phase2 | Per-cell-type GP models (GPerturb 2025, Idea #11) — 6 new tests (547 total) |
 | 7 | `47a2f6d` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 4 quality issues in per-type GP models |
 | 7 | `72d5876` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix 4 quality issues in per-type GP models |
-| 8 | (pending) | PASS | ralph/production-readiness-phase2 | Per-round fidelity monitoring — 6 new tests (555 total) |
+| 8 | `d1890d0` | PASS | ralph/production-readiness-phase2 | Per-round fidelity monitoring — 6 new tests (555 total) |
