@@ -345,6 +345,74 @@ class TestFidelityScoring:
         assert report_with["rss_score"].mean() > report_without["rss_score"].mean()
 
 
+class TestBraunEntropyCenterDataDriven:
+    """Tests for data-driven entropy center from Braun fetal brain reference."""
+
+    def test_uniform_profiles_give_high_center(self):
+        """Uniform distributions should yield normalized entropy near 1.0."""
+        profiles = pd.DataFrame(
+            np.ones((3, 6)) / 6,
+            index=["RegionA", "RegionB", "RegionC"],
+            columns=[f"Type{i}" for i in range(6)],
+        )
+        center = step03.compute_braun_entropy_center(profiles)
+        assert 0.95 <= center <= 1.0
+
+    def test_peaked_profiles_give_low_center(self):
+        """Strongly peaked distributions should yield low entropy center."""
+        data = np.zeros((3, 6))
+        data[:, 0] = 0.95
+        data[:, 1] = 0.05
+        profiles = pd.DataFrame(
+            data,
+            index=["RegionA", "RegionB", "RegionC"],
+            columns=[f"Type{i}" for i in range(6)],
+        )
+        center = step03.compute_braun_entropy_center(profiles)
+        assert center < 0.3
+
+    def test_center_in_unit_interval(self):
+        """Entropy center should always be in [0, 1]."""
+        np.random.seed(42)
+        # Random Dirichlet profiles (realistic)
+        profiles = pd.DataFrame(
+            np.random.dirichlet(np.ones(8), size=5),
+            index=[f"Region{i}" for i in range(5)],
+            columns=[f"Type{i}" for i in range(8)],
+        )
+        center = step03.compute_braun_entropy_center(profiles)
+        assert 0.0 <= center <= 1.0
+
+    def test_entropy_center_param_changes_score(self):
+        """Custom entropy_center should shift the optimal entropy value."""
+        # Score at entropy=0.3 with center=0.3 vs center=0.8
+        score_centered = step03.compute_composite_fidelity(
+            rss_score=0.5, on_target_frac=0.5,
+            off_target_frac=0.5, norm_entropy=0.3,
+            entropy_center=0.3,
+        )
+        score_off_center = step03.compute_composite_fidelity(
+            rss_score=0.5, on_target_frac=0.5,
+            off_target_frac=0.5, norm_entropy=0.3,
+            entropy_center=0.8,
+        )
+        assert score_centered > score_off_center
+
+    def test_default_fallback_matches_legacy(self):
+        """When entropy_center=None, should fall back to 0.55 (legacy)."""
+        score_none = step03.compute_composite_fidelity(
+            rss_score=0.8, on_target_frac=0.6,
+            off_target_frac=0.1, norm_entropy=0.5,
+            entropy_center=None,
+        )
+        score_legacy = step03.compute_composite_fidelity(
+            rss_score=0.8, on_target_frac=0.6,
+            off_target_frac=0.1, norm_entropy=0.5,
+            entropy_center=0.55,
+        )
+        assert score_none == pytest.approx(score_legacy)
+
+
 class TestVisualizationReport:
     """Tests for visualization report module."""
 

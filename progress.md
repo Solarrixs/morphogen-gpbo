@@ -2,6 +2,14 @@
 
 ## Iteration Log
 
+### Iteration 3 — Task 13: Data-Driven Entropy Center
+- Added `compute_braun_entropy_center()` to `03_fidelity_scoring.py` — computes mean normalized entropy across Braun fetal brain region profiles
+- Added `entropy_center` parameter to `compute_composite_fidelity()` — replaces hardcoded 0.55 with data-driven value
+- Wired through `score_all_conditions()` and `run_fidelity_scoring()` — center computed from Braun profiles at scoring time
+- Falls back to `_DEFAULT_ENTROPY_CENTER = 0.55` when no Braun profiles available (backward compatible)
+- 5 new tests: uniform/peaked profiles, unit interval, param-shifts-score, default-fallback-matches-legacy
+- Total: 580 tests passing (was 575)
+
 ### Iteration 2 — Task 12: Bootstrap Uncertainty
 - Added `compute_bootstrap_uncertainty()` to `02_map_to_hnoca.py` — resamples cells within each condition, returns per-condition per-cell-type variance
 - Wired into `run_mapping_pipeline()` and `__main__` block (saves `gp_noise_variance_{prefix}.csv`)

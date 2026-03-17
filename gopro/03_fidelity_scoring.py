@@ -404,12 +404,39 @@ def compute_on_target_fraction(
     return str(dominant), float(region_counts.iloc[0])
 
 
+def compute_braun_entropy_center(braun_profiles: pd.DataFrame) -> float:
+    """Compute mean normalized entropy across Braun fetal brain region profiles.
+
+    Each row of braun_profiles is a region's cell type composition (fractions).
+    Returns the mean normalized entropy, which serves as the data-driven center
+    for the Gaussian entropy penalty in composite fidelity scoring.
+
+    Args:
+        braun_profiles: DataFrame with rows=regions, columns=cell types,
+            values=fractions summing to ~1 per row.
+
+    Returns:
+        Mean normalized entropy across all regions, in [0, 1].
+    """
+    entropies = []
+    n_types = braun_profiles.shape[1]
+    for _region, row in braun_profiles.iterrows():
+        fracs = row.values.astype(float)
+        entropies.append(normalized_entropy(fracs, total_types=n_types))
+    return float(np.mean(entropies))
+
+
+# Fallback when no Braun reference is available
+_DEFAULT_ENTROPY_CENTER = 0.55
+
+
 def compute_composite_fidelity(
     rss_score: float,
     on_target_frac: float,
     off_target_frac: float,
     norm_entropy: float,
     weights: Optional[dict[str, float]] = None,
+    entropy_center: Optional[float] = None,
 ) -> float:
     """Compute a single composite fidelity score in [0, 1].
 
@@ -426,6 +453,9 @@ def compute_composite_fidelity(
         norm_entropy: Normalized Shannon entropy [0, 1].
         weights: Dict with keys 'rss', 'on_target', 'off_target', 'entropy'.
             Defaults to equal weighting.
+        entropy_center: Center of Gaussian entropy penalty [0, 1].
+            Derived from Braun fetal brain reference via
+            ``compute_braun_entropy_center()``. Falls back to 0.55 if None.
 
     Returns:
         Composite fidelity score in [0, 1].
@@ -438,6 +468,9 @@ def compute_composite_fidelity(
             "entropy": 0.15,
         }
 
+    if entropy_center is None:
+        entropy_center = _DEFAULT_ENTROPY_CENTER
+
     # Handle NaN inputs gracefully
     rss_score = rss_score if not np.isnan(rss_score) else 0.0
     on_target_frac = on_target_frac if not np.isnan(on_target_frac) else 0.0
@@ -445,9 +478,8 @@ def compute_composite_fidelity(
     norm_entropy = norm_entropy if not np.isnan(norm_entropy) else 0.0
 
     # Entropy contribution: penalize both too low (monoculture) and too high
-    # (disorganized). Optimal is moderate diversity (~0.4-0.7).
-    # Use a Gaussian-like penalty centered at 0.55.
-    entropy_score = np.exp(-((norm_entropy - 0.55) ** 2) / (2 * 0.2 ** 2))
+    # (disorganized). Center is data-driven from Braun fetal brain reference.
+    entropy_score = np.exp(-((norm_entropy - entropy_center) ** 2) / (2 * 0.2 ** 2))
 
     score = (
         weights["rss"] * rss_score
@@ -470,6 +502,7 @@ def score_all_conditions(
     hnoca_level3_profiles: Optional[pd.DataFrame] = None,
     label_map: Optional[dict[str, str]] = None,
     target_profile: Optional[pd.Series] = None,
+    entropy_center: Optional[float] = None,
 ) -> pd.DataFrame:
     """Compute full fidelity report for all conditions in the query data.
 
@@ -585,6 +618,7 @@ def score_all_conditions(
             on_target_frac=on_target,
             off_target_frac=off_target,
             norm_entropy=h_norm,
+            entropy_center=entropy_center,
         )
 
         results.append({
@@ -818,6 +852,10 @@ def run_fidelity_scoring(
 
     label_map = build_hnoca_to_braun_label_map()
 
+    # Compute data-driven entropy center from Braun reference
+    entropy_center = compute_braun_entropy_center(braun_profiles)
+    logger.info("Data-driven entropy center from Braun reference: %.4f", entropy_center)
+
     # Step 4: Score all conditions
     logger.info("--- STEP 4: Compute fidelity scores ---")
 
@@ -827,6 +865,7 @@ def run_fidelity_scoring(
         condition_key=condition_key,
         hnoca_level3_profiles=hnoca_l3_profiles,
         label_map=label_map,
+        entropy_center=entropy_center,
     )
 
     # Step 5: Assign cell-level fidelity scores

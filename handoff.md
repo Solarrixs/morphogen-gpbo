@@ -1,28 +1,30 @@
-# Handoff to Iteration 3
+# Handoff to Iteration 4
 > Written at end of each iteration for the next fresh-context agent.
 
 ## Last Completed
-Task 12: Bootstrap uncertainty — Added `compute_bootstrap_uncertainty()` to `02_map_to_hnoca.py`. Wired `train_Yvar` through `fit_gp_botorch()` and `run_gpbo_loop()` with `--bootstrap-noise` CLI flag. Simplify pass vectorized loop, fixed ILR variance, removed double-reindex. 575 tests passing.
+Task 13: Data-driven entropy center — Added `compute_braun_entropy_center()` to `03_fidelity_scoring.py`. Replaces hardcoded 0.55 with mean normalized entropy from Braun fetal brain region profiles. Wired `entropy_center` param through `compute_composite_fidelity()`, `score_all_conditions()`, and `run_fidelity_scoring()`. 580 tests passing.
 
 ## Next Up
-Task 13: Data-driven entropy center — Replace arbitrary 0.55 entropy weight in composite fidelity (`03_fidelity_scoring.py`) with Braun reference mean entropy.
-- **Acceptance**: entropy center matches Braun reference; 2+ new tests
+Task 14: /simplify pass on all changes
+- **Acceptance**: all tests pass after fixes
+
+Then Task 15: /bug-hunter final sweep
+- **Acceptance**: no confirmed critical bugs remain
 
 ## Warnings
 - `04_gpbo_loop.py` is very large (~2300+ lines). Read specific sections rather than the whole file.
 - Bootstrap noise only applies to standard MAP and per-type-GP paths (not SAASBO, LassoBO, multi-fidelity).
-- ILR variance propagation uses mean-variance approximation (conservative upper bound).
-- Noise floor clamped to 1e-6 to avoid numerical issues.
-- `03_fidelity_scoring.py` entropy center is at line ~395 (Gaussian penalty centered at 0.55). The fix should compute mean normalized entropy from Braun fetal brain reference profiles and use that as center.
+- `_DEFAULT_ENTROPY_CENTER = 0.55` is the fallback when `entropy_center=None` (backward compatible).
+- Existing tests that pass `norm_entropy=0.55` without `entropy_center` still work because of the fallback.
 
 ## Key Context
 - Branch: ralph/production-readiness-phase2
-- Tests: 575 passing (`python -m pytest gopro/tests/ -v`)
+- Tests: 580 passing (`python -m pytest gopro/tests/ -v`)
 - Venv: `source .venv/bin/activate`
 - Import constants from `gopro.config`, use `.copy()` before mutating DataFrames
 - ralph-task.md has the subtask list
 
 ## Remaining
-- 3 tasks todo (13: entropy center, 14: /simplify, 15: /bug-hunter)
+- 2 tasks todo (14: /simplify, 15: /bug-hunter)
 - 0 blocked
-- 12 complete
+- 13 complete
