@@ -3,6 +3,7 @@
 import pytest
 import numpy as np
 import pandas as pd
+import torch
 from pathlib import Path
 import sys
 import plotly.graph_objects as go
@@ -545,6 +546,19 @@ class TestVisualizationReport:
         assert isinstance(fig, go.Figure)
         # Should have 2 traces (one per source)
         assert len(fig.data) == 2
+
+    def test_build_convergence_diagnostics_figure(self):
+        from gopro.visualize_report import build_convergence_diagnostics_figure
+        conv_df = pd.DataFrame({
+            "round": [1, 2, 3],
+            "mean_posterior_std": [0.5, 0.3, 0.2],
+            "max_acquisition_value": [10.0, 5.0, 1.0],
+            "recommendation_spread": [0.8, 0.4, 0.1],
+        })
+        fig = build_convergence_diagnostics_figure(conv_df)
+        assert isinstance(fig, go.Figure)
+        # Should have 3 traces (one per panel)
+        assert len(fig.data) == 3
 
 
 class TestMorphogenColumns:
@@ -2248,3 +2262,154 @@ class TestPerTypeGP:
         Y = pd.DataFrame(np.random.rand(10, 2), columns=["ct_A", "ct_B"])
         with pytest.raises(ValueError, match="per_type_gp is incompatible with cat_dims"):
             step04.fit_gp_botorch(X, Y, cat_dims=[0], per_type_gp=True, round_num=1)
+
+
+class TestConvergenceDiagnostics:
+    """Tests for compute_convergence_diagnostics()."""
+
+    def _fit_simple_gp(self):
+        """Helper: fit a simple GP for testing."""
+        X = pd.DataFrame(np.random.rand(15, 3), columns=["a", "b", "c"])
+        Y = pd.DataFrame(np.random.rand(15, 2), columns=["ct_A", "ct_B"])
+        model, train_X, train_Y, ct_cols = step04.fit_gp_botorch(
+            X, Y, round_num=1,
+        )
+        return model, train_X, train_Y, ct_cols, X.columns.tolist()
+
+    def test_returns_expected_keys(self, tmp_path, monkeypatch):
+        """compute_convergence_diagnostics returns all required keys."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        model, train_X, train_Y, ct_cols, cols = self._fit_simple_gp()
+
+        # Build fake recommendations
+        recs = pd.DataFrame(np.random.rand(5, 3), columns=cols)
+        recs["acquisition_value"] = np.random.rand(5)
+
+        bounds = torch.tensor(
+            [[0.0] * 3, [1.0] * 3], dtype=torch.double
+        )
+
+        result = step04.compute_convergence_diagnostics(
+            model=model,
+            train_X=train_X,
+            train_Y=train_Y,
+            recommendations=recs,
+            bounds_tensor=bounds,
+            columns=cols,
+            round_num=1,
+            history_path=tmp_path / "conv.csv",
+        )
+
+        assert "mean_posterior_std" in result
+        assert "max_acquisition_value" in result
+        assert "recommendation_spread" in result
+        assert "suggested_batch_size" in result
+        assert "history" in result
+        assert result["mean_posterior_std"] > 0
+        assert result["recommendation_spread"] >= 0
+
+    def test_history_persists_across_rounds(self, tmp_path, monkeypatch):
+        """Convergence history CSV accumulates across rounds."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        model, train_X, train_Y, ct_cols, cols = self._fit_simple_gp()
+
+        recs = pd.DataFrame(np.random.rand(5, 3), columns=cols)
+        recs["acquisition_value"] = np.random.rand(5)
+        bounds = torch.tensor([[0.0] * 3, [1.0] * 3], dtype=torch.double)
+
+        history_path = tmp_path / "conv.csv"
+
+        for rnd in [1, 2, 3]:
+            result = step04.compute_convergence_diagnostics(
+                model=model, train_X=train_X, train_Y=train_Y,
+                recommendations=recs, bounds_tensor=bounds,
+                columns=cols, round_num=rnd,
+                history_path=history_path,
+            )
+
+        assert history_path.exists()
+        history = pd.read_csv(history_path)
+        assert len(history) == 3
+        assert list(history["round"]) == [1, 2, 3]
+
+    def test_idempotent_rerun(self, tmp_path, monkeypatch):
+        """Re-running same round replaces rather than duplicates rows."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        model, train_X, train_Y, ct_cols, cols = self._fit_simple_gp()
+
+        recs = pd.DataFrame(np.random.rand(5, 3), columns=cols)
+        recs["acquisition_value"] = np.random.rand(5)
+        bounds = torch.tensor([[0.0] * 3, [1.0] * 3], dtype=torch.double)
+        history_path = tmp_path / "conv.csv"
+
+        for _ in range(3):
+            step04.compute_convergence_diagnostics(
+                model=model, train_X=train_X, train_Y=train_Y,
+                recommendations=recs, bounds_tensor=bounds,
+                columns=cols, round_num=1,
+                history_path=history_path,
+            )
+
+        history = pd.read_csv(history_path)
+        assert len(history) == 1  # not 3
+
+    def test_adaptive_batch_suggestion(self, tmp_path, monkeypatch):
+        """When acquisition decays and spread is low, suggests smaller batch."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        model, train_X, train_Y, ct_cols, cols = self._fit_simple_gp()
+
+        bounds = torch.tensor([[0.0] * 3, [1.0] * 3], dtype=torch.double)
+        history_path = tmp_path / "conv.csv"
+
+        # Seed history with a high round-1 acquisition value
+        seed_df = pd.DataFrame([{
+            "round": 1,
+            "mean_posterior_std": 1.0,
+            "max_acquisition_value": 100.0,
+            "recommendation_spread": 0.5,
+            "n_training_points": 15,
+        }])
+        seed_df.to_csv(history_path, index=False)
+
+        # Round 2: very low acquisition and tight clustering
+        recs = pd.DataFrame(
+            np.full((5, 3), 0.5),  # tightly clustered
+            columns=cols,
+        )
+        recs["acquisition_value"] = 0.001  # very low
+
+        result = step04.compute_convergence_diagnostics(
+            model=model, train_X=train_X, train_Y=train_Y,
+            recommendations=recs, bounds_tensor=bounds,
+            columns=cols, round_num=2,
+            history_path=history_path,
+        )
+
+        # Spread should be near 0 (all same point) → below threshold
+        assert result["recommendation_spread"] < 0.01
+        # With 100x decay and near-zero spread, should suggest smaller batch
+        assert result["suggested_batch_size"] is not None
+        assert result["suggested_batch_size"] >= 4
+
+    def test_max_acq_from_recommendations(self, tmp_path, monkeypatch):
+        """Max acquisition value is correctly extracted from recommendations."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        model, train_X, train_Y, ct_cols, cols = self._fit_simple_gp()
+
+        recs = pd.DataFrame(np.random.rand(5, 3), columns=cols)
+        recs["acquisition_value"] = [0.1, 0.5, 0.3, 0.2, 0.4]
+        bounds = torch.tensor([[0.0] * 3, [1.0] * 3], dtype=torch.double)
+
+        result = step04.compute_convergence_diagnostics(
+            model=model, train_X=train_X, train_Y=train_Y,
+            recommendations=recs, bounds_tensor=bounds,
+            columns=cols, round_num=1,
+            history_path=tmp_path / "conv.csv",
+        )
+
+        assert abs(result["max_acquisition_value"] - 0.5) < 1e-6

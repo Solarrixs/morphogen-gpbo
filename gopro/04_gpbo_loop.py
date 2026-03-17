@@ -28,6 +28,9 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from gopro.config import (
+    CONVERGENCE_ACQUISITION_DECAY_THRESHOLD,
+    CONVERGENCE_CLUSTER_SPREAD_THRESHOLD,
+    CONVERGENCE_POSTERIOR_EVAL_POINTS,
     DATA_DIR,
     FIDELITY_CORRELATION_THRESHOLD,
     FIDELITY_COSTS,
@@ -1617,6 +1620,154 @@ def monitor_fidelity_per_round(
     }
 
 
+def compute_convergence_diagnostics(
+    model,
+    train_X: torch.Tensor,
+    train_Y: torch.Tensor,
+    recommendations: pd.DataFrame,
+    bounds_tensor: torch.Tensor,
+    columns: list[str],
+    round_num: int = 1,
+    history_path: Path | None = None,
+    n_eval_points: int = CONVERGENCE_POSTERIOR_EVAL_POINTS,
+) -> dict:
+    """Compute convergence diagnostics for the GP-BO loop.
+
+    Tracks three signals of convergence (Narayanan et al. 2025):
+    1. **Mean posterior std**: average posterior standard deviation across
+       the design space — drops as the GP gains coverage.
+    2. **Max acquisition value**: the peak acquisition function value for
+       the recommended batch — decays as the GP believes less improvement
+       remains.
+    3. **Recommendation spread**: mean pairwise L2 distance between
+       recommended morphogen vectors (normalised to [0,1]) — shrinks as
+       the optimizer converges on a region.
+    4. **Adaptive batch suggestion**: when the three metrics indicate
+       convergence, suggests reducing the batch size.
+
+    Results are appended to a persistent CSV so trends can be plotted
+    across rounds.
+
+    Args:
+        model: Fitted BoTorch GP model.
+        train_X: Training X tensor.
+        train_Y: Training Y tensor.
+        recommendations: DataFrame from ``recommend_next_experiments``.
+        bounds_tensor: (2, d) bounds tensor used for normalisation.
+        columns: Column names for morphogen dimensions.
+        round_num: Current round number.
+        history_path: Persistent CSV path.
+            Default: ``DATA_DIR / "convergence_diagnostics.csv"``.
+        n_eval_points: Number of Sobol points for posterior variance
+            estimation.
+
+    Returns:
+        Dict with convergence metrics and adaptive batch suggestion.
+    """
+    if history_path is None:
+        history_path = DATA_DIR / "convergence_diagnostics.csv"
+
+    # --- 1. Mean posterior std across design space ---
+    from torch.quasirandom import SobolEngine
+
+    d = train_X.shape[1]
+    sobol = SobolEngine(dimension=d, scramble=True)
+    eval_X = sobol.draw(n_eval_points).to(dtype=DTYPE, device=DEVICE)
+    # Scale from [0,1] to actual bounds
+    lower = bounds_tensor[0]
+    upper = bounds_tensor[1]
+    eval_X = lower + eval_X * (upper - lower)
+
+    with torch.no_grad():
+        posterior = model.posterior(eval_X)
+        # Mean standard deviation across all eval points and outputs
+        post_std = posterior.variance.sqrt().mean().item()
+
+    # --- 2. Max acquisition value from recommendations ---
+    max_acq = float("nan")
+    if "acquisition_value" in recommendations.columns:
+        acq_vals = recommendations["acquisition_value"].dropna()
+        if len(acq_vals) > 0:
+            max_acq = float(acq_vals.max())
+
+    # --- 3. Recommendation spread (mean pairwise L2 in normalised space) ---
+    morph_cols = [c for c in columns if c in recommendations.columns]
+    if len(morph_cols) > 0:
+        rec_vals = recommendations[morph_cols].dropna().values
+        # Normalise to [0,1] using bounds
+        bounds_np = bounds_tensor.cpu().numpy()
+        span = bounds_np[1] - bounds_np[0]
+        span[span < 1e-12] = 1.0  # avoid div-by-zero for fixed dims
+        rec_norm = (rec_vals - bounds_np[0][:len(morph_cols)]) / span[:len(morph_cols)]
+
+        if len(rec_norm) > 1:
+            from scipy.spatial.distance import pdist
+            pairwise = pdist(rec_norm, metric="euclidean")
+            rec_spread = float(np.mean(pairwise))
+        else:
+            rec_spread = 0.0
+    else:
+        rec_spread = float("nan")
+
+    # --- Build row and append to persistent CSV ---
+    row = {
+        "round": round_num,
+        "mean_posterior_std": post_std,
+        "max_acquisition_value": max_acq,
+        "recommendation_spread": rec_spread,
+        "n_training_points": int(train_X.shape[0]),
+    }
+
+    new_df = pd.DataFrame([row])
+
+    if history_path.exists():
+        history = pd.read_csv(history_path)
+        # Drop existing rows for this round (idempotent re-runs)
+        history = history[history["round"] != round_num]
+        history = pd.concat([history, new_df], ignore_index=True)
+    else:
+        history = new_df
+
+    history = history.sort_values("round").reset_index(drop=True)
+
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history.to_csv(history_path, index=False)
+    logger.info(
+        "Convergence diagnostics saved to %s — posterior_std=%.4f, "
+        "max_acq=%.4f, spread=%.4f",
+        history_path, post_std, max_acq, rec_spread,
+    )
+
+    # --- 4. Adaptive batch suggestion ---
+    suggested_batch = None
+    if len(history) >= 2:
+        acq_vals = history["max_acquisition_value"].dropna().values
+        if len(acq_vals) >= 2 and acq_vals[0] > 0:
+            decay_ratio = acq_vals[-1] / acq_vals[0]
+            spread_vals = history["recommendation_spread"].dropna().values
+            low_spread = (
+                len(spread_vals) > 0
+                and spread_vals[-1] < CONVERGENCE_CLUSTER_SPREAD_THRESHOLD
+            )
+            low_acq = decay_ratio < CONVERGENCE_ACQUISITION_DECAY_THRESHOLD
+
+            if low_acq and low_spread:
+                suggested_batch = max(4, train_X.shape[0] // 10)
+                logger.info(
+                    "Convergence detected: acquisition decayed to %.1f%% of "
+                    "round 1, spread=%.4f. Suggested batch size: %d",
+                    decay_ratio * 100, spread_vals[-1], suggested_batch,
+                )
+
+    return {
+        "mean_posterior_std": post_std,
+        "max_acquisition_value": max_acq,
+        "recommendation_spread": rec_spread,
+        "suggested_batch_size": suggested_batch,
+        "history": history,
+    }
+
+
 def merge_multi_fidelity_data(
     data_sources: list[tuple[Path, Path, float]],
     cellflow_confidence_threshold: float = 0.3,
@@ -2300,6 +2451,30 @@ def run_gpbo_loop(
             diagnostics["model_type"] = "map"
     except (AttributeError, RuntimeError):
         pass
+
+    # Compute convergence diagnostics
+    try:
+        bounds_lower = [rec_bounds.get(c, (0.0, 1.0))[0] for c in rec_cols]
+        bounds_upper = [rec_bounds.get(c, (0.0, 1.0))[1] for c in rec_cols]
+        conv_bounds = torch.tensor(
+            [bounds_lower, bounds_upper], dtype=DTYPE, device=DEVICE
+        )
+        conv_diag = compute_convergence_diagnostics(
+            model=model,
+            train_X=train_X,
+            train_Y=train_Y,
+            recommendations=recommendations,
+            bounds_tensor=conv_bounds,
+            columns=rec_cols,
+            round_num=round_num,
+        )
+        diagnostics["mean_posterior_std"] = conv_diag["mean_posterior_std"]
+        diagnostics["max_acquisition_value"] = conv_diag["max_acquisition_value"]
+        diagnostics["recommendation_spread"] = conv_diag["recommendation_spread"]
+        if conv_diag["suggested_batch_size"] is not None:
+            diagnostics["suggested_batch_size"] = conv_diag["suggested_batch_size"]
+    except Exception as e:
+        logger.warning("Convergence diagnostics failed: %s", e)
 
     diag_df = pd.DataFrame([diagnostics])
     diag_path = DATA_DIR / f"gp_diagnostics_round{round_num}.csv"

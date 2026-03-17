@@ -34,6 +34,8 @@
 | 2026-03-16 | 534 | +8 | Adaptive complexity schedule (NAIAD 2025, Idea #9) |
 | 2026-03-16 | 541 | +7 | Timing window encoding (Sanchis-Calleja 2025, Idea #10) |
 | 2026-03-17 | 547 | +6 | Per-cell-type GP models (GPerturb 2025, Idea #11) |
+| 2026-03-17 | 555 | +8 | Per-round fidelity monitoring (Phase D Idea #13) |
+| 2026-03-17 | 561 | +6 | Convergence diagnostics (Narayanan 2025, Idea #16) |
 
 ## Iteration Log
 
@@ -139,12 +141,40 @@
 - Quality: /simplify pass fixed 4 issues in timing window encoding (from git diff HEAD~1)
 - Notes: Categorical timing encoding for CHIR99021, SAG, BMP4 (5 categories: not_applied/early/mid/late/full). MixedSingleTaskGP uses separate Hamming kernel for categorical dims + Matern for continuous. Only non-constant timing columns are added. Lookup table covers 13 known sub-windowed conditions; others auto-inferred from concentration.
 
-## Iteration 7 — 2026-03-17
+## Iteration 7 — 2026-03-17T01:51:28Z
 - Task: Phase C Idea #11: Per-cell-type GP models (GPerturb 2025, Idea #11)
 - Result: PASS (547 tests, 0 failures)
 - Commits:
   - af45a7f [ralph-7] Task 7: Per-cell-type GP models (GPerturb 2025, Idea #11) — 547 tests
+  - 47a2f6d [ralph-simplify] Fix 4 quality issues in per-type GP models
 - Files changed:
-  - gopro/04_gpbo_loop.py | ~100 additions (per_type_gp branch, _extract_per_output_lengthscales, --per-type-gp CLI flag)
-  - gopro/tests/test_unit.py | ~130 additions (6 new tests: TestPerTypeGP)
+  - gopro/04_gpbo_loop.py | 27 ++++++++++---- (per_type_gp branch, _extract_per_output_lengthscales, --per-type-gp CLI flag + simplify fixes)
+  - gopro/tests/test_unit.py | 72 +++++++++++++++----- (6 new tests: TestPerTypeGP + simplify fixes)
+  - data/gp_recommendations_round1.csv | 8 ++++---- (updated)
+- Quality: /simplify pass fixed 4 quality issues in per-type GP models
 - Notes: Fit separate SingleTaskGP per output via ModelListGP (MAP path only). Each sub-model has independent Matern 5/2 + ARD kernel with dim-scaled priors. _extract_per_output_lengthscales() returns (d x n_outputs) "morphogen sensitivity matrix". Falls back to standard GP for single-output. Only applies to standard MAP path (not SAASBO, multi-fidelity, TVR, or Mixed).
+
+## Iteration 9 — 2026-03-17
+- Task: Phase D Idea #16: Convergence diagnostics (Narayanan et al. 2025)
+- Result: PASS (561 tests, 0 failures)
+- Files changed:
+  - gopro/config.py | 6 additions (CONVERGENCE_* constants)
+  - gopro/04_gpbo_loop.py | ~140 additions (compute_convergence_diagnostics(), wired into run_gpbo_loop)
+  - gopro/visualize_report.py | ~70 additions (build_convergence_diagnostics_figure())
+  - gopro/tests/test_unit.py | ~140 additions (6 new tests: TestConvergenceDiagnostics + viz test)
+  - gopro/__init__.py | 1 addition (export compute_convergence_diagnostics)
+- Notes: Tracks 3 convergence signals: mean posterior std (Sobol eval), max acquisition value, recommendation spread (normalised pairwise L2). Persistent CSV at convergence_diagnostics.csv. Adaptive batch suggestion when acquisition decays below 10% of round 1 AND spread below 0.05. Multi-panel Plotly figure added to viz report.
+
+## Iteration 8 — 2026-03-17T04:06:29Z
+- Task: Phase D Idea #13: Per-round fidelity monitoring
+- Result: PASS (555 tests, 0 failures)
+- Commits:
+  - d1890d0 [ralph-8] Task 8: Per-round fidelity monitoring (Phase D Idea #13) — 555 tests
+  - 6736f9c [ralph-simplify] Extract fidelity constants, remove redundant sort and str() wrapping
+- Files changed:
+  - gopro/04_gpbo_loop.py | 28 +++++++++++++++------------- (monitor_fidelity_per_round, auto-fallback logic)
+  - gopro/config.py | 8 ++++++++ (fidelity monitoring constants)
+  - gopro/visualize_report.py | 18 +++++++++++------- (build_fidelity_trend_figure)
+  - data/gp_recommendations_round1.csv | 8 ++++---- (updated)
+- Quality: /simplify pass extracted fidelity constants to config.py, removed redundant sort and str() wrapping
+- Notes: `monitor_fidelity_per_round()` tracks cross-fidelity correlation across rounds in `fidelity_monitoring.csv`. Detects sustained degradation (2+ consecutive declining rounds) and triggers auto-fallback to single-fidelity. `build_fidelity_trend_figure()` added to viz report. Wired into `run_gpbo_loop()` after validation gate, before merge decision.

@@ -787,6 +787,85 @@ def build_fidelity_trend_figure(
 
 
 # ---------------------------------------------------------------------------
+# Convergence diagnostics chart
+# ---------------------------------------------------------------------------
+
+def build_convergence_diagnostics_figure(
+    conv_df: pd.DataFrame,
+) -> go.Figure:
+    """Build convergence diagnostics multi-panel figure.
+
+    Plots three convergence metrics across rounds on a shared x-axis:
+    mean posterior std, max acquisition value, and recommendation spread.
+
+    Args:
+        conv_df: DataFrame with columns ``round``, ``mean_posterior_std``,
+            ``max_acquisition_value``, ``recommendation_spread``.
+
+    Returns:
+        Plotly Figure with three y-axes.
+    """
+    from plotly.subplots import make_subplots
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        subplot_titles=(
+            "Mean Posterior Std",
+            "Max Acquisition Value",
+            "Recommendation Spread",
+        ),
+        vertical_spacing=0.08,
+    )
+
+    conv_df = conv_df.sort_values("round")
+    rounds = conv_df["round"].tolist()
+
+    # Panel 1: Mean posterior std
+    if "mean_posterior_std" in conv_df.columns:
+        fig.add_trace(go.Scatter(
+            x=rounds,
+            y=conv_df["mean_posterior_std"].tolist(),
+            mode="lines+markers",
+            marker=dict(size=8, color="steelblue"),
+            line=dict(width=2, color="steelblue"),
+            name="Posterior Std",
+        ), row=1, col=1)
+
+    # Panel 2: Max acquisition value
+    if "max_acquisition_value" in conv_df.columns:
+        fig.add_trace(go.Scatter(
+            x=rounds,
+            y=conv_df["max_acquisition_value"].tolist(),
+            mode="lines+markers",
+            marker=dict(size=8, color="darkorange"),
+            line=dict(width=2, color="darkorange"),
+            name="Max Acq Value",
+        ), row=2, col=1)
+
+    # Panel 3: Recommendation spread
+    if "recommendation_spread" in conv_df.columns:
+        fig.add_trace(go.Scatter(
+            x=rounds,
+            y=conv_df["recommendation_spread"].tolist(),
+            mode="lines+markers",
+            marker=dict(size=8, color="mediumseagreen"),
+            line=dict(width=2, color="mediumseagreen"),
+            name="Rec Spread",
+        ), row=3, col=1)
+
+    fig.update_layout(
+        title="Convergence Diagnostics",
+        height=600,
+        showlegend=False,
+        template=PLOTLY_TEMPLATE,
+    )
+    fig.update_xaxes(title_text="Round", dtick=1, row=3, col=1)
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Placeholder for missing data
 # ---------------------------------------------------------------------------
 

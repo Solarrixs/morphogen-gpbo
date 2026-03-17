@@ -176,6 +176,14 @@ TIMING_WINDOW_COLUMNS: list[str] = [
     f"{m}_window" for m in TIMING_WINDOW_MORPHOGENS
 ]
 
+# --- Convergence diagnostics (Narayanan et al. 2025) ---
+# Acquisition decay: if max acqf value falls below this fraction of round 1, converging
+CONVERGENCE_ACQUISITION_DECAY_THRESHOLD = 0.1
+# Recommendation spread: pairwise L2 distance threshold (in normalised morphogen space)
+CONVERGENCE_CLUSTER_SPREAD_THRESHOLD = 0.05
+# Number of Sobol candidates to evaluate for mean posterior variance
+CONVERGENCE_POSTERIOR_EVAL_POINTS = 512
+
 # --- Gruffi stress-filtering defaults ---
 GRUFFI_DEFAULT_THRESHOLD = 0.15
 GRUFFI_DEFAULT_RESOLUTION = 2.0
