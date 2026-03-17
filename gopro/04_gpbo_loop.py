@@ -1041,6 +1041,7 @@ def fit_gp_botorch(
     kernel_type: Literal["ard", "additive_interaction", "shared"] = "ard",
     cat_dims: Optional[list[int]] = None,
     per_type_gp: bool = False,
+    noise_variance: Optional[pd.DataFrame] = None,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
 
@@ -1079,6 +1080,12 @@ def fit_gp_botorch(
             only). Produces a ModelListGP with per-output lengthscales for
             interpretability (GPerturb, Xing & Yau 2025). Each sub-model
             gets its own Matern 5/2 + ARD kernel.
+        noise_variance: Per-condition, per-cell-type bootstrap variance
+            estimates (conditions x cell types DataFrame).  When provided,
+            passed as ``train_Yvar`` to ``SingleTaskGP`` for heteroscedastic
+            noise modeling.  Aligned to *Y* index/columns automatically.
+            Only used on the standard MAP and per-type-GP paths (ignored for
+            SAASBO, LassoBO, and multi-fidelity).
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -1111,6 +1118,33 @@ def fit_gp_botorch(
         logger.info("ILR-transformed Y shape: %s", Y_values.shape)
 
     train_Y = torch.tensor(Y_values, dtype=DTYPE, device=DEVICE)
+
+    # Build heteroscedastic noise tensor from bootstrap variance
+    train_Yvar = None
+    if noise_variance is not None:
+        # Align noise_variance to Y's index and selected columns
+        nv = noise_variance.reindex(index=Y.index, columns=Y_selected.columns).fillna(0.0)
+        nv_values = nv.values
+        if use_ilr and nv_values.shape[1] > 1:
+            # Propagate variance through ILR: use delta-method approximation.
+            # For small variances, ILR variance ≈ J @ diag(var) @ J^T per row,
+            # but that's expensive. Use a simpler bootstrap-on-ILR approach:
+            # transform the variance directly (conservative upper bound).
+            # Actually, just use the mean variance as a scalar per row since
+            # ILR mixes columns. This is a reasonable first-order approximation.
+            nv_values = np.broadcast_to(
+                nv_values.mean(axis=1, keepdims=True),
+                (nv_values.shape[0], Y_values.shape[1]),
+            ).copy()
+        train_Yvar = torch.tensor(nv_values, dtype=DTYPE, device=DEVICE)
+        # Clamp to minimum noise floor to avoid numerical issues
+        train_Yvar = torch.clamp(train_Yvar, min=1e-6)
+        logger.info(
+            "Using heteroscedastic noise (train_Yvar): mean=%.2e, range=[%.2e, %.2e]",
+            train_Yvar.mean().item(),
+            train_Yvar.min().item(),
+            train_Yvar.max().item(),
+        )
 
     # Resolve warm-start state path
     gp_state_path = GP_STATE_DIR / f"round_{round_num - 1}.pt"
@@ -1250,9 +1284,11 @@ def fit_gp_botorch(
         logger.info("Using per-type GP (ModelListGP, %d outputs, MAP)", n_outputs)
         per_type_models = []
         for i in range(n_outputs):
+            yvar_i = train_Yvar[:, i:i+1] if train_Yvar is not None else None
             m = SingleTaskGP(
                 train_X,
                 train_Y[:, i:i+1],
+                train_Yvar=yvar_i,
                 input_transform=Normalize(d=train_X.shape[1]),
                 outcome_transform=Standardize(m=1),
             )
@@ -1278,6 +1314,7 @@ def fit_gp_botorch(
         model = SingleTaskGP(
             train_X,
             train_Y,
+            train_Yvar=train_Yvar,
             covar_module=covar_module,
             input_transform=Normalize(d=train_X.shape[1]),
             outcome_transform=Standardize(m=train_Y.shape[1]),
@@ -2460,6 +2497,7 @@ def run_gpbo_loop(
     timing_windows: bool = False,
     per_type_gp: bool = False,
     ensemble_restarts: int = 0,
+    noise_variance_csv: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -2520,6 +2558,10 @@ def run_gpbo_loop(
             disagreement diagnostic (GPerturb, Xing & Yau 2025). When > 1,
             fits N models from different seeds and reports a stability score.
             Set to 0 to skip. (default: 0)
+        noise_variance_csv: Path to per-condition bootstrap variance CSV
+            (from ``compute_bootstrap_uncertainty``). When provided, uses
+            heteroscedastic noise (``train_Yvar``) in the GP. Only applies to
+            the standard MAP and per-type-GP paths.
 
     Returns:
         DataFrame of recommended next experiments.
@@ -2665,6 +2707,24 @@ def run_gpbo_loop(
             effective_kernel_type = complexity["kernel_type"]
             effective_saasbo = False
 
+    # Load bootstrap noise variance if provided
+    noise_var_df = None
+    if noise_variance_csv is not None:
+        nv_path = Path(noise_variance_csv)
+        if nv_path.exists():
+            noise_var_df = pd.read_csv(str(nv_path), index_col=0)
+            # Align to Y's index (conditions in merged training set)
+            noise_var_df = noise_var_df.reindex(Y.index)
+            n_matched = noise_var_df.dropna(how="all").shape[0]
+            logger.info(
+                "Loaded bootstrap noise variance: %d/%d conditions matched",
+                n_matched, len(Y),
+            )
+            # Fill unmatched conditions (e.g. virtual data) with column means
+            noise_var_df = noise_var_df.fillna(noise_var_df.mean())
+        else:
+            logger.warning("Noise variance CSV not found: %s", nv_path)
+
     # Fit GP on active dimensions only (save/load handled inside fit_gp_botorch)
     if use_tvr and "fidelity" in X_active.columns and X_active["fidelity"].nunique() > 1:
         logger.info("Using TVR (Targeted Variance Reduction) with %d fidelity levels",
@@ -2689,6 +2749,7 @@ def run_gpbo_loop(
             kernel_type=effective_kernel_type,
             cat_dims=timing_cat_dims,
             per_type_gp=per_type_gp,
+            noise_variance=noise_var_df,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -2930,6 +2991,10 @@ if __name__ == "__main__":
     parser.add_argument("--ensemble-restarts", type=int, default=0,
                         help="Number of independent GP restarts for ensemble disagreement "
                              "diagnostic (GPerturb 2025). Set to 0 to skip. (default: 0)")
+    parser.add_argument("--bootstrap-noise", type=str, default=None,
+                        help="Path to per-condition bootstrap variance CSV "
+                             "(from compute_bootstrap_uncertainty). Enables "
+                             "heteroscedastic noise modeling via train_Yvar.")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -3102,6 +3167,7 @@ if __name__ == "__main__":
         timing_windows=args.timing_windows,
         per_type_gp=args.per_type_gp,
         ensemble_restarts=args.ensemble_restarts,
+        noise_variance_csv=Path(args.bootstrap_noise) if args.bootstrap_noise else None,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

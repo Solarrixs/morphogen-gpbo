@@ -440,6 +440,73 @@ def compute_soft_cell_type_fractions(
     return fractions
 
 
+def compute_bootstrap_uncertainty(
+    obs: pd.DataFrame,
+    soft_probs: pd.DataFrame,
+    condition_key: str = "condition",
+    n_bootstrap: int = 200,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Compute bootstrap variance on cell type fractions per condition.
+
+    Resamples cells (with replacement) within each condition ``n_bootstrap``
+    times and computes the fraction vector for each resample.  Returns the
+    per-condition, per-cell-type variance across bootstrap replicates.
+
+    These variances can be passed as heteroscedastic observation noise
+    (``train_Yvar``) to ``SingleTaskGP`` in the GP-BO loop.
+
+    Args:
+        obs: Cell metadata with *condition_key* column.  Index must align
+            with *soft_probs*.
+        soft_probs: DataFrame (cells x cell types) of soft KNN probabilities.
+        condition_key: Column identifying experimental conditions.
+        n_bootstrap: Number of bootstrap resamples per condition.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        DataFrame (conditions x cell types) of bootstrap variance estimates.
+    """
+    rng = np.random.default_rng(seed)
+    conditions = obs[condition_key]
+    cell_types = soft_probs.columns
+
+    grouped = soft_probs.groupby(conditions)
+    result_rows: dict[str, np.ndarray] = {}
+
+    for cond, group_df in grouped:
+        n_cells = len(group_df)
+        boot_means = np.empty((n_bootstrap, len(cell_types)))
+        values = group_df.values  # (n_cells, n_types)
+
+        for b in range(n_bootstrap):
+            idx = rng.integers(0, n_cells, size=n_cells)
+            sample = values[idx]
+            means = sample.mean(axis=0)
+            # Renormalize to simplex
+            total = means.sum()
+            if total > 0:
+                means /= total
+            boot_means[b] = means
+
+        result_rows[cond] = np.var(boot_means, axis=0, ddof=1)
+
+    variance_df = pd.DataFrame.from_dict(
+        result_rows, orient="index", columns=cell_types,
+    )
+    variance_df.index.name = condition_key
+
+    logger.info(
+        "Bootstrap uncertainty (%d resamples): %d conditions, "
+        "mean var=%.2e, max var=%.2e",
+        n_bootstrap,
+        len(variance_df),
+        variance_df.values.mean(),
+        variance_df.values.max(),
+    )
+    return variance_df
+
+
 def run_mapping_pipeline(
     query_path: Path,
     ref_path: Path,
@@ -529,7 +596,7 @@ def run_mapping_pipeline(
         label_key=f"predicted_{ANNOT_REGION}",
     )
 
-    # Compute soft cell type fractions (probability-averaged)
+    # Compute soft cell type fractions (probability-averaged) + bootstrap uncertainty
     if ANNOT_LEVEL_2 in soft_probs:
         soft_fractions = compute_soft_cell_type_fractions(
             query.obs,
@@ -542,6 +609,14 @@ def run_mapping_pipeline(
         diff = (fractions - soft_fractions.reindex_like(fractions).fillna(0)).abs()
         logger.info("Hard vs soft fraction max diff: %.4f, mean diff: %.4f",
                     diff.values.max(), diff.values.mean())
+
+        # Bootstrap uncertainty on soft fractions
+        bootstrap_var = compute_bootstrap_uncertainty(
+            query.obs,
+            soft_probs[ANNOT_LEVEL_2],
+            condition_key=condition_key,
+        )
+        query.uns["bootstrap_variance"] = bootstrap_var
 
     return query, fractions, region_fractions
 
@@ -600,12 +675,18 @@ if __name__ == "__main__":
     region_fractions.to_csv(str(DATA_DIR / f"gp_training_regions_{output_prefix}.csv"))
     logger.info("Region fractions -> data/gp_training_regions_%s.csv", output_prefix)
 
-    # Save soft fractions if computed
+    # Save soft fractions and bootstrap variance if computed
     if "soft_fractions" in query.uns:
         query.uns["soft_fractions"].to_csv(
             str(DATA_DIR / f"gp_training_labels_soft_{output_prefix}.csv")
         )
         logger.info("Soft cell type fractions -> data/gp_training_labels_soft_%s.csv", output_prefix)
+
+    if "bootstrap_variance" in query.uns:
+        query.uns["bootstrap_variance"].to_csv(
+            str(DATA_DIR / f"gp_noise_variance_{output_prefix}.csv")
+        )
+        logger.info("Bootstrap noise variance -> data/gp_noise_variance_%s.csv", output_prefix)
 
     output_path = DATA_DIR / f"{output_prefix}_mapped.h5ad"
     query.write(str(output_path), compression="gzip")

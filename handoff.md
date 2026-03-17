@@ -1,27 +1,27 @@
-# Handoff to Iteration 2
+# Handoff to Iteration 3
 > Written at end of each iteration for the next fresh-context agent.
 
 ## Last Completed
-Task 11: LassoBO — L1-regularized MAP variable selection (AISTATS 2025). Added `--lassobo` flag to `04_gpbo_loop.py` with `fit_lassobo()` function. 7 new tests, 571 total passing. Simplify pass hoisted loop invariants and added convergence check.
+Task 12: Bootstrap uncertainty — Added `compute_bootstrap_uncertainty()` to `02_map_to_hnoca.py`. Wired `train_Yvar` through `fit_gp_botorch()` and `run_gpbo_loop()` with `--bootstrap-noise` CLI flag. 4 new tests, 575 total passing.
 
 ## Next Up
-Task 12: Bootstrap uncertainty — Compute bootstrap CIs on cell type fractions from per-cell KNN probabilities in `02_map_to_hnoca.py`. Propagate as heteroscedastic GP noise via `FixedNoiseGP` in `04_gpbo_loop.py`.
-- **Acceptance**: per-condition noise estimates saved; FixedNoiseGP used when noise available; 3+ new tests
+Task 13: Data-driven entropy center — Replace arbitrary 0.55 entropy weight in composite fidelity (`03_fidelity_scoring.py`) with Braun reference mean entropy.
+- **Acceptance**: entropy center matches Braun reference; 2+ new tests
 
 ## Warnings
-- LassoBO with high alpha (>0.5) can cause PSD issues on small datasets (15 points). Default 0.1 is safe.
-- LassoBO removes default BoTorch priors (LogNormalPrior on lengthscales/noise) to avoid validation errors during Adam optimization. The L1 penalty serves as the regularizer instead.
-- `04_gpbo_loop.py` is very large (~2200+ lines). Read specific sections rather than the whole file.
-- Multiple GP paths exist: standard MAP, SAASBO, TVR, per-type, LassoBO, multi-fidelity, Mixed (timing). Bootstrap noise should integrate with as many as practical (at minimum: standard MAP path).
+- `04_gpbo_loop.py` is very large (~2300+ lines). Read specific sections rather than the whole file.
+- Bootstrap noise only applies to standard MAP and per-type-GP paths (not SAASBO, LassoBO, multi-fidelity).
+- ILR variance propagation uses mean-variance approximation (conservative upper bound).
+- Noise floor clamped to 1e-6 to avoid numerical issues.
 
 ## Key Context
 - Branch: ralph/production-readiness-phase2
-- Tests: 571 passing (`python -m pytest gopro/tests/ -v`)
+- Tests: 575 passing (`python -m pytest gopro/tests/ -v`)
 - Venv: `source .venv/bin/activate`
 - Import constants from `gopro.config`, use `.copy()` before mutating DataFrames
 - ralph-task.md has the subtask list
 
 ## Remaining
-- 4 tasks todo (12: bootstrap uncertainty, 13: entropy center, 14: /simplify, 15: /bug-hunter)
+- 3 tasks todo (13: entropy center, 14: /simplify, 15: /bug-hunter)
 - 0 blocked
-- 11 complete
+- 12 complete

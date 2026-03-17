@@ -2558,3 +2558,102 @@ class TestEnsembleDisagreement:
         # With a clean linear relationship, models should agree well
         assert result["stability_score"] > 0.5
         assert result["mean_pred_std_across_models"] >= 0
+
+
+class TestBootstrapUncertainty:
+    """Tests for bootstrap uncertainty estimation and heteroscedastic noise GP."""
+
+    @pytest.fixture
+    def soft_probs_fixture(self):
+        """Create synthetic soft probability data for 3 conditions, 4 cell types."""
+        np.random.seed(42)
+        n_cells_per_cond = [50, 80, 30]
+        conditions = []
+        probs_list = []
+        for i, n in enumerate(n_cells_per_cond):
+            cond_name = f"cond_{i}"
+            conditions.extend([cond_name] * n)
+            # Different Dirichlet concentrations per condition
+            alpha = np.array([1.0, 2.0, 0.5, 1.5]) * (i + 1)
+            raw = np.random.dirichlet(alpha, size=n)
+            probs_list.append(raw)
+        all_probs = np.vstack(probs_list)
+        cell_types = ["ct_A", "ct_B", "ct_C", "ct_D"]
+        obs = pd.DataFrame({"condition": conditions})
+        soft_probs = pd.DataFrame(all_probs, columns=cell_types, index=obs.index)
+        return obs, soft_probs
+
+    def test_bootstrap_shape_and_positive(self, soft_probs_fixture):
+        """Bootstrap variance should be (n_conditions x n_cell_types) and non-negative."""
+        obs, soft_probs = soft_probs_fixture
+        var_df = step02.compute_bootstrap_uncertainty(
+            obs, soft_probs, condition_key="condition", n_bootstrap=100,
+        )
+        assert var_df.shape == (3, 4)
+        assert (var_df.values >= 0).all()
+        assert list(var_df.columns) == ["ct_A", "ct_B", "ct_C", "ct_D"]
+
+    def test_bootstrap_more_cells_less_variance(self):
+        """Conditions with more cells should have lower bootstrap variance."""
+        np.random.seed(123)
+        alpha = np.ones(3)
+        # Small condition: 10 cells
+        obs_small = pd.DataFrame({"condition": ["small"] * 10})
+        probs_small = pd.DataFrame(
+            np.random.dirichlet(alpha, size=10),
+            columns=["A", "B", "C"],
+        )
+        var_small = step02.compute_bootstrap_uncertainty(
+            obs_small, probs_small, condition_key="condition", n_bootstrap=500,
+        )
+        # Large condition: 500 cells
+        obs_large = pd.DataFrame({"condition": ["large"] * 500})
+        probs_large = pd.DataFrame(
+            np.random.dirichlet(alpha, size=500),
+            columns=["A", "B", "C"],
+        )
+        var_large = step02.compute_bootstrap_uncertainty(
+            obs_large, probs_large, condition_key="condition", n_bootstrap=500,
+        )
+        # More cells → lower variance
+        assert var_large.values.mean() < var_small.values.mean()
+
+    def test_bootstrap_reproducible(self, soft_probs_fixture):
+        """Same seed should produce identical results."""
+        obs, soft_probs = soft_probs_fixture
+        var1 = step02.compute_bootstrap_uncertainty(
+            obs, soft_probs, condition_key="condition", seed=99,
+        )
+        var2 = step02.compute_bootstrap_uncertainty(
+            obs, soft_probs, condition_key="condition", seed=99,
+        )
+        pd.testing.assert_frame_equal(var1, var2)
+
+    def test_heteroscedastic_gp_fits(self, soft_probs_fixture):
+        """fit_gp_botorch should accept noise_variance and produce valid posterior."""
+        import torch
+        obs, soft_probs = soft_probs_fixture
+        n_conds = 3
+        d = 4
+        np.random.seed(42)
+        X = pd.DataFrame(
+            np.random.rand(n_conds, d),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM", "log_harvest_day"],
+            index=[f"cond_{i}" for i in range(n_conds)],
+        )
+        X["fidelity"] = 1.0
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(4), size=n_conds),
+            columns=["ct_A", "ct_B", "ct_C", "ct_D"],
+            index=X.index,
+        )
+        noise_var = step02.compute_bootstrap_uncertainty(
+            obs, soft_probs, condition_key="condition", n_bootstrap=50,
+        )
+        model, train_X, train_Y, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, noise_variance=noise_var,
+        )
+        # Model should fit without error and produce valid predictions
+        with torch.no_grad():
+            post = model.posterior(train_X[:1])
+        assert post.mean.shape[-1] == 3  # ILR: 4 types -> 3 components
