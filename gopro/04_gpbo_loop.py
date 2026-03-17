@@ -77,23 +77,31 @@ def _remap_fidelity(fidelity_values: torch.Tensor) -> torch.Tensor:
     fidelity values are linearly interpolated between 0→1/3 and 1→2/3.
     """
     out = fidelity_values.clone()
+    matched = torch.zeros_like(fidelity_values, dtype=torch.bool)
     for orig, mapped in FIDELITY_KERNEL_REMAP.items():
-        out[fidelity_values == orig] = mapped
+        hits = torch.isclose(fidelity_values, torch.tensor(orig, dtype=fidelity_values.dtype))
+        out[hits] = mapped
+        matched |= hits
     # Fallback: linearly remap any unseen values from [0, 1] → [1/3, 2/3]
-    known = set(FIDELITY_KERNEL_REMAP.keys())
-    mask = torch.ones_like(out, dtype=torch.bool)
-    for orig in known:
-        mask &= fidelity_values != orig
-    if mask.any():
-        out[mask] = 1 / 3 + fidelity_values[mask] * (2 / 3 - 1 / 3)
+    if (~matched).any():
+        logger.warning("Unknown fidelity values encountered: %s", fidelity_values[~matched].tolist())
+        out[~matched] = 1 / 3 + fidelity_values[~matched] * (2 / 3 - 1 / 3)
     return out
 
 
 def _unmap_fidelity(remapped_values: torch.Tensor) -> torch.Tensor:
-    """Inverse of ``_remap_fidelity``: (0, 1) → {0.0, 0.5, 1.0}."""
+    """Inverse of ``_remap_fidelity``: (0, 1) → {0.0, 0.5, 1.0}.
+
+    Note: currently unused in production — reserved for post-hoc analysis.
+    """
     out = remapped_values.clone()
+    matched = torch.zeros_like(remapped_values, dtype=torch.bool)
     for mapped, orig in FIDELITY_KERNEL_UNMAP.items():
-        out[torch.isclose(remapped_values, torch.tensor(mapped, dtype=remapped_values.dtype))] = orig
+        hits = torch.isclose(remapped_values, torch.tensor(mapped, dtype=remapped_values.dtype))
+        out[hits] = orig
+        matched |= hits
+    if (~matched).any():
+        logger.warning("Unmapped fidelity values (no known inverse): %s", remapped_values[~matched].tolist())
     return out
 
 # Literature-based morphogen bounds (all in µM).
