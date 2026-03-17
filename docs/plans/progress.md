@@ -36,6 +36,7 @@
 | 2026-03-17 | 547 | +6 | Per-cell-type GP models (GPerturb 2025, Idea #11) |
 | 2026-03-17 | 555 | +8 | Per-round fidelity monitoring (Phase D Idea #13) |
 | 2026-03-17 | 561 | +6 | Convergence diagnostics (Narayanan 2025, Idea #16) |
+| 2026-03-17 | 564 | +3 | Ensemble disagreement (GPerturb 2025, Idea #17) |
 
 ## Iteration Log
 
@@ -154,15 +155,32 @@
 - Quality: /simplify pass fixed 4 quality issues in per-type GP models
 - Notes: Fit separate SingleTaskGP per output via ModelListGP (MAP path only). Each sub-model has independent Matern 5/2 + ARD kernel with dim-scaled priors. _extract_per_output_lengthscales() returns (d x n_outputs) "morphogen sensitivity matrix". Falls back to standard GP for single-output. Only applies to standard MAP path (not SAASBO, multi-fidelity, TVR, or Mixed).
 
-## Iteration 9 — 2026-03-17
-- Task: Phase D Idea #16: Convergence diagnostics (Narayanan et al. 2025)
-- Result: PASS (561 tests, 0 failures)
+## Iteration 10 — 2026-03-17T06:00:00Z
+- Task: Phase D Idea #17: Ensemble disagreement (GPerturb, Xing & Yau 2025)
+- Result: PASS (564 tests, 0 failures)
 - Files changed:
+  - gopro/04_gpbo_loop.py | ~130 additions (compute_ensemble_disagreement(), --ensemble-restarts CLI, wired into run_gpbo_loop diagnostics)
+  - gopro/config.py | 4 additions (ENSEMBLE_DEFAULT_N_RESTARTS, ENSEMBLE_STABILITY_LOW_THRESHOLD)
+  - gopro/tests/test_unit.py | ~60 additions (3 new tests: TestEnsembleDisagreement)
+  - gopro/__init__.py | 1 addition (export compute_ensemble_disagreement)
+- Notes: Fits N independent GPs from different random seeds, compares posterior predictions at Sobol eval points. Reports stability_score (cosine similarity), lengthscale_agreement (Kendall's tau), mean_pred_std_across_models. Flags unstable recommendations when stability < 0.5. Wired into diagnostics CSV via --ensemble-restarts N flag.
+
+## Iteration 9 — 2026-03-17T04:40:22Z
+- Task: Phase D Idea #16: Convergence diagnostics (Narayanan 2025, Idea #16)
+- Result: PASS (561 tests, 0 failures)
+- Commits:
+  - 71f6a63 [ralph-9] Task 9: Convergence diagnostics (Narayanan 2025, Idea #16) — 561 tests
+  - a70781e [ralph-simplify] Fix 5 quality issues in convergence diagnostics
+- Files changed:
+  - gopro/04_gpbo_loop.py | 71 changes (compute_convergence_diagnostics(), wired into run_gpbo_loop + simplify fixes)
   - gopro/config.py | 6 additions (CONVERGENCE_* constants)
-  - gopro/04_gpbo_loop.py | ~140 additions (compute_convergence_diagnostics(), wired into run_gpbo_loop)
-  - gopro/visualize_report.py | ~70 additions (build_convergence_diagnostics_figure())
-  - gopro/tests/test_unit.py | ~140 additions (6 new tests: TestConvergenceDiagnostics + viz test)
+  - gopro/visualize_report.py | 47 changes (build_convergence_diagnostics_figure() + simplify fixes)
+  - gopro/tests/test_unit.py | 10 changes (6 new tests: TestConvergenceDiagnostics + viz test + simplify fixes)
   - gopro/__init__.py | 1 addition (export compute_convergence_diagnostics)
+  - data/convergence_diagnostics.csv | updated
+  - data/gp_diagnostics_round1.csv | updated
+  - data/gp_recommendations_round1.csv | updated
+- Quality: /simplify pass fixed 5 issues in convergence diagnostics (net -22 lines)
 - Notes: Tracks 3 convergence signals: mean posterior std (Sobol eval), max acquisition value, recommendation spread (normalised pairwise L2). Persistent CSV at convergence_diagnostics.csv. Adaptive batch suggestion when acquisition decays below 10% of round 1 AND spread below 0.05. Multi-panel Plotly figure added to viz report.
 
 ## Iteration 8 — 2026-03-17T04:06:29Z

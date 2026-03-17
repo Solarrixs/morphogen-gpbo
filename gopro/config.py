@@ -184,6 +184,10 @@ CONVERGENCE_CLUSTER_SPREAD_THRESHOLD = 0.05
 # Number of Sobol candidates to evaluate for mean posterior variance
 CONVERGENCE_POSTERIOR_EVAL_POINTS = 512
 
+# --- Ensemble disagreement (GPerturb, Xing & Yau 2025) ---
+ENSEMBLE_DEFAULT_N_RESTARTS = 5
+ENSEMBLE_STABILITY_LOW_THRESHOLD = 0.5  # below this → unstable recommendations
+
 # --- Gruffi stress-filtering defaults ---
 GRUFFI_DEFAULT_THRESHOLD = 0.15
 GRUFFI_DEFAULT_RESOLUTION = 2.0

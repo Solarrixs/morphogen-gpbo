@@ -32,6 +32,8 @@ from gopro.config import (
     CONVERGENCE_CLUSTER_SPREAD_THRESHOLD,
     CONVERGENCE_POSTERIOR_EVAL_POINTS,
     DATA_DIR,
+    ENSEMBLE_DEFAULT_N_RESTARTS,
+    ENSEMBLE_STABILITY_LOW_THRESHOLD,
     FIDELITY_CORRELATION_THRESHOLD,
     FIDELITY_COSTS,
     FIDELITY_LABELS,
@@ -1769,6 +1771,170 @@ def compute_convergence_diagnostics(
     }
 
 
+def compute_ensemble_disagreement(
+    X: pd.DataFrame,
+    Y: pd.DataFrame,
+    n_restarts: int = ENSEMBLE_DEFAULT_N_RESTARTS,
+    use_ilr: bool = True,
+    kernel_type: Literal["ard", "additive_interaction", "shared"] = "ard",
+    cat_dims: Optional[list[int]] = None,
+    per_type_gp: bool = False,
+    n_eval_points: int = 64,
+) -> dict:
+    """Compute ensemble disagreement by fitting N independent GPs.
+
+    Fits *n_restarts* independent GP models from different random seeds and
+    compares their posterior predictions at a common set of Sobol evaluation
+    points.  High disagreement indicates the GP fit is sensitive to
+    initialisation — a sign of identifiability issues (GPerturb, Xing & Yau,
+    Nature Communications 2025).
+
+    Metrics:
+        - **stability_score**: mean pairwise cosine similarity of posterior
+          mean vectors across restarts (1.0 = perfect agreement, 0.0 = none).
+        - **lengthscale_agreement**: Kendall's tau on lengthscale importance
+          rankings across restarts.
+        - **mean_pred_std_across_models**: average standard deviation of
+          posterior means across the ensemble at evaluation points.
+
+    Args:
+        X: Training morphogen matrix (may include fidelity column).
+        Y: Training cell-type fraction matrix.
+        n_restarts: Number of independent GP fits (default from config).
+        use_ilr: Whether ILR transform is applied.
+        kernel_type: Kernel structure for each GP.
+        cat_dims: Categorical column indices (for MixedSingleTaskGP).
+        per_type_gp: Fit per-output ModelListGP.
+        n_eval_points: Sobol points for posterior comparison.
+
+    Returns:
+        Dict with stability_score, lengthscale_agreement,
+        mean_pred_std_across_models, and is_stable flag.
+    """
+    from scipy.stats import kendalltau
+
+    if n_restarts < 2:
+        return {
+            "stability_score": 1.0,
+            "lengthscale_agreement": 1.0,
+            "mean_pred_std_across_models": 0.0,
+            "is_stable": True,
+            "n_restarts": n_restarts,
+        }
+
+    # Generate common evaluation points in the input space
+    d = X.shape[1]
+    from torch.quasirandom import SobolEngine
+    sobol = SobolEngine(dimension=d, scramble=True)
+    eval_unit = sobol.draw(n_eval_points).to(dtype=DTYPE, device=DEVICE)
+
+    # Scale to training data range
+    X_tensor = torch.tensor(X.values, dtype=DTYPE, device=DEVICE)
+    x_min = X_tensor.min(dim=0).values
+    x_max = X_tensor.max(dim=0).values
+    span = x_max - x_min
+    span[span < 1e-12] = 1.0
+    eval_X = x_min + eval_unit * span
+
+    # Fit N independent models from different seeds
+    pred_means = []
+    lengthscales_list = []
+
+    for i in range(n_restarts):
+        torch.manual_seed(42 + i * 7)
+        np.random.seed(42 + i * 7)
+        try:
+            model_i, _, _, _ = fit_gp_botorch(
+                X, Y,
+                use_ilr=use_ilr,
+                kernel_type=kernel_type,
+                cat_dims=cat_dims,
+                per_type_gp=per_type_gp,
+                round_num=1,
+            )
+            with torch.no_grad():
+                posterior = model_i.posterior(eval_X)
+                pred_means.append(posterior.mean.cpu().numpy())
+
+            ls = _extract_lengthscales(model_i, d)
+            if ls is not None:
+                lengthscales_list.append(ls)
+        except (RuntimeError, ValueError) as e:
+            logger.warning("Ensemble restart %d failed: %s", i, e)
+            continue
+
+    if len(pred_means) < 2:
+        logger.warning(
+            "Only %d successful ensemble restarts; cannot compute disagreement",
+            len(pred_means),
+        )
+        return {
+            "stability_score": float("nan"),
+            "lengthscale_agreement": float("nan"),
+            "mean_pred_std_across_models": float("nan"),
+            "is_stable": True,  # can't tell — assume stable
+            "n_restarts": len(pred_means),
+        }
+
+    # --- Stability score: mean pairwise cosine similarity of pred vectors ---
+    # Flatten each model's predictions into a single vector
+    flat_preds = [m.flatten() for m in pred_means]
+    n_models = len(flat_preds)
+    cos_sims = []
+    for i in range(n_models):
+        for j in range(i + 1, n_models):
+            a, b = flat_preds[i], flat_preds[j]
+            dot = np.dot(a, b)
+            norm = np.linalg.norm(a) * np.linalg.norm(b)
+            if norm > 1e-12:
+                cos_sims.append(dot / norm)
+    stability_score = float(np.clip(np.mean(cos_sims), 0.0, 1.0)) if cos_sims else 1.0
+
+    # --- Lengthscale agreement: Kendall's tau on importance rankings ---
+    ls_agreement = float("nan")
+    if len(lengthscales_list) >= 2:
+        # Importance = 1/lengthscale (shorter = more important)
+        rankings = [np.argsort(ls) for ls in lengthscales_list]
+        taus = []
+        for i in range(len(rankings)):
+            for j in range(i + 1, len(rankings)):
+                tau, _ = kendalltau(rankings[i], rankings[j])
+                if not np.isnan(tau):
+                    taus.append(tau)
+        if taus:
+            ls_agreement = float(np.mean(taus))
+
+    # --- Mean prediction std across models at eval points ---
+    stacked = np.stack(pred_means, axis=0)  # (n_models, n_eval, n_outputs)
+    pred_std = stacked.std(axis=0).mean()
+    mean_pred_std = float(pred_std)
+
+    is_stable = stability_score >= ENSEMBLE_STABILITY_LOW_THRESHOLD
+
+    if not is_stable:
+        logger.warning(
+            "Ensemble disagreement detected: stability=%.3f (threshold=%.2f). "
+            "Recommendations may be sensitive to random initialisation. "
+            "Consider: (a) collecting more data, (b) using SAASBO for better "
+            "uncertainty calibration, (c) increasing exploration.",
+            stability_score, ENSEMBLE_STABILITY_LOW_THRESHOLD,
+        )
+
+    logger.info(
+        "Ensemble disagreement (%d restarts): stability=%.3f, "
+        "ls_agreement=%.3f, pred_std=%.4f, stable=%s",
+        n_models, stability_score, ls_agreement, mean_pred_std, is_stable,
+    )
+
+    return {
+        "stability_score": stability_score,
+        "lengthscale_agreement": ls_agreement,
+        "mean_pred_std_across_models": mean_pred_std,
+        "is_stable": is_stable,
+        "n_restarts": n_models,
+    }
+
+
 def merge_multi_fidelity_data(
     data_sources: list[tuple[Path, Path, float]],
     cellflow_confidence_threshold: float = 0.3,
@@ -2133,6 +2299,7 @@ def run_gpbo_loop(
     adaptive_complexity: bool = False,
     timing_windows: bool = False,
     per_type_gp: bool = False,
+    ensemble_restarts: int = 0,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -2186,6 +2353,10 @@ def run_gpbo_loop(
             Produces per-output lengthscale matrix for interpretability
             (GPerturb, Xing & Yau 2025). Only applies to the standard MAP
             path (not SAASBO, multi-fidelity, or TVR). (default: False)
+        ensemble_restarts: Number of independent GP restarts for ensemble
+            disagreement diagnostic (GPerturb, Xing & Yau 2025). When > 1,
+            fits N models from different seeds and reports a stability score.
+            Set to 0 to skip. (default: 0)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -2482,6 +2653,25 @@ def run_gpbo_loop(
     except (RuntimeError, ValueError) as e:
         logger.warning("Convergence diagnostics failed: %s", e, exc_info=True)
 
+    # Ensemble disagreement diagnostic (GPerturb, Xing & Yau 2025)
+    if ensemble_restarts >= 2:
+        try:
+            ens_diag = compute_ensemble_disagreement(
+                X_active, Y,
+                n_restarts=ensemble_restarts,
+                use_ilr=use_ilr,
+                kernel_type=effective_kernel_type,
+                cat_dims=timing_cat_dims,
+                per_type_gp=per_type_gp,
+            )
+            diagnostics["ensemble_stability_score"] = ens_diag["stability_score"]
+            diagnostics["ensemble_ls_agreement"] = ens_diag["lengthscale_agreement"]
+            diagnostics["ensemble_pred_std"] = ens_diag["mean_pred_std_across_models"]
+            diagnostics["ensemble_is_stable"] = ens_diag["is_stable"]
+            diagnostics["ensemble_n_restarts"] = ens_diag["n_restarts"]
+        except (RuntimeError, ValueError) as e:
+            logger.warning("Ensemble disagreement failed: %s", e, exc_info=True)
+
     diag_df = pd.DataFrame([diagnostics])
     diag_path = DATA_DIR / f"gp_diagnostics_round{round_num}.csv"
     diag_df.to_csv(str(diag_path), index=False)
@@ -2563,6 +2753,9 @@ if __name__ == "__main__":
                         help="Fit separate GP per cell type (ModelListGP) instead of single "
                              "multi-output GP. Produces per-output lengthscale matrix for "
                              "interpretability (GPerturb, Xing & Yau 2025)")
+    parser.add_argument("--ensemble-restarts", type=int, default=0,
+                        help="Number of independent GP restarts for ensemble disagreement "
+                             "diagnostic (GPerturb 2025). Set to 0 to skip. (default: 0)")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -2732,6 +2925,7 @@ if __name__ == "__main__":
         adaptive_complexity=args.adaptive_complexity,
         timing_windows=args.timing_windows,
         per_type_gp=args.per_type_gp,
+        ensemble_restarts=args.ensemble_restarts,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

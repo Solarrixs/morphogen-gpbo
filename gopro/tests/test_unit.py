@@ -2406,3 +2406,60 @@ class TestConvergenceDiagnostics:
         )
 
         assert abs(result["max_acquisition_value"] - 0.5) < 1e-6
+
+
+class TestEnsembleDisagreement:
+    """Tests for compute_ensemble_disagreement() (GPerturb, Xing & Yau 2025)."""
+
+    def test_returns_expected_keys(self, tmp_path, monkeypatch):
+        """Ensemble disagreement returns all expected keys."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        np.random.seed(42)
+        X = pd.DataFrame(np.random.rand(15, 3), columns=["a", "b", "c"])
+        Y = pd.DataFrame(np.random.rand(15, 2), columns=["ct_A", "ct_B"])
+
+        result = step04.compute_ensemble_disagreement(
+            X, Y, n_restarts=3, n_eval_points=16,
+        )
+
+        expected_keys = {
+            "stability_score", "lengthscale_agreement",
+            "mean_pred_std_across_models", "is_stable", "n_restarts",
+        }
+        assert expected_keys.issubset(result.keys())
+        assert result["n_restarts"] == 3
+        assert 0 <= result["stability_score"] <= 1.0
+
+    def test_single_restart_returns_trivial(self, tmp_path, monkeypatch):
+        """With n_restarts=1, returns perfect stability (no comparison possible)."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        result = step04.compute_ensemble_disagreement(
+            pd.DataFrame(np.random.rand(10, 2), columns=["a", "b"]),
+            pd.DataFrame(np.random.rand(10, 2), columns=["ct_A", "ct_B"]),
+            n_restarts=1,
+        )
+        assert result["stability_score"] == 1.0
+        assert result["is_stable"] is True
+
+    def test_identical_data_high_stability(self, tmp_path, monkeypatch):
+        """With clean data, restarts should mostly agree (high stability)."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        np.random.seed(123)
+        # Create a simple dataset with clear signal
+        X = pd.DataFrame(np.random.rand(20, 2), columns=["a", "b"])
+        # Y depends linearly on X to make the GP fit easy
+        Y = pd.DataFrame({
+            "ct_A": 0.3 + 0.4 * X["a"].values,
+            "ct_B": 0.7 - 0.4 * X["a"].values,
+        })
+
+        result = step04.compute_ensemble_disagreement(
+            X, Y, n_restarts=3, n_eval_points=16,
+        )
+
+        # With a clean linear relationship, models should agree well
+        assert result["stability_score"] > 0.5
+        assert result["mean_pred_std_across_models"] >= 0
