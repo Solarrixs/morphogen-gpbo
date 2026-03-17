@@ -3,6 +3,7 @@
 ## Last Completed: Phase C Idea #10 — Morphogen Timing Window Encoding
 - Categorical timing columns (CHIR99021_window, SAG_window, BMP4_window) added to morphogen matrix
 - MixedSingleTaskGP used when `--timing-windows` flag is set
+- /simplify pass fixed 4 quality issues
 - 7 tests added, 541 total passing, 0 failures
 
 ## Next Up: Phase C Idea #11 — Per-cell-type GP models
@@ -19,11 +20,12 @@
 - The `cat_dims` parameter is passed through to `fit_gp_botorch()` — ignored when None
 - Import constants from `gopro.config` — never hardcode paths or columns
 - Use `.copy()` before mutating DataFrames passed as arguments
+- SAASBO + multi-output + scalarized qLogEI is guarded with NotImplementedError (iteration 5 fix)
 
 ## Key Context
 - Branch: `ralph/production-readiness-phase2`
 - Tests: `source .venv/bin/activate && python -m pytest gopro/tests/ -v` (541 passing)
-- Task list: `ralph-task.md` (9 subtasks remaining, 6 complete)
+- Task list: `ralph-task.md` (9 tasks todo, 0 blocked, 6 complete)
 - Iterations 1-6: TVR, target profile refinement, FBaxis_rank, additive+interaction kernel, adaptive complexity, timing windows
 
 ## Remaining: 9 tasks todo, 0 blocked, 6 complete
