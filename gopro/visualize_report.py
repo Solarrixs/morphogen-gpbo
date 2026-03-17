@@ -147,7 +147,7 @@ def generate_summary_text(
 
     lengthscales = diagnostics.get("lengthscales")
     if lengthscales:
-        importance = {k: 1.0 / v for k, v in lengthscales.items() if v > 0}
+        importance = {k: 1.0 / v for k, v in lengthscales.items() if v >= 1e-6}
         top3 = sorted(importance, key=importance.get, reverse=True)[:3]
         top3_str = ", ".join(top3)
         parts.append(f"Top morphogens by GP importance: {top3_str}.")
@@ -557,7 +557,7 @@ def build_importance_figure(
         importance = {
             k: 1.0 / v
             for k, v in lengthscales.items()
-            if v > 0 and k not in _EXCLUDE_COLS
+            if v >= 1e-6 and k not in _EXCLUDE_COLS
         }
         sorted_items = sorted(importance.items(), key=lambda x: x[1], reverse=True)
         names = [x[0] for x in sorted_items]

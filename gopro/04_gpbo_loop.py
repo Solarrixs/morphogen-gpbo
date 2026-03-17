@@ -440,6 +440,32 @@ def _select_kernel_complexity(
         }
 
 
+# KernelSpec bundles the two variables that must stay in sync (A-C-001 fix).
+KernelSpec = namedtuple("KernelSpec", ["kernel_type", "use_saasbo"])
+
+
+def _resolve_kernel_spec(
+    kernel_type: str, use_saasbo: bool, adaptive_complexity: bool,
+    n_conditions: int, d_active: int,
+) -> KernelSpec:
+    """Return a single KernelSpec, resolving adaptive complexity if enabled."""
+    if not adaptive_complexity:
+        return KernelSpec(kernel_type=kernel_type, use_saasbo=use_saasbo)
+    complexity = _select_kernel_complexity(
+        n_conditions=n_conditions, d_active=d_active,
+    )
+    logger.info("Adaptive complexity: %s", complexity["reason"])
+    if kernel_type != "ard" or use_saasbo:
+        logger.warning(
+            "Adaptive complexity overriding explicit kernel_type=%r, "
+            "use_saasbo=%r → %s",
+            kernel_type, use_saasbo, complexity["kernel_type"],
+        )
+    if complexity["use_saasbo"]:
+        return KernelSpec(kernel_type="ard", use_saasbo=True)
+    return KernelSpec(kernel_type=complexity["kernel_type"], use_saasbo=False)
+
+
 @functools.lru_cache(maxsize=8)
 def _helmert_basis(D: int) -> np.ndarray:
     """Construct the Helmert ILR basis matrix.
@@ -2684,30 +2710,6 @@ def run_gpbo_loop(
             logger.warning("Timing windows: all timing columns are constant; skipping")
 
     # Adaptive complexity: auto-select kernel based on N/d ratio
-    # KernelSpec bundles the two variables that must stay in sync (A-C-001 fix).
-    KernelSpec = namedtuple("KernelSpec", ["kernel_type", "use_saasbo"])
-
-    def _resolve_kernel_spec(
-        kernel_type: str, use_saasbo: bool, adaptive_complexity: bool,
-        n_conditions: int, d_active: int,
-    ) -> KernelSpec:
-        """Return a single KernelSpec, resolving adaptive complexity if enabled."""
-        if not adaptive_complexity:
-            return KernelSpec(kernel_type=kernel_type, use_saasbo=use_saasbo)
-        complexity = _select_kernel_complexity(
-            n_conditions=n_conditions, d_active=d_active,
-        )
-        logger.info("Adaptive complexity: %s", complexity["reason"])
-        if kernel_type != "ard" or use_saasbo:
-            logger.warning(
-                "Adaptive complexity overriding explicit kernel_type=%r, "
-                "use_saasbo=%r → %s",
-                kernel_type, use_saasbo, complexity["kernel_type"],
-            )
-        if complexity["use_saasbo"]:
-            return KernelSpec(kernel_type="ard", use_saasbo=True)
-        return KernelSpec(kernel_type=complexity["kernel_type"], use_saasbo=False)
-
     d_morph = len([c for c in active_cols if c != "fidelity"])
     kernel_spec = _resolve_kernel_spec(
         kernel_type, use_saasbo, adaptive_complexity,
