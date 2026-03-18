@@ -158,6 +158,11 @@ FIDELITY_COSTS: dict[float, float] = {
     0.0: 0.001,   # CellFlow generative prediction
 }
 
+# --- CellFlow training domain limit ---
+# CellFlow (Klein et al. 2025) was trained on days 1-36 only.
+# Predictions for harvest days beyond this are out-of-distribution.
+CELLFLOW_MAX_TRAINING_DAY: int = 36
+
 # --- Adaptive kernel complexity schedule (NAIAD, Qin et al. ICML 2025) ---
 # N/d ratio thresholds for auto-selecting GP kernel complexity.
 # Below SHARED: use shared lengthscale (fewest params, avoids overfitting).

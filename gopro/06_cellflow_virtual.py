@@ -35,6 +35,7 @@ import numpy as np
 import pandas as pd
 
 from gopro.config import (
+    CELLFLOW_MAX_TRAINING_DAY,
     DATA_DIR,
     PROTEIN_MW_KDA as MW,
     get_logger,
@@ -297,6 +298,9 @@ def predict_cellflow(
     Returns:
         DataFrame with predicted cell type fractions per protocol.
     """
+    # Warn about out-of-distribution harvest days
+    _warn_ood_harvest_days(protocols)
+
     # Auto-discover model if not explicitly provided
     if model_path is None:
         model_path = discover_cellflow_model()
@@ -323,6 +327,30 @@ def predict_cellflow(
         else:
             logger.info("CellFlow model path does not exist: %s. Falling back to heuristic.", model_path)
         return _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
+
+
+def _warn_ood_harvest_days(protocols: pd.DataFrame) -> None:
+    """Log a warning if any protocols have harvest days beyond CellFlow's training range.
+
+    CellFlow was trained on days 1-36 (Sanchis-Calleja + Azbukina).
+    Predictions for later harvest days are out-of-distribution extrapolations.
+    """
+    if "log_harvest_day" not in protocols.columns:
+        return
+
+    harvest_days = np.exp(protocols["log_harvest_day"].values)
+    ood_mask = harvest_days > CELLFLOW_MAX_TRAINING_DAY
+    if ood_mask.any():
+        ood_days = sorted(set(int(round(d)) for d in harvest_days[ood_mask]))
+        logger.warning(
+            "CellFlow OOD: %d/%d protocols have harvest_day > %d "
+            "(max training day). OOD days: %s. Predictions are "
+            "extrapolations and may be unreliable.",
+            int(ood_mask.sum()),
+            len(protocols),
+            CELLFLOW_MAX_TRAINING_DAY,
+            ood_days,
+        )
 
 
 def _predict_with_cellflow(
