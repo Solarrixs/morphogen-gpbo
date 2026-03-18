@@ -1,5 +1,6 @@
 """Tests for Phase 4 (CellRank 2) and Phase 5 (CellFlow) virtual data generation."""
 
+import logging
 import math
 import pytest
 import numpy as np
@@ -1512,49 +1513,40 @@ class TestPredictWithCellflowJAX:
 class TestOODHarvestDayWarning:
     """Tests for TODO-3: CellFlow OOD harvest day warning."""
 
+    _logger_name = step06.logger.name
+
     def test_warning_emitted_for_day_72(self, caplog):
         """Protocols with harvest_day=72 should trigger OOD warning."""
-        import logging
-
         protocols = pd.DataFrame({
-            "CHIR99021_uM": [1.0, 2.0],
             "log_harvest_day": [math.log(72), math.log(72)],
         })
-        with caplog.at_level(logging.WARNING, logger="gopro.06_cellflow_virtual"):
+        with caplog.at_level(logging.WARNING, logger=self._logger_name):
             step06._warn_ood_harvest_days(protocols)
         assert any("CellFlow OOD" in msg for msg in caplog.messages)
         assert any("72" in msg for msg in caplog.messages)
 
     def test_no_warning_for_day_21(self, caplog):
         """Protocols within training range (day 21) should not warn."""
-        import logging
-
         protocols = pd.DataFrame({
-            "CHIR99021_uM": [1.0],
             "log_harvest_day": [math.log(21)],
         })
-        with caplog.at_level(logging.WARNING, logger="gopro.06_cellflow_virtual"):
+        with caplog.at_level(logging.WARNING, logger=self._logger_name):
             step06._warn_ood_harvest_days(protocols)
         assert not any("CellFlow OOD" in msg for msg in caplog.messages)
 
     def test_no_warning_when_no_harvest_column(self, caplog):
         """Protocols without log_harvest_day column should not warn."""
-        import logging
-
         protocols = pd.DataFrame({"CHIR99021_uM": [1.0]})
-        with caplog.at_level(logging.WARNING, logger="gopro.06_cellflow_virtual"):
+        with caplog.at_level(logging.WARNING, logger=self._logger_name):
             step06._warn_ood_harvest_days(protocols)
         assert not any("CellFlow OOD" in msg for msg in caplog.messages)
 
     def test_mixed_days_warns_only_ood(self, caplog):
         """Only OOD harvest days should appear in the warning."""
-        import logging
-
         protocols = pd.DataFrame({
-            "CHIR99021_uM": [1.0, 2.0, 3.0],
             "log_harvest_day": [math.log(21), math.log(45), math.log(72)],
         })
-        with caplog.at_level(logging.WARNING, logger="gopro.06_cellflow_virtual"):
+        with caplog.at_level(logging.WARNING, logger=self._logger_name):
             step06._warn_ood_harvest_days(protocols)
         msgs = [m for m in caplog.messages if "CellFlow OOD" in m]
         assert len(msgs) == 1
