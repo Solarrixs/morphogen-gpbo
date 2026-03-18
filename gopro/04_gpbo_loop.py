@@ -339,10 +339,13 @@ def _fit_mll_with_restarts(
     from botorch.fit import fit_gpytorch_mll
     from gpytorch.mlls import ExactMarginalLogLikelihood
 
+    if n_restarts < 1:
+        raise ValueError(f"n_restarts must be >= 1, got {n_restarts}")
+
     best_model = None
     best_mll_value = float("-inf")
 
-    for i in range(max(1, n_restarts)):
+    for i in range(n_restarts):
         # Deterministic seed per restart for reproducibility
         torch.manual_seed(42 + i * 13)
 
@@ -361,8 +364,8 @@ def _fit_mll_with_restarts(
                         model_i.likelihood.noise = (
                             torch.rand(1, dtype=DTYPE, device=DEVICE) * 0.5 + 0.01
                         )
-                except Exception:
-                    pass  # Some model structures resist direct HP manipulation
+                except Exception as hp_exc:
+                    logger.debug("Could not randomise HPs for restart %d: %s", i, hp_exc)
 
             fit_gpytorch_mll(mll_i)
         except Exception as exc:
