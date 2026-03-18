@@ -759,33 +759,6 @@ def _get_zero_passing_kernel_class():
         ZeroPassingKernel = _make_zero_passing_kernel_class()
     return ZeroPassingKernel
 
-    def _phi(self, x: torch.Tensor) -> torch.Tensor:
-        """Smooth zero-passing mask: 1 - exp(-||x_conc||^2 / eps)."""
-        if self.concentration_dims is not None:
-            x_conc = x[..., self.concentration_dims]
-        else:
-            x_conc = x
-        sq_norm = (x_conc ** 2).sum(dim=-1, keepdim=True)
-        return 1.0 - torch.exp(-sq_norm / self.eps)
-
-    def forward(self, x1, x2, diag=False, **params):
-        """Evaluate k_zp(x1, x2) = k_base(x1, x2) * phi(x1) * phi(x2)."""
-        base_cov = self.base_kernel(x1, x2, diag=diag, **params)
-        phi1 = self._phi(x1)  # (..., N, 1)
-        phi2 = self._phi(x2)  # (..., M, 1)
-
-        if diag:
-            # base_cov is (..., N), phi is (..., N, 1)
-            mask = (phi1.squeeze(-1) * phi2.squeeze(-1))
-            return base_cov * mask
-        else:
-            # base_cov is (..., N, M) lazy tensor or dense
-            mask = phi1 * phi2.transpose(-2, -1)  # (..., N, M)
-            # Multiply element-wise; handle lazy tensors by evaluating
-            if hasattr(base_cov, 'to_dense'):
-                return base_cov.to_dense() * mask
-            return base_cov * mask
-
 
 def _wrap_zero_passing(model, concentration_dims: list[int] | None = None, eps: float = 1.0):
     """Wrap a BoTorch GP model's covariance module with ZeroPassingKernel.
