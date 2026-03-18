@@ -1385,6 +1385,8 @@ def fit_tvr_models(
         Y: Cell type fraction matrix.
         target_cell_types: Cell types to optimize for. None = all.
         use_ilr: Whether to apply ILR transform to Y.
+        use_alr: If True, use ALR transform instead of ILR (takes precedence).
+        pseudocount: Zero-replacement value for multiplicative replacement.
         explicit_priors: If True, set explicit lengthscale + noise priors.
 
     Returns:
@@ -1799,10 +1801,9 @@ def fit_gp_botorch(
                     # Var(z_j) = var_j/y_j^2 + var_D/y_D^2
                     y = Y_safe[i]
                     var = nv_values[i]
-                    for j in range(D - 1):
-                        transformed_var[i, j] = (
-                            var[j] / (y[j] ** 2) + var[-1] / (y[-1] ** 2)
-                        )
+                    transformed_var[i] = (
+                        var[:-1] / (y[:-1] ** 2) + var[-1] / (y[-1] ** 2)
+                    )
                 else:
                     V = _helmert_basis(D)  # (D, D-1)
                     J = np.diag(1.0 / Y_safe[i]) @ V  # (D, D-1)
@@ -2937,6 +2938,7 @@ def compute_ensemble_disagreement(
         Y: Training cell-type fraction matrix.
         n_restarts: Number of independent GP fits (default from config).
         use_ilr: Whether ILR transform is applied.
+        use_alr: If True, use ALR transform instead of ILR (takes precedence).
         kernel_type: Kernel structure for each GP.
         cat_dims: Categorical column indices (for MixedSingleTaskGP).
         per_type_gp: Fit per-output ModelListGP.
@@ -3586,13 +3588,7 @@ def run_gpbo_loop(
     Returns:
         DataFrame of recommended next experiments.
     """
-    # Guard: ALR and ILR are mutually exclusive log-ratio transforms
-    if use_alr and not use_ilr:
-        raise ValueError(
-            "--alr and --no-ilr are mutually exclusive: ALR is itself a "
-            "log-ratio transform, so --no-ilr would disable it."
-        )
-    # When ALR is active, suppress ILR (ALR takes precedence)
+    # ALR is itself a log-ratio transform — when active, suppress ILR
     if use_alr:
         use_ilr = False
 
