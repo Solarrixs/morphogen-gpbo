@@ -1557,3 +1557,73 @@ class TestOODHarvestDayWarning:
         """CELLFLOW_MAX_TRAINING_DAY should be importable from config."""
         from gopro.config import CELLFLOW_MAX_TRAINING_DAY
         assert CELLFLOW_MAX_TRAINING_DAY == 36
+
+
+class TestCellFlowVarianceInflation:
+    """Tests for TODO-4: CellFlow conservative prediction bias — variance inflation."""
+
+    def test_inflate_factor_1_is_noop(self):
+        """Factor 1.0 should return identical fractions."""
+        fracs = pd.DataFrame(
+            {"A": [0.6, 0.3, 0.1], "B": [0.2, 0.5, 0.4], "C": [0.2, 0.2, 0.5]},
+            index=["c1", "c2", "c3"],
+        )
+        result = step06.inflate_cellflow_variance(fracs, factor=1.0)
+        pd.testing.assert_frame_equal(result, fracs)
+
+    def test_inflate_factor_2_increases_spread(self):
+        """Factor 2.0 should increase variance of each column across conditions."""
+        np.random.seed(42)
+        fracs = pd.DataFrame(
+            np.random.dirichlet([5, 5, 5], size=20),
+            columns=["A", "B", "C"],
+        )
+        inflated = step06.inflate_cellflow_variance(fracs, factor=2.0)
+        # Each column's variance should increase
+        for col in fracs.columns:
+            assert inflated[col].var() > fracs[col].var(), (
+                f"Column {col} variance did not increase"
+            )
+
+    def test_inflate_preserves_row_sums(self):
+        """Inflated fractions must still sum to 1.0 per row."""
+        fracs = pd.DataFrame(
+            {"A": [0.7, 0.2], "B": [0.2, 0.6], "C": [0.1, 0.2]},
+            index=["c1", "c2"],
+        )
+        inflated = step06.inflate_cellflow_variance(fracs, factor=3.0)
+        np.testing.assert_allclose(inflated.sum(axis=1).values, 1.0, atol=1e-10)
+
+    def test_inflate_no_negative_values(self):
+        """Inflated fractions must be non-negative even with extreme factor."""
+        fracs = pd.DataFrame(
+            {"A": [0.9, 0.05], "B": [0.05, 0.9], "C": [0.05, 0.05]},
+            index=["c1", "c2"],
+        )
+        inflated = step06.inflate_cellflow_variance(fracs, factor=5.0)
+        assert (inflated.values >= 0).all(), "Negative fractions found"
+
+    def test_inflate_empty_dataframe(self):
+        """Empty DataFrame should pass through unchanged."""
+        fracs = pd.DataFrame(columns=["A", "B"])
+        result = step06.inflate_cellflow_variance(fracs, factor=2.0)
+        assert len(result) == 0
+
+    def test_config_default_constant(self):
+        """CELLFLOW_DEFAULT_VARIANCE_INFLATION should be exported from config."""
+        from gopro.config import CELLFLOW_DEFAULT_VARIANCE_INFLATION
+        assert CELLFLOW_DEFAULT_VARIANCE_INFLATION == 2.0
+
+    def test_predict_cellflow_applies_inflation(self):
+        """predict_cellflow with variance_inflation != 1.0 should change output."""
+        protocols = pd.DataFrame(
+            {"CHIR99021_uM": [1.0, 3.0, 6.0], "log_harvest_day": [math.log(21)] * 3},
+            index=["v1", "v2", "v3"],
+        )
+        base = step06.predict_cellflow(protocols, variance_inflation=1.0)
+        inflated = step06.predict_cellflow(protocols, variance_inflation=2.0)
+        # Shapes match, but values differ
+        assert base.shape == inflated.shape
+        assert not np.allclose(base.values, inflated.values), (
+            "Inflation factor 2.0 should change predictions"
+        )

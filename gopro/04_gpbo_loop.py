@@ -2248,6 +2248,7 @@ def compute_ensemble_disagreement(
 def merge_multi_fidelity_data(
     data_sources: list[tuple[Path, Path, float]],
     cellflow_confidence_threshold: float = 0.3,
+    cellflow_variance_inflation: float = 1.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Merge training data from multiple fidelity sources.
 
@@ -2263,6 +2264,8 @@ def merge_multi_fidelity_data(
             Each tuple provides a data source at a given fidelity level.
         cellflow_confidence_threshold: Minimum confidence for CellFlow
             virtual points. Points below this are dropped (default 0.3).
+        cellflow_variance_inflation: Factor to inflate CellFlow prediction
+            variance (>1 spreads predictions from global mean, 1.0 = no-op).
 
     Returns:
         Tuple of merged (X, Y) DataFrames with consistent column alignment.
@@ -2302,6 +2305,23 @@ def merge_multi_fidelity_data(
                                 "Filtered %d/%d CellFlow points below confidence threshold %.2f",
                                 n_filtered, n_before, cellflow_confidence_threshold,
                             )
+
+        # Apply variance inflation to CellFlow predictions
+        if fidelity == 0.0 and cellflow_variance_inflation != 1.0 and len(Y) > 0:
+            ct_cols = [c for c in Y.columns if c != "fidelity"]
+            if ct_cols:
+                Y = Y.copy()
+                vals = Y[ct_cols].values
+                mean_comp = vals.mean(axis=0, keepdims=True)
+                inflated = mean_comp + cellflow_variance_inflation * (vals - mean_comp)
+                inflated = np.maximum(inflated, 0.0)
+                row_sums = inflated.sum(axis=1, keepdims=True)
+                row_sums = np.where(row_sums == 0, 1.0, row_sums)
+                Y[ct_cols] = inflated / row_sums
+                logger.info(
+                    "Applied variance inflation (factor=%.1f) to %d CellFlow points",
+                    cellflow_variance_inflation, len(Y),
+                )
 
         all_X.append(X)
         all_Y.append(Y)
@@ -2620,6 +2640,7 @@ def run_gpbo_loop(
     per_type_gp: bool = False,
     ensemble_restarts: int = 0,
     noise_variance_csv: Optional[Path] = None,
+    cellflow_variance_inflation: float = 1.0,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -2757,7 +2778,10 @@ def run_gpbo_loop(
 
         if validated_virtual:
             all_sources = [(fractions_csv, morphogen_csv, 1.0)] + validated_virtual
-            X, Y = merge_multi_fidelity_data(all_sources)
+            X, Y = merge_multi_fidelity_data(
+                all_sources,
+                cellflow_variance_inflation=cellflow_variance_inflation,
+            )
         else:
             logger.info("All virtual sources dropped by fidelity validation; "
                         "using single-fidelity GP on real data only")
@@ -3126,6 +3150,11 @@ if __name__ == "__main__":
                         help="Path to per-condition bootstrap variance CSV "
                              "(from compute_bootstrap_uncertainty). Enables "
                              "heteroscedastic noise modeling via train_Yvar.")
+    parser.add_argument("--cellflow-variance-inflation", type=float, default=1.0,
+                        help="Inflate CellFlow prediction variance by this factor. "
+                             "Values >1.0 spread predictions away from the mean to "
+                             "counteract conservative bias (default: 1.0, no inflation). "
+                             "Recommended: 2.0 (CELLFLOW_DEFAULT_VARIANCE_INFLATION).")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -3299,6 +3328,7 @@ if __name__ == "__main__":
         per_type_gp=args.per_type_gp,
         ensemble_restarts=args.ensemble_restarts,
         noise_variance_csv=Path(args.bootstrap_noise) if args.bootstrap_noise else None,
+        cellflow_variance_inflation=args.cellflow_variance_inflation,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

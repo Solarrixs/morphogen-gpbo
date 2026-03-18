@@ -4,7 +4,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 **Last updated:** 2026-03-17
 **Branch:** ralph/production-readiness-phase2
-**Tests:** 610 passing (gopro) + 53 (literature) = 663 total
+**Tests:** 617 passing (gopro) + 53 (literature) = 670 total
 **§1.1 Status:** COMPLETE (15/15) — all competitive landscape ideas implemented
 **§1.2 Status:** COMPLETE (3/3) — all critical MF-GP bugs fixed
 
@@ -40,7 +40,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 - [x] TODO-1: Fix CellFlow JAX vs PyTorch mismatch — update `_predict_with_cellflow()` to use JAX API.
 - [x] TODO-3: Add Day 72 out-of-distribution warning — CellFlow trained on day 1-36 only.
-- [ ] TODO-4: Handle CellFlow conservative prediction bias — variance inflation or calibration correction.
+- [x] TODO-4: Handle CellFlow conservative prediction bias — variance inflation or calibration correction.
 
 ### 1.4 GP Model Improvements
 

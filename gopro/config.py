@@ -163,6 +163,13 @@ FIDELITY_COSTS: dict[float, float] = {
 # Predictions for harvest days beyond this are out-of-distribution.
 CELLFLOW_MAX_TRAINING_DAY: int = 36
 
+# --- CellFlow variance inflation ---
+# CellFlow predictions tend to be conservative (clustered near the mean
+# composition).  Variance inflation amplifies deviations from the global
+# mean before the predictions are fed into the multi-fidelity GP, so the
+# GP can learn from more spread-out low-fidelity signal.
+CELLFLOW_DEFAULT_VARIANCE_INFLATION: float = 2.0
+
 # --- Adaptive kernel complexity schedule (NAIAD, Qin et al. ICML 2025) ---
 # N/d ratio thresholds for auto-selecting GP kernel complexity.
 # Below SHARED: use shared lengthscale (fewest params, avoids overfitting).

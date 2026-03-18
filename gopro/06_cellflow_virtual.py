@@ -35,6 +35,7 @@ import numpy as np
 import pandas as pd
 
 from gopro.config import (
+    CELLFLOW_DEFAULT_VARIANCE_INFLATION,
     CELLFLOW_MAX_TRAINING_DAY,
     DATA_DIR,
     PROTEIN_MW_KDA as MW,
@@ -278,6 +279,7 @@ def predict_cellflow(
     batch_size: int = 256,
     n_cells_per_condition: int = 500,
     real_fractions_csv: Optional[Path] = None,
+    variance_inflation: float = 1.0,
 ) -> pd.DataFrame:
     """Run CellFlow predictions for a batch of protocols.
 
@@ -294,6 +296,8 @@ def predict_cellflow(
         n_cells_per_condition: Number of virtual cells to generate.
         real_fractions_csv: Path to real training fractions CSV for
             cell type vocabulary alignment (used by heuristic fallback).
+        variance_inflation: Factor to inflate prediction variance
+            (>1 spreads predictions away from mean, 1.0 = no-op).
 
     Returns:
         DataFrame with predicted cell type fractions per protocol.
@@ -312,7 +316,7 @@ def predict_cellflow(
         HAS_CELLFLOW = False
 
     if HAS_CELLFLOW and model_path is not None and model_path.exists():
-        return _predict_with_cellflow(
+        result = _predict_with_cellflow(
             protocols, model_path, batch_size, n_cells_per_condition
         )
     else:
@@ -326,7 +330,13 @@ def predict_cellflow(
             )
         else:
             logger.info("CellFlow model path does not exist: %s. Falling back to heuristic.", model_path)
-        return _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
+        result = _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
+
+    # Apply variance inflation if requested
+    if variance_inflation != 1.0:
+        result = inflate_cellflow_variance(result, factor=variance_inflation)
+
+    return result
 
 
 def _warn_ood_harvest_days(protocols: pd.DataFrame) -> None:
@@ -351,6 +361,47 @@ def _warn_ood_harvest_days(protocols: pd.DataFrame) -> None:
             CELLFLOW_MAX_TRAINING_DAY,
             ood_days,
         )
+
+
+def inflate_cellflow_variance(
+    fractions: pd.DataFrame,
+    factor: float = CELLFLOW_DEFAULT_VARIANCE_INFLATION,
+) -> pd.DataFrame:
+    """Inflate CellFlow prediction variance to counteract conservative bias.
+
+    CellFlow predictions tend to cluster near the mean composition. This
+    amplifies each condition's deviation from the global mean by ``factor``,
+    then re-normalises to valid fractions.
+
+    ``inflated = mean + factor * (original - mean)``
+
+    Args:
+        fractions: Predicted cell type fractions (rows sum to ~1).
+        factor: Inflation multiplier (>1 spreads predictions, 1.0 = no-op).
+
+    Returns:
+        DataFrame with inflated fractions, same shape as input.
+    """
+    if factor == 1.0 or len(fractions) == 0:
+        return fractions
+
+    fractions = fractions.copy()
+    mean_composition = fractions.values.mean(axis=0, keepdims=True)
+    inflated = mean_composition + factor * (fractions.values - mean_composition)
+
+    # Clamp to non-negative, then re-normalise rows to sum to 1
+    inflated = np.maximum(inflated, 0.0)
+    row_sums = inflated.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums == 0, 1.0, row_sums)
+    inflated = inflated / row_sums
+
+    result = pd.DataFrame(inflated, index=fractions.index, columns=fractions.columns)
+    logger.info(
+        "Applied variance inflation (factor=%.1f) to %d CellFlow predictions",
+        factor,
+        len(result),
+    )
+    return result
 
 
 def _predict_with_cellflow(

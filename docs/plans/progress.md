@@ -1,16 +1,48 @@
 # Progress Log
 
-## Iteration 4 — 2026-03-18
+## Iteration 6 — 2026-03-18T06:00:00Z
+- Task: TODO-4 — Handle CellFlow conservative prediction bias (§1.3)
+- Result: pass
+- Files changed:
+  - `gopro/config.py` — Added `CELLFLOW_DEFAULT_VARIANCE_INFLATION = 2.0` constant
+  - `gopro/06_cellflow_virtual.py` — Added `inflate_cellflow_variance()` helper; wired into `predict_cellflow()` via `variance_inflation` parameter
+  - `gopro/04_gpbo_loop.py` — Added `--cellflow-variance-inflation` CLI flag; threaded through `run_gpbo_loop()` → `merge_multi_fidelity_data()`; inline inflation in merge for fidelity=0.0 data
+  - `gopro/tests/test_phase4_5.py` — 7 new tests in `TestCellFlowVarianceInflation`
+  - `docs/task_plan.md` — Marked TODO-4 complete, updated test count to 617
+- Tests: 617 passing (was 610)
+- Notes: §1.3 CellFlow Integration Fixes now COMPLETE (TODO-1, TODO-3, TODO-4 all done). Next: §1.4 GP model improvements (TODO-9 pseudocount) or §1.9 Sanchis-Calleja data ingestion.
+
+## Iteration 5 — 2026-03-18T04:58:11Z
+- Task: TODO-3 — Add CellFlow OOD harvest day warning (§1.3)
+- Result: pass
+- Commits:
+  - `4ca0939` [ralph-5] TODO-3: Add CellFlow OOD harvest day warning
+  - `d227e73` [ralph-simplify] DRY up OOD warning tests: hoist import, use logger.name, remove noise columns
+- Files changed:
+  - `gopro/config.py` — Added `CELLFLOW_MAX_TRAINING_DAY = 36` constant
+  - `gopro/06_cellflow_virtual.py` — Added `_warn_ood_harvest_days()` helper; fires warning in `predict_cellflow()` when harvest day > 36
+  - `gopro/tests/test_phase4_5.py` — 5 new tests in `TestOODHarvestDayWarning`; simplify pass DRY'd up imports and removed noise columns
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Tests: 610 passing (was 605)
+- Quality: Simplify pass hoisted shared import, switched to `logger.name` assertion, removed noise columns from test fixtures. No issues found.
+- Notes: §1.3 now has 2/3 items complete (TODO-1, TODO-3). TODO-4 (variance inflation) remains. §1.9 Sanchis-Calleja ingest is high-priority alternative for next iteration.
+
+## Iteration 4 — 2026-03-18T04:44:37Z
 - Task: TODO-1 — Fix CellFlow JAX vs PyTorch API mismatch (§1.3)
 - Result: pass
 - Commits:
-  - `[ralph-4] TODO-1: Fix CellFlow JAX vs PyTorch API mismatch`
+  - `59b1be6` [ralph-4] TODO-1: Fix CellFlow JAX vs PyTorch API mismatch
+  - `6625794` [ralph-simplify] Remove unused jnp import, DRY up JAX test mocks
 - Files changed:
-  - `gopro/06_cellflow_virtual.py` — Replaced `import torch` + `torch.no_grad()` with `import jax` + `jax.random.PRNGKey`/`split` in `_predict_with_cellflow()`. Added `rng_key` param to `model.predict()` for reproducible JAX sampling.
-  - `gopro/tests/test_phase4_5.py` — 3 new tests: `test_uses_jax_not_torch`, `test_rng_key_differs_per_batch`, `test_fallback_clustering_when_no_cell_type`
+  - `gopro/06_cellflow_virtual.py` — Replaced `import torch` + `torch.no_grad()` with `import jax` + `jax.random.PRNGKey`/`split` in `_predict_with_cellflow()`. Added `rng_key` param to `model.predict()`. Simplify pass removed unused `jnp` import.
+  - `gopro/tests/test_phase4_5.py` — 3 new tests: `test_uses_jax_not_torch`, `test_rng_key_differs_per_batch`, `test_fallback_clustering_when_no_cell_type`. Simplify pass DRY'd up JAX mock fixtures.
   - `docs/task_plan.md` — Marked TODO-1 complete, updated test count to 605
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
 - Tests: 605 passing (was 602)
-- Notes: CellFlow (Klein et al., bioRxiv 2025) is built on JAX/Flax. The previous code incorrectly imported PyTorch. JAX doesn't track gradients by default (only jax.grad does), so no no_grad context needed. Next: TODO-3 (OOD warning) or TODO-4 (variance inflation).
+- Quality: Simplify pass removed unused `jnp` import from cellflow module, DRY'd up JAX test mocks into shared fixtures. No issues found.
+- Notes: CellFlow (Klein et al., bioRxiv 2025) is JAX/Flax-based. Previous code incorrectly imported PyTorch. §1.3 has 2 remaining items: TODO-3 (OOD warning) and TODO-4 (variance inflation). §1.9 (Sanchis-Calleja ingest) is high-priority alternative.
 
 ## Iteration 3 — 2026-03-18T03:08:23Z
 - Task: TODO-26 — Fix CellFlow dose encoding (§1.2 FINAL) + simplify pass
