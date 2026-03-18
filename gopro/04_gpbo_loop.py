@@ -116,6 +116,130 @@ def _unmap_fidelity(remapped_values: torch.Tensor) -> torch.Tensor:
         logger.warning("Unmapped fidelity values (no known inverse): %s", remapped_values[~matched].tolist())
     return out
 
+
+# --- Per-fidelity ARD helpers ---
+
+def _fidelity_to_task_idx(
+    fidelity_values: torch.Tensor,
+) -> tuple[torch.Tensor, dict[float, int]]:
+    """Convert float fidelity values to integer task indices for IndexKernel.
+
+    Returns:
+        (task_indices, fidelity_map) where task_indices is a long tensor of
+        the same shape and fidelity_map maps original float → int index.
+        Indices are assigned in ascending fidelity order (lowest fidelity → 0).
+    """
+    unique_fids = sorted(fidelity_values.unique().tolist())
+    fidelity_map = {f: i for i, f in enumerate(unique_fids)}
+    task_idx = torch.zeros_like(fidelity_values, dtype=torch.long)
+    for fid_val, idx in fidelity_map.items():
+        mask = torch.isclose(
+            fidelity_values, torch.tensor(fid_val, dtype=fidelity_values.dtype)
+        )
+        task_idx[mask] = idx
+    return task_idx.to(dtype=fidelity_values.dtype), fidelity_map
+
+
+def _build_per_fidelity_ard_model(
+    train_X: torch.Tensor,
+    train_Y: torch.Tensor,
+    fidelity_idx: int,
+    n_fidelities: int,
+) -> "SingleTaskGP":
+    """Build a GP with g(x) + delta(x,m) per-fidelity ARD kernel structure.
+
+    The kernel decomposes into:
+      k((x,m), (x',m')) = k_base(x, x') + k_fidelity(m, m') * k_residual(x, x')
+
+    where k_base is a shared Matern 5/2 + ARD kernel (captures the common
+    response surface), and k_residual * k_fidelity is a per-fidelity
+    correction with its own ARD lengthscales.  This lets different fidelity
+    levels have different effective lengthscales: the low-fidelity source can
+    have a smoother landscape (longer lengthscales) while the high-fidelity
+    source captures fine-grained morphogen effects.
+
+    Args:
+        train_X: Training inputs with fidelity column containing integer task
+            indices (from ``_fidelity_to_task_idx``).
+        train_Y: Training targets.
+        fidelity_idx: Column index of the fidelity/task dimension in train_X.
+        n_fidelities: Number of distinct fidelity levels.
+
+    Returns:
+        Fitted-ready SingleTaskGP with additive per-fidelity ARD kernel.
+    """
+    from botorch.models import SingleTaskGP
+    from botorch.models.transforms import Normalize, Standardize
+    from gpytorch.kernels import MaternKernel, ScaleKernel, IndexKernel
+
+    d_total = train_X.shape[1]
+    morph_dims = [i for i in range(d_total) if i != fidelity_idx]
+    d_morph = len(morph_dims)
+
+    # Base kernel: shared ARD across all fidelities (morphogen dims only)
+    k_base = ScaleKernel(
+        MaternKernel(nu=2.5, ard_num_dims=d_morph, active_dims=morph_dims)
+    )
+
+    # Fidelity-specific residual: per-fidelity ARD correction
+    k_residual = ScaleKernel(
+        MaternKernel(nu=2.5, ard_num_dims=d_morph, active_dims=morph_dims)
+    )
+    k_fidelity = IndexKernel(
+        num_tasks=n_fidelities,
+        rank=min(n_fidelities, 2),
+        active_dims=[fidelity_idx],
+    )
+
+    covar_module = k_base + k_residual * k_fidelity
+
+    # Only normalize morphogen dims — fidelity is an integer task index
+    morph_indices = torch.tensor(morph_dims, dtype=torch.long)
+    model = SingleTaskGP(
+        train_X,
+        train_Y,
+        covar_module=covar_module,
+        input_transform=Normalize(d=d_total, indices=morph_indices),
+        outcome_transform=Standardize(m=train_Y.shape[1]),
+    )
+    return model
+
+
+def _extract_per_fidelity_ard_lengthscales(model) -> dict[str, np.ndarray] | None:
+    """Extract base and residual lengthscales from a per-fidelity ARD GP.
+
+    Returns:
+        Dict with 'base' and 'residual' keys mapping to 1-D numpy arrays
+        of ARD lengthscales, or None if extraction fails.
+    """
+    try:
+        covar = model.covar_module
+        # covar is AdditiveKernel with .kernels = [k_base, ProductKernel]
+        if not hasattr(covar, "kernels") or len(covar.kernels) != 2:
+            return None
+        k_base = covar.kernels[0]  # ScaleKernel(MaternKernel)
+        k_product = covar.kernels[1]  # ScaleKernel(MaternKernel) * IndexKernel
+        base_matern = getattr(k_base, "base_kernel", k_base)
+        if hasattr(base_matern, "lengthscale") and base_matern.lengthscale is not None:
+            base_ls = base_matern.lengthscale.detach().cpu().numpy().flatten()
+        else:
+            return None
+        # ProductKernel has .kernels
+        residual_ls = None
+        if hasattr(k_product, "kernels"):
+            for sub in k_product.kernels:
+                inner = getattr(sub, "base_kernel", sub)
+                if hasattr(inner, "lengthscale") and inner.lengthscale is not None:
+                    if getattr(inner, "ard_num_dims", None) is not None:
+                        residual_ls = inner.lengthscale.detach().cpu().numpy().flatten()
+                        break
+        result = {"base": base_ls}
+        if residual_ls is not None:
+            result["residual"] = residual_ls
+        return result
+    except (AttributeError, RuntimeError):
+        return None
+
 # Literature-based morphogen bounds (all in µM).
 # These serve as fallback maxima; actual bounds used during optimization
 # are computed dynamically from training data (see _compute_active_bounds).
@@ -888,6 +1012,11 @@ def _extract_lengthscales(model, n_input_dims: int):
         1-D numpy array of lengthscales, or None.
     """
     try:
+        # Per-fidelity ARD: return base (shared) lengthscales
+        pf_ls = _extract_per_fidelity_ard_lengthscales(model)
+        if pf_ls is not None:
+            return pf_ls["base"]
+
         # ModelListGP of SAAS models — median across sub-models
         if hasattr(model, 'models'):
             all_ls = []
@@ -1367,6 +1496,7 @@ def fit_gp_botorch(
     mll_restarts: int = 1,
     explicit_priors: bool = False,
     input_warp: bool = False,
+    per_fidelity_ard: bool = False,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
 
@@ -1429,6 +1559,12 @@ def fit_gp_botorch(
             skewed concentration distributions. Chained with Normalize.
             Only applies to MAP paths (standard, per-type-GP). Ignored
             for SAASBO, LassoBO, and multi-fidelity. (default: False)
+        per_fidelity_ard: If True, use g(x) + delta(x,m) kernel structure
+            for multi-fidelity data instead of LinearTruncatedFidelityKernel.
+            Base kernel g(x) has shared ARD lengthscales; residual delta(x,m)
+            has per-fidelity ARD via IndexKernel, allowing different fidelity
+            levels to have different effective lengthscales. Requires
+            multi-fidelity data (>1 fidelity level). (default: False)
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -1521,7 +1657,6 @@ def fit_gp_botorch(
     fidelity_idx = list(X.columns).index("fidelity") if has_fidelity else None
 
     if has_fidelity and X["fidelity"].nunique() > 1:
-        from botorch.models import SingleTaskMultiFidelityGP
         logger.info("Using multi-fidelity GP (fidelity column detected)")
         if use_saasbo:
             logger.info("SAASBO ignored — multi-fidelity takes priority")
@@ -1531,29 +1666,55 @@ def fit_gp_botorch(
             logger.info("per_type_gp ignored — multi-fidelity takes priority")
         if input_warp:
             logger.info("input_warp ignored — multi-fidelity takes priority")
-        # Remap fidelity values to open interval (0, 1) to prevent boundary
-        # collapse in LinearTruncatedFidelityKernel (TODO-24).
-        train_X = train_X.clone()
-        train_X[:, fidelity_idx] = _remap_fidelity(train_X[:, fidelity_idx])
-        logger.info(
-            "Remapped fidelity for MF kernel: %s",
-            sorted(train_X[:, fidelity_idx].unique().tolist()),
-        )
-        def _mf_factory():
-            m = SingleTaskMultiFidelityGP(
-                train_X,
-                train_Y,
-                data_fidelities=[fidelity_idx],
-                input_transform=Normalize(d=train_X.shape[1]),
-                outcome_transform=Standardize(m=train_Y.shape[1]),
-            )
-            if explicit_priors:
-                _set_explicit_priors(m, train_X.shape[1])
-            if warm_start:
-                load_gp_state(m, gp_state_path)
-            return m
 
-        model = _fit_mll_with_restarts(_mf_factory, n_restarts=mll_restarts)
+        train_X = train_X.clone()
+
+        if per_fidelity_ard:
+            # Per-fidelity ARD: g(x) + delta(x,m) kernel with IndexKernel
+            # Convert fidelity floats to integer task indices
+            task_idx, fidelity_map = _fidelity_to_task_idx(train_X[:, fidelity_idx])
+            train_X[:, fidelity_idx] = task_idx
+            n_fid = len(fidelity_map)
+            logger.info(
+                "Per-fidelity ARD: %d fidelity levels, task map: %s",
+                n_fid, fidelity_map,
+            )
+
+            def _pf_ard_factory():
+                m = _build_per_fidelity_ard_model(
+                    train_X, train_Y, fidelity_idx, n_fid,
+                )
+                if explicit_priors:
+                    _set_explicit_priors(m, train_X.shape[1])
+                if warm_start:
+                    load_gp_state(m, gp_state_path)
+                return m
+
+            model = _fit_mll_with_restarts(_pf_ard_factory, n_restarts=mll_restarts)
+        else:
+            from botorch.models import SingleTaskMultiFidelityGP
+            # Remap fidelity values to open interval (0, 1) to prevent boundary
+            # collapse in LinearTruncatedFidelityKernel (TODO-24).
+            train_X[:, fidelity_idx] = _remap_fidelity(train_X[:, fidelity_idx])
+            logger.info(
+                "Remapped fidelity for MF kernel: %s",
+                sorted(train_X[:, fidelity_idx].unique().tolist()),
+            )
+            def _mf_factory():
+                m = SingleTaskMultiFidelityGP(
+                    train_X,
+                    train_Y,
+                    data_fidelities=[fidelity_idx],
+                    input_transform=Normalize(d=train_X.shape[1]),
+                    outcome_transform=Standardize(m=train_Y.shape[1]),
+                )
+                if explicit_priors:
+                    _set_explicit_priors(m, train_X.shape[1])
+                if warm_start:
+                    load_gp_state(m, gp_state_path)
+                return m
+
+            model = _fit_mll_with_restarts(_mf_factory, n_restarts=mll_restarts)
     elif use_saasbo:
         if cat_dims:
             logger.warning(
@@ -1720,13 +1881,32 @@ def fit_gp_botorch(
     lengthscales = _extract_lengthscales(model, train_X.shape[1])
     if lengthscales is not None:
         importance = 1.0 / np.maximum(lengthscales, 1e-6)
-        morph_importance = pd.Series(importance[:len(X.columns)], index=X.columns)
+        # Align lengthscales to column names (per-fidelity ARD may have
+        # fewer dims than X.columns since fidelity is handled by IndexKernel)
+        n_ls = len(importance)
+        col_names = [c for c in X.columns if c != "fidelity"] if n_ls < len(X.columns) else list(X.columns)
+        morph_importance = pd.Series(importance[:len(col_names)], index=col_names[:n_ls])
         morph_importance = morph_importance.sort_values(ascending=False)
         logger.info("Morphogen importance (1/lengthscale):")
         for morph, imp in morph_importance.head(8).items():
             logger.info("  %s: %.4f", morph, imp)
     else:
         logger.info("(lengthscales not directly accessible for this model type)")
+
+    # Per-fidelity ARD: log both base and residual lengthscales
+    if per_fidelity_ard:
+        pf_ls = _extract_per_fidelity_ard_lengthscales(model)
+        if pf_ls is not None:
+            morph_cols = [c for c in X.columns if c != "fidelity"]
+            for key in ("base", "residual"):
+                if key in pf_ls:
+                    ls_series = pd.Series(
+                        pf_ls[key][:len(morph_cols)], index=morph_cols,
+                    )
+                    imp = (1.0 / ls_series.clip(lower=1e-6)).sort_values(ascending=False)
+                    logger.info("Per-fidelity ARD %s importance:", key)
+                    for m, v in imp.head(6).items():
+                        logger.info("  %s: %.4f", m, v)
 
     # Per-output lengthscale matrix for per-type GP interpretability
     if per_type_gp and hasattr(model, 'models'):
@@ -2956,6 +3136,7 @@ def run_gpbo_loop(
     explicit_priors: bool = False,
     mc_samples: int = 512,
     input_warp: bool = False,
+    per_fidelity_ard: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -3272,6 +3453,7 @@ def run_gpbo_loop(
             mll_restarts=mll_restarts,
             explicit_priors=explicit_priors,
             input_warp=input_warp,
+            per_fidelity_ard=per_fidelity_ard,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -3570,6 +3752,11 @@ if __name__ == "__main__":
                              "dimensions (Kanda 2022). Learns non-linear monotonic "
                              "transforms per dimension, handling skewed concentration "
                              "distributions. Only applies to MAP paths.")
+    parser.add_argument("--per-fidelity-ard", action="store_true",
+                        help="Use g(x)+delta(x,m) kernel for multi-fidelity data "
+                             "instead of LinearTruncatedFidelityKernel. Base kernel "
+                             "has shared ARD; residual has per-fidelity ARD via "
+                             "IndexKernel. Requires >1 fidelity level (TODO-5).")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -3751,6 +3938,7 @@ if __name__ == "__main__":
         explicit_priors=args.explicit_priors,
         mc_samples=args.mc_samples,
         input_warp=args.input_warp,
+        per_fidelity_ard=args.per_fidelity_ard,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

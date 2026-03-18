@@ -4,7 +4,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 **Last updated:** 2026-03-17
 **Branch:** ralph/production-readiness-phase2
-**Tests:** 647 passing (gopro) + 53 (literature) = 700 total
+**Tests:** 654 passing (gopro) + 53 (literature) = 707 total
 **§1.1 Status:** COMPLETE (15/15) — all competitive landscape ideas implemented
 **§1.2 Status:** COMPLETE (3/3) — all critical MF-GP bugs fixed
 
@@ -44,7 +44,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 ### 1.4 GP Model Improvements
 
-- [ ] TODO-5: Per-fidelity ARD lengthscales — `g(x) + delta(x,m)` GP structure for `SingleTaskMultiFidelityGP`.
+- [x] TODO-5: Per-fidelity ARD lengthscales — `g(x) + delta(x,m)` GP structure for `SingleTaskMultiFidelityGP`.
 - [ ] TODO-6: Zero-passing kernel — modified RBF enforcing `k(0,x)=0` for concentration inputs (GPerturb).
 - [ ] TODO-7: Desirability-based feasibility gate — `D(x) = phi(x) * y_bar(x)` gates infeasible regions (Cosenza 2022).
 - [ ] TODO-8: Spike-and-slab output sparsity — scCODA-style continuous relaxation.

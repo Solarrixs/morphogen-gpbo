@@ -1579,6 +1579,116 @@ class TestFidelityKernelRemap:
         )
 
 
+class TestPerFidelityARD:
+    """Tests for per-fidelity ARD kernel: g(x) + delta(x,m) structure (TODO-5)."""
+
+    @pytest.fixture
+    def mf_data(self):
+        """Create multi-fidelity training data with 3 fidelity levels."""
+        np.random.seed(42)
+        n, d, m = 30, 3, 2
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM"],
+            index=[f"cond_{i}" for i in range(n)],
+        )
+        X["fidelity"] = 1.0
+        X.loc[X.index[:10], "fidelity"] = 0.0  # CellFlow
+        X.loc[X.index[10:20], "fidelity"] = 0.5  # CellRank2
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(m), size=n),
+            columns=["ct_A", "ct_B"],
+            index=X.index,
+        )
+        return X, Y
+
+    def test_fidelity_to_task_idx_mapping(self):
+        """_fidelity_to_task_idx assigns ascending indices."""
+        fid = torch.tensor([1.0, 0.0, 0.5, 1.0, 0.0], dtype=torch.float64)
+        task_idx, fid_map = step04._fidelity_to_task_idx(fid)
+        # Lowest fidelity → lowest index
+        assert fid_map[0.0] == 0
+        assert fid_map[0.5] == 1
+        assert fid_map[1.0] == 2
+        # Verify actual indices
+        assert task_idx[0].item() == 2.0  # fidelity 1.0 → idx 2
+        assert task_idx[1].item() == 0.0  # fidelity 0.0 → idx 0
+        assert task_idx[2].item() == 1.0  # fidelity 0.5 → idx 1
+
+    def test_fidelity_to_task_idx_two_levels(self):
+        """_fidelity_to_task_idx handles 2 fidelity levels."""
+        fid = torch.tensor([0.5, 1.0, 0.5], dtype=torch.float64)
+        task_idx, fid_map = step04._fidelity_to_task_idx(fid)
+        assert len(fid_map) == 2
+        assert fid_map[0.5] == 0
+        assert fid_map[1.0] == 1
+
+    def test_per_fidelity_ard_model_fits(self, mf_data):
+        """fit_gp_botorch with per_fidelity_ard=True produces a fitted model."""
+        from botorch.models import SingleTaskGP
+        X, Y = mf_data
+        model, train_X, train_Y, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, per_fidelity_ard=True,
+        )
+        assert isinstance(model, SingleTaskGP)
+        # Fidelity column should contain integer task indices
+        fid_col = train_X[:, -1]
+        unique_idx = sorted(fid_col.unique().tolist())
+        assert unique_idx == [0.0, 1.0, 2.0]
+
+    def test_per_fidelity_ard_kernel_structure(self, mf_data):
+        """Per-fidelity ARD model has additive kernel: base + residual*fidelity."""
+        X, Y = mf_data
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, per_fidelity_ard=True,
+        )
+        covar = model.covar_module
+        # AdditiveKernel with 2 sub-kernels
+        assert hasattr(covar, "kernels")
+        assert len(covar.kernels) == 2
+
+    def test_per_fidelity_ard_lengthscale_extraction(self, mf_data):
+        """Lengthscale extraction works for per-fidelity ARD models."""
+        X, Y = mf_data
+        model, train_X, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, per_fidelity_ard=True,
+        )
+        # Standard extraction returns base lengthscales
+        ls = step04._extract_lengthscales(model, train_X.shape[1])
+        assert ls is not None
+        # Should have 3 lengthscales (3 morphogen dims, NOT 4 including fidelity)
+        assert len(ls) == 3
+
+        # Detailed extraction returns both base and residual
+        pf_ls = step04._extract_per_fidelity_ard_lengthscales(model)
+        assert pf_ls is not None
+        assert "base" in pf_ls
+        assert "residual" in pf_ls
+        assert len(pf_ls["base"]) == 3
+        assert len(pf_ls["residual"]) == 3
+
+    def test_per_fidelity_ard_posterior(self, mf_data):
+        """Per-fidelity ARD model produces valid posterior predictions."""
+        X, Y = mf_data
+        model, train_X, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, per_fidelity_ard=True,
+        )
+        with torch.no_grad():
+            # Predict at a few training points
+            post = model.posterior(train_X[:3])
+        assert post.mean.shape == (3, Y.shape[1])
+        assert not torch.isnan(post.mean).any()
+
+    def test_per_fidelity_ard_not_used_without_flag(self, mf_data):
+        """Without per_fidelity_ard=True, standard MF-GP is used."""
+        from botorch.models import SingleTaskMultiFidelityGP
+        X, Y = mf_data
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, per_fidelity_ard=False,
+        )
+        assert isinstance(model, SingleTaskMultiFidelityGP)
+
+
 class TestSelectReplicateConditions:
     """Tests for _select_replicate_conditions (Idea #7)."""
 
