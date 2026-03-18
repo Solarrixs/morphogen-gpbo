@@ -128,9 +128,20 @@ def md5_file(path, chunk_size: int = 8 * 1024 * 1024) -> str:
     return h.hexdigest()
 
 
-# --- Fidelity correlation thresholds ---
-FIDELITY_CORRELATION_THRESHOLD = 0.3  # Below this, fall back to single-fidelity GP
-FIDELITY_SKIP_MFBO_THRESHOLD = 0.9   # Above this, MF-BO adds no benefit
+# --- Fidelity R² thresholds (3-zone routing, Sabanza-Gil 2025) ---
+# R² measures how well low-fidelity data predicts high-fidelity outcomes.
+# Three zones:
+#   R² > skip  → fidelities are redundant, skip MF-BO overhead
+#   R² < drop  → fidelities too divergent, drop low-fidelity source
+#   drop ≤ R² ≤ skip → MF-BO is appropriate
+FIDELITY_R2_THRESHOLDS: dict[str, float] = {
+    "drop": 0.80,   # Below this R², fall back to single-fidelity GP
+    "skip": 0.90,   # Above this R², MF-BO adds no benefit
+}
+
+# Legacy aliases (backward compatibility for visualize_report and external callers)
+FIDELITY_CORRELATION_THRESHOLD = FIDELITY_R2_THRESHOLDS["drop"]
+FIDELITY_SKIP_MFBO_THRESHOLD = FIDELITY_R2_THRESHOLDS["skip"]
 
 # Human-readable labels for fidelity levels
 FIDELITY_LABELS: dict[float, str] = {

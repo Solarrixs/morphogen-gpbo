@@ -4,7 +4,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 **Last updated:** 2026-03-17
 **Branch:** ralph/production-readiness-phase2
-**Tests:** 586 passing (gopro) + 53 (literature) = 639 total
+**Tests:** 599 passing (gopro) + 53 (literature) = 652 total
 **§1.1 Status:** COMPLETE (15/15) — all competitive landscape ideas implemented
 **§1.2 Status:** TODO — 3 critical MF-GP bugs blocking real optimization
 
@@ -33,7 +33,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 ### 1.2 Critical Bug Fixes (from paper deep-reads)
 
 - [x] **TODO-24 (CRITICAL): Remap fidelity encodings for MF-GP kernel.** fidelity=1.0 collapses inter-fidelity kernel. Remap: 0.0→1/3, 0.5→1/2, 1.0→2/3 internally. File: `04_gpbo_loop.py` ~L800.
-- [ ] **TODO-25 (CRITICAL): Raise fidelity correlation threshold from 0.3 to R²>0.80.** Switch Spearman→R². Thresholds: R²>0.90→skip MF; R²<0.80→single fidelity; 0.80-0.90→MF-BO. Files: `config.py` + `04_gpbo_loop.py`.
+- [x] **TODO-25 (CRITICAL): Raise fidelity correlation threshold from 0.3 to R²>0.80.** Switch Spearman→R². Thresholds: R²>0.90→skip MF; R²<0.80→single fidelity; 0.80-0.90→MF-BO. Files: `config.py` + `04_gpbo_loop.py`.
 - [ ] **TODO-26 (CRITICAL): Fix CellFlow dose encoding.** Uses raw dose×onehot, NOT log1p. File: `06_cellflow_virtual.py` L129-187.
 
 ### 1.3 CellFlow Integration Fixes

@@ -36,10 +36,9 @@ from gopro.config import (
     DATA_DIR,
     ENSEMBLE_DEFAULT_N_RESTARTS,
     ENSEMBLE_STABILITY_LOW_THRESHOLD,
-    FIDELITY_CORRELATION_THRESHOLD,
     FIDELITY_COSTS,
     FIDELITY_LABELS,
-    FIDELITY_SKIP_MFBO_THRESHOLD,
+    FIDELITY_R2_THRESHOLDS,
     GP_STATE_DIR,
     KERNEL_COMPLEXITY_THRESHOLDS,
     MORPHOGEN_COLUMNS,
@@ -1673,31 +1672,52 @@ def recommend_next_experiments(
     return recommendations
 
 
+def _compute_r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Compute R² (coefficient of determination) between two vectors.
+
+    R² = 1 - SS_res / SS_tot, where SS_tot = Var(y_true) * n.
+    Returns NaN if y_true has zero variance.
+    """
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    if ss_tot < 1e-24:
+        return float("nan")
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    return float(1.0 - ss_res / ss_tot)
+
+
 def validate_fidelity_correlation(
     real_fractions: pd.DataFrame,
     virtual_fractions: pd.DataFrame,
     fidelity_label: str = "virtual",
-    method: str = "spearman",
+    method: str = "r_squared",
 ) -> dict:
-    """Validate cross-fidelity correlation for overlapping conditions.
+    """Validate cross-fidelity agreement for overlapping conditions.
 
     For conditions present in both real and virtual data, computes:
-    1. Per-cell-type correlation (Pearson and Spearman)
-    2. Overall correlation across all cell types
+    1. Per-cell-type R² (coefficient of determination)
+    2. Overall R² across all cell types (flattened)
 
     Returns dict with:
-        - overall_correlation: float (Spearman across all cell types)
-        - per_cell_type: dict[str, float] (per-type Spearman)
+        - overall_correlation: float (R² across all cell types)
+        - per_cell_type: dict[str, float] (per-type R²)
         - recommendation: str ("use_mfbo" | "single_fidelity" | "skip_mfbo_use_cheap")
         - details: str (human-readable explanation)
         - n_overlap: int (number of overlapping conditions)
 
-    Decision gate (per McDonald et al. 2025, thresholds from config):
-        - correlation > FIDELITY_SKIP_MFBO_THRESHOLD: skip MF-BO, use cheap fidelity as pre-filter
-        - correlation < FIDELITY_CORRELATION_THRESHOLD: skip MF-BO, use single-fidelity GP on real data only
+    3-zone decision gate (Sabanza-Gil 2025, thresholds from config):
+        - R² > FIDELITY_R2_THRESHOLDS["skip"]: fidelities redundant, skip MF-BO
+        - R² < FIDELITY_R2_THRESHOLDS["drop"]: fidelities too divergent, single-fidelity only
         - in between: MF-BO is appropriate
+
+    The ``method`` parameter selects the metric:
+        - "r_squared" (default): R² coefficient of determination
+        - "spearman": Spearman rank correlation (legacy)
+        - "pearson": Pearson linear correlation (legacy)
     """
     from scipy.stats import spearmanr, pearsonr
+
+    drop_threshold = FIDELITY_R2_THRESHOLDS["drop"]
+    skip_threshold = FIDELITY_R2_THRESHOLDS["skip"]
 
     real_fractions = real_fractions.copy()
     virtual_fractions = virtual_fractions.copy()
@@ -1732,70 +1752,76 @@ def validate_fidelity_correlation(
     real_overlap = real_fractions.loc[overlap, all_cols]
     virtual_overlap = virtual_fractions.loc[overlap, all_cols]
 
-    # Per-cell-type correlation
+    # Per-cell-type metric
     per_cell_type = {}
     for col in all_cols:
         r_vals = real_overlap[col].values
         v_vals = virtual_overlap[col].values
-        # Skip constant columns (no variance -> correlation undefined)
+        # Skip constant columns (no variance -> metric undefined)
         if np.std(r_vals) < 1e-12 or np.std(v_vals) < 1e-12:
             continue
-        if method == "spearman":
-            corr, _ = spearmanr(r_vals, v_vals)
+        if method == "r_squared":
+            metric = _compute_r_squared(r_vals, v_vals)
+        elif method == "spearman":
+            metric, _ = spearmanr(r_vals, v_vals)
         else:
-            corr, _ = pearsonr(r_vals, v_vals)
-        per_cell_type[col] = float(corr)
+            metric, _ = pearsonr(r_vals, v_vals)
+        per_cell_type[col] = float(metric)
 
-    # Overall correlation: flatten all cell types into one vector
+    # Overall metric: flatten all cell types into one vector
     r_flat = real_overlap.values.flatten()
     v_flat = virtual_overlap.values.flatten()
 
     if np.std(r_flat) < 1e-12 or np.std(v_flat) < 1e-12:
-        overall_corr = float("nan")
+        overall_metric = float("nan")
     else:
-        if method == "spearman":
-            overall_corr, _ = spearmanr(r_flat, v_flat)
+        if method == "r_squared":
+            overall_metric = _compute_r_squared(r_flat, v_flat)
+        elif method == "spearman":
+            overall_metric, _ = spearmanr(r_flat, v_flat)
         else:
-            overall_corr, _ = pearsonr(r_flat, v_flat)
-        overall_corr = float(overall_corr)
+            overall_metric, _ = pearsonr(r_flat, v_flat)
+        overall_metric = float(overall_metric)
 
-    # Decision gate
-    if math.isnan(overall_corr):
+    metric_name = "R²" if method == "r_squared" else method.capitalize()
+
+    # Decision gate (3-zone routing)
+    if math.isnan(overall_metric):
         recommendation = "use_mfbo"
         details = (
-            "Overall correlation is NaN (constant data). "
+            f"Overall {metric_name} is NaN (constant data). "
             f"Defaulting to MF-BO for {fidelity_label} data."
         )
-    elif overall_corr > FIDELITY_SKIP_MFBO_THRESHOLD:
+    elif overall_metric > skip_threshold:
         recommendation = "skip_mfbo_use_cheap"
         details = (
-            f"Cross-fidelity correlation with {fidelity_label} is very high "
-            f"({overall_corr:.3f} > {FIDELITY_SKIP_MFBO_THRESHOLD}). MF-BO adds overhead without benefit — "
+            f"Cross-fidelity {metric_name} with {fidelity_label} is very high "
+            f"({overall_metric:.3f} > {skip_threshold}). MF-BO adds overhead without benefit — "
             f"consider using {fidelity_label} data as a cheap pre-filter instead."
         )
-    elif overall_corr < FIDELITY_CORRELATION_THRESHOLD:
+    elif overall_metric < drop_threshold:
         recommendation = "single_fidelity"
         details = (
-            f"Cross-fidelity correlation with {fidelity_label} is too low "
-            f"({overall_corr:.3f} < {FIDELITY_CORRELATION_THRESHOLD}). "
+            f"Cross-fidelity {metric_name} with {fidelity_label} is too low "
+            f"({overall_metric:.3f} < {drop_threshold}). "
             f"MF-BO would be counterproductive — dropping {fidelity_label} data "
             f"and using single-fidelity GP on real data only."
         )
     else:
         recommendation = "use_mfbo"
         details = (
-            f"Cross-fidelity correlation with {fidelity_label} is moderate "
-            f"({overall_corr:.3f}), within [{FIDELITY_CORRELATION_THRESHOLD}, {FIDELITY_SKIP_MFBO_THRESHOLD}]. MF-BO is appropriate."
+            f"Cross-fidelity {metric_name} with {fidelity_label} is moderate "
+            f"({overall_metric:.3f}), within [{drop_threshold}, {skip_threshold}]. MF-BO is appropriate."
         )
 
     logger.info(
-        "Fidelity validation (%s): overall_corr=%.3f, recommendation=%s",
-        fidelity_label, overall_corr, recommendation,
+        "Fidelity validation (%s, %s): overall=%.3f, recommendation=%s",
+        fidelity_label, metric_name, overall_metric, recommendation,
     )
     logger.info("  %s", details)
 
     return {
-        "overall_correlation": overall_corr,
+        "overall_correlation": overall_metric,
         "per_cell_type": per_cell_type,
         "recommendation": recommendation,
         "details": details,

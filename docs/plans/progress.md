@@ -1,5 +1,26 @@
 # Progress Log
 
+## Iteration 2 — 2026-03-18
+- Task: TODO-25 — R²-based 3-zone fidelity routing
+- Result: pass
+- Changes:
+  - `config.py`: Added `FIDELITY_R2_THRESHOLDS = {"drop": 0.80, "skip": 0.90}` dict; old `FIDELITY_CORRELATION_THRESHOLD`/`FIDELITY_SKIP_MFBO_THRESHOLD` now aliases
+  - `04_gpbo_loop.py`: Added `_compute_r_squared()` helper; rewrote `validate_fidelity_correlation()` to use R² by default with 3-zone routing; imports updated
+  - `visualize_report.py`: Added `FIDELITY_R2_THRESHOLDS` import (legacy aliases still used for hlines)
+  - `tests/test_fidelity_validation.py`: Rewrote test file — 29 tests total (was 19). New classes: `TestComputeRSquared` (4 tests), `TestFidelityR2Thresholds` (5 tests), `TestThreeZoneRouting` (4 tests). Updated existing tests for R² semantics.
+- Tests: 599 passing (was 586). +13 net new tests.
+- Notes: All §1.2 critical bugs except TODO-26 (CellFlow dose encoding) now resolved.
+
+## Iteration 1 — 2026-03-18T00:00:44Z
+- Task: TODO-24 — Remap fidelity encodings for MF-GP kernel (§1.2) + /simplify hardening pass
+- Result: pass
+- Commits:
+  - `61bc4bb` [ralph-1] TODO-24: Remap fidelity encodings for MF-GP kernel
+  - `4313729` [ralph-simplify] Harden fidelity remap: use isclose, warn on unknown values, single-pass mask
+- Files changed: `gopro/04_gpbo_loop.py` (26 lines changed), `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md`, data CSVs updated
+- Quality: Simplify pass hardened fidelity remap with `isclose` for float comparison, added warning on unknown fidelity values, consolidated to single-pass mask. Docs updated across audit report, architecture, competitive landscape index, and README.
+- Notes: TODO-24 complete. Next priorities are TODO-25 (R²-based fidelity thresholds) and TODO-26 (CellFlow dose encoding). Both are §1.2 critical MF-GP fixes.
+
 ## Iteration 5 (Ralph Pipeline) — 2026-03-17
 - Task: TODO-24 — Remap fidelity encodings for MF-GP kernel (§1.2)
 - Result: pass

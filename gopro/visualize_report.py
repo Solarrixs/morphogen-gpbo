@@ -29,6 +29,7 @@ import plotly.graph_objects as go
 
 from gopro.config import (
     FIDELITY_CORRELATION_THRESHOLD,
+    FIDELITY_R2_THRESHOLDS,
     FIDELITY_SKIP_MFBO_THRESHOLD,
     get_logger,
 )
