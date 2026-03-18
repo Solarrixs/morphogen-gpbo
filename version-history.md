@@ -18,3 +18,4 @@
 | 8 | `da16394` | working | ralph/production-readiness-phase2 | [ralph-simplify] Remove redundant filter and double column-existence check in log-scale |
 | 9 | `46fb2c9` | working | ralph/production-readiness-phase2 | [ralph-simplify] Validate n_restarts >= 1 and log HP randomisation failures |
 | 10 | `b9d6bb7` | working | ralph/production-readiness-phase2 | [ralph-simplify] Thread explicit_priors through fit_tvr_models |
+| 11 | `1f1caee` | working | ralph/production-readiness-phase2 | [ralph-simplify] DRY TestFixedNoise tests, fix argparse % formatting |
