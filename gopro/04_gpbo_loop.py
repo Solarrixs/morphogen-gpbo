@@ -682,6 +682,136 @@ def _fit_lassobo(
     return model
 
 
+def _make_zero_passing_kernel_class():
+    """Factory to create ZeroPassingKernel class with gpytorch.kernels.Kernel base.
+
+    Deferred import to avoid importing gpytorch at module load time.
+    """
+    from gpytorch.kernels import Kernel
+
+    class _ZeroPassingKernel(Kernel):
+        """Kernel wrapper enforcing k(0, x) = 0 for concentration inputs.
+
+        Wraps any GPyTorch kernel and multiplies by phi(x) * phi(x') where
+        phi(x) = 1 - exp(-||x||^2 / eps) is a smooth indicator that vanishes
+        when x is a zero vector.  This encodes the biological prior that an
+        absent morphogen (concentration 0) contributes zero covariance — the
+        response at zero dosage is uncorrelated with the response at any
+        non-zero dosage (GPerturb, Xing & Yau, Nature Communications 2025).
+
+        Args:
+            base_kernel: The inner GPyTorch kernel to wrap.
+            concentration_dims: Indices of concentration dimensions.  Only these
+                dimensions contribute to the zero-passing mask.  If ``None``,
+                all dimensions are used.
+            eps: Smoothness parameter for the exponential mask.  Smaller values
+                make the transition sharper near zero. (default: 1.0)
+        """
+
+        has_lengthscale = False
+
+        def __init__(
+            self,
+            base_kernel,
+            concentration_dims: list[int] | None = None,
+            eps: float = 1.0,
+        ):
+            super().__init__()
+            self.base_kernel = base_kernel
+            self.concentration_dims = concentration_dims
+            self.eps = eps
+
+        def _phi(self, x: torch.Tensor) -> torch.Tensor:
+            """Smooth zero-passing mask: 1 - exp(-||x_conc||^2 / eps)."""
+            if self.concentration_dims is not None:
+                x_conc = x[..., self.concentration_dims]
+            else:
+                x_conc = x
+            sq_norm = (x_conc ** 2).sum(dim=-1, keepdim=True)
+            return 1.0 - torch.exp(-sq_norm / self.eps)
+
+        def forward(self, x1, x2, diag=False, **params):
+            """Evaluate k_zp(x1, x2) = k_base(x1, x2) * phi(x1) * phi(x2)."""
+            base_cov = self.base_kernel(x1, x2, diag=diag, **params)
+            phi1 = self._phi(x1)  # (..., N, 1)
+            phi2 = self._phi(x2)  # (..., M, 1)
+
+            if diag:
+                mask = (phi1.squeeze(-1) * phi2.squeeze(-1))
+                return base_cov * mask
+            else:
+                mask = phi1 * phi2.transpose(-2, -1)  # (..., N, M)
+                if hasattr(base_cov, 'to_dense'):
+                    return base_cov.to_dense() * mask
+                return base_cov * mask
+
+    return _ZeroPassingKernel
+
+
+# Lazy-initialised class reference (populated on first use)
+ZeroPassingKernel = None
+
+
+def _get_zero_passing_kernel_class():
+    """Get (and cache) the ZeroPassingKernel class."""
+    global ZeroPassingKernel
+    if ZeroPassingKernel is None:
+        ZeroPassingKernel = _make_zero_passing_kernel_class()
+    return ZeroPassingKernel
+
+    def _phi(self, x: torch.Tensor) -> torch.Tensor:
+        """Smooth zero-passing mask: 1 - exp(-||x_conc||^2 / eps)."""
+        if self.concentration_dims is not None:
+            x_conc = x[..., self.concentration_dims]
+        else:
+            x_conc = x
+        sq_norm = (x_conc ** 2).sum(dim=-1, keepdim=True)
+        return 1.0 - torch.exp(-sq_norm / self.eps)
+
+    def forward(self, x1, x2, diag=False, **params):
+        """Evaluate k_zp(x1, x2) = k_base(x1, x2) * phi(x1) * phi(x2)."""
+        base_cov = self.base_kernel(x1, x2, diag=diag, **params)
+        phi1 = self._phi(x1)  # (..., N, 1)
+        phi2 = self._phi(x2)  # (..., M, 1)
+
+        if diag:
+            # base_cov is (..., N), phi is (..., N, 1)
+            mask = (phi1.squeeze(-1) * phi2.squeeze(-1))
+            return base_cov * mask
+        else:
+            # base_cov is (..., N, M) lazy tensor or dense
+            mask = phi1 * phi2.transpose(-2, -1)  # (..., N, M)
+            # Multiply element-wise; handle lazy tensors by evaluating
+            if hasattr(base_cov, 'to_dense'):
+                return base_cov.to_dense() * mask
+            return base_cov * mask
+
+
+def _wrap_zero_passing(model, concentration_dims: list[int] | None = None, eps: float = 1.0):
+    """Wrap a BoTorch GP model's covariance module with ZeroPassingKernel.
+
+    Modifies the model in-place.
+
+    Args:
+        model: A BoTorch GP model with a ``covar_module`` attribute.
+        concentration_dims: Indices of concentration dimensions.
+        eps: Smoothness for the exponential mask.
+    """
+    if not hasattr(model, 'covar_module'):
+        logger.warning("Model has no covar_module; cannot apply zero-passing kernel")
+        return
+    cls = _get_zero_passing_kernel_class()
+    model.covar_module = cls(
+        model.covar_module,
+        concentration_dims=concentration_dims,
+        eps=eps,
+    )
+    logger.info(
+        "Applied zero-passing kernel wrapper (concentration_dims=%s, eps=%.2g)",
+        concentration_dims, eps,
+    )
+
+
 def _build_additive_interaction_kernel(d: int):
     """Build an additive + interaction kernel for GP fitting.
 
@@ -1500,6 +1630,7 @@ def fit_gp_botorch(
     explicit_priors: bool = False,
     input_warp: bool = False,
     per_fidelity_ard: bool = False,
+    zero_passing: bool = False,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
 
@@ -1568,6 +1699,11 @@ def fit_gp_botorch(
             has per-fidelity ARD via IndexKernel, allowing different fidelity
             levels to have different effective lengthscales. Requires
             multi-fidelity data (>1 fidelity level). (default: False)
+        zero_passing: If True, wrap the GP covariance module with
+            ``ZeroPassingKernel``, enforcing k(0, x) = 0 for concentration
+            inputs (GPerturb, Xing & Yau 2025). Only applies to MAP paths
+            (standard, per-type-GP). Ignored for SAASBO, LassoBO, and
+            multi-fidelity. (default: False)
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -1826,6 +1962,9 @@ def fit_gp_botorch(
                     _set_explicit_priors(m, train_X.shape[1])
                 else:
                     _set_dim_scaled_lengthscale_prior(m, train_X.shape[1])
+                if zero_passing:
+                    _conc_dims = [j for j, c in enumerate(X.columns) if c != "fidelity"]
+                    _wrap_zero_passing(m, concentration_dims=_conc_dims)
                 return m
 
             m = _fit_mll_with_restarts(_per_type_factory, n_restarts=mll_restarts)
@@ -1862,6 +2001,9 @@ def fit_gp_botorch(
                 _set_explicit_priors(m, train_X.shape[1])
             elif covar is None:
                 _set_dim_scaled_lengthscale_prior(m, train_X.shape[1])
+            if zero_passing:
+                _conc_dims = [j for j, c in enumerate(X.columns) if c != "fidelity"]
+                _wrap_zero_passing(m, concentration_dims=_conc_dims)
             if warm_start:
                 load_gp_state(m, gp_state_path)
             elif warm_start_state is not None:
@@ -3139,6 +3281,7 @@ def run_gpbo_loop(
     mc_samples: int = 512,
     input_warp: bool = False,
     per_fidelity_ard: bool = False,
+    zero_passing: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -3226,6 +3369,9 @@ def run_gpbo_loop(
         input_warp: If True, apply Kumaraswamy CDF input warping to
             continuous dimensions (Kanda 2022). Learns non-linear monotonic
             transforms per dimension. Only applies to MAP paths. (default: False)
+        zero_passing: If True, wrap the GP kernel with ZeroPassingKernel
+            enforcing k(0, x) = 0 for concentration inputs (GPerturb, Xing
+            & Yau 2025). Only applies to MAP paths. (default: False)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -3456,6 +3602,7 @@ def run_gpbo_loop(
             explicit_priors=explicit_priors,
             input_warp=input_warp,
             per_fidelity_ard=per_fidelity_ard,
+            zero_passing=zero_passing,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -3766,6 +3913,12 @@ if __name__ == "__main__":
                              "instead of LinearTruncatedFidelityKernel. Base kernel "
                              "has shared ARD; residual has per-fidelity ARD via "
                              "IndexKernel. Requires >1 fidelity level (TODO-5).")
+    parser.add_argument("--zero-passing", action="store_true",
+                        help="Wrap GP kernel with ZeroPassingKernel enforcing "
+                             "k(0,x)=0 for concentration inputs (GPerturb, Xing "
+                             "& Yau 2025). Encodes the prior that absent "
+                             "morphogens contribute zero covariance. Only applies "
+                             "to MAP paths (standard, per-type-GP).")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -3948,6 +4101,7 @@ if __name__ == "__main__":
         mc_samples=args.mc_samples,
         input_warp=args.input_warp,
         per_fidelity_ard=args.per_fidelity_ard,
+        zero_passing=args.zero_passing,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

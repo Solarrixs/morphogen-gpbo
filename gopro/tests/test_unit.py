@@ -3391,3 +3391,147 @@ class TestInputWarp:
         sig = inspect.signature(step04.fit_gp_botorch)
         assert "input_warp" in sig.parameters
         assert sig.parameters["input_warp"].default is False
+
+
+class TestZeroPassingKernel:
+    """Tests for ZeroPassingKernel (TODO-6, GPerturb)."""
+
+    def _make_training_data(self, n=20, d=3, n_outputs=2):
+        """Build simple training DataFrames for GP fitting."""
+        np.random.seed(42)
+        cols = [f"x{i}" for i in range(d)]
+        X = pd.DataFrame(np.random.rand(n, d), columns=cols,
+                         index=[f"c{i}" for i in range(n)])
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(n_outputs), size=n),
+            columns=[f"ct{i}" for i in range(n_outputs)],
+            index=X.index,
+        )
+        return X, Y
+
+    def test_kernel_returns_zero_when_input_is_zero_vector(self):
+        """ZeroPassingKernel returns 0 when either input is a zero vector."""
+        import torch
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=3))
+        zpk = ZPK(base, concentration_dims=[0, 1, 2], eps=1.0)
+
+        x_zero = torch.zeros(1, 3, dtype=torch.double)
+        x_nonzero = torch.rand(1, 3, dtype=torch.double) + 0.1
+
+        # k(0, x) should be 0
+        cov = zpk(x_zero, x_nonzero)
+        if hasattr(cov, 'to_dense'):
+            cov = cov.to_dense()
+        assert torch.allclose(cov, torch.zeros_like(cov), atol=1e-6), (
+            f"k(0, x) should be ~0, got {cov.item():.6f}"
+        )
+
+        # k(x, 0) should also be 0
+        cov2 = zpk(x_nonzero, x_zero)
+        if hasattr(cov2, 'to_dense'):
+            cov2 = cov2.to_dense()
+        assert torch.allclose(cov2, torch.zeros_like(cov2), atol=1e-6), (
+            f"k(x, 0) should be ~0, got {cov2.item():.6f}"
+        )
+
+    def test_kernel_nonzero_for_nonzero_inputs(self):
+        """ZeroPassingKernel returns nonzero for two nonzero inputs."""
+        import torch
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=3))
+        zpk = ZPK(base, concentration_dims=[0, 1, 2], eps=1.0)
+
+        x1 = torch.rand(1, 3, dtype=torch.double) + 0.5
+        x2 = torch.rand(1, 3, dtype=torch.double) + 0.5
+
+        cov = zpk(x1, x2)
+        if hasattr(cov, 'to_dense'):
+            cov = cov.to_dense()
+        assert cov.item() > 0.01, (
+            f"k(x, x') should be nonzero for nonzero inputs, got {cov.item():.6f}"
+        )
+
+    def test_kernel_diag_mode(self):
+        """ZeroPassingKernel works in diagonal mode."""
+        import torch
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=3))
+        zpk = ZPK(base, concentration_dims=[0, 1, 2], eps=1.0)
+
+        x = torch.rand(5, 3, dtype=torch.double) + 0.1
+        x[0, :] = 0.0  # First row is zero vector
+
+        diag = zpk(x, x, diag=True)
+        # First element should be ~0 (zero input)
+        assert abs(diag[0].item()) < 1e-6, (
+            f"Diagonal k(0, 0) should be ~0, got {diag[0].item():.6f}"
+        )
+        # Others should be nonzero
+        assert all(diag[i].item() > 0.01 for i in range(1, 5)), (
+            "Diagonal entries for nonzero inputs should be positive"
+        )
+
+    def test_concentration_dims_subset(self):
+        """ZeroPassingKernel only considers specified concentration dims."""
+        import torch
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=4))
+        # Only dims 0,1,2 are concentration; dim 3 is e.g. fidelity
+        zpk = ZPK(base, concentration_dims=[0, 1, 2], eps=1.0)
+
+        # Zero in concentration dims but nonzero in dim 3
+        x_zero_conc = torch.tensor([[0.0, 0.0, 0.0, 1.0]], dtype=torch.double)
+        x_nonzero = torch.tensor([[0.5, 0.5, 0.5, 1.0]], dtype=torch.double)
+
+        cov = zpk(x_zero_conc, x_nonzero)
+        if hasattr(cov, 'to_dense'):
+            cov = cov.to_dense()
+        assert torch.allclose(cov, torch.zeros_like(cov), atol=1e-6), (
+            "Zero in concentration dims should still give k=0 even if other dims nonzero"
+        )
+
+    def test_fit_gp_with_zero_passing(self):
+        """fit_gp_botorch with zero_passing=True wraps the kernel."""
+        ZPK = step04._get_zero_passing_kernel_class()
+        X, Y = self._make_training_data()
+        model, train_X, train_Y, cell_type_cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, zero_passing=True, save_state=False,
+        )
+        # The covar_module should be a ZeroPassingKernel
+        assert isinstance(model.covar_module, ZPK), (
+            f"Expected ZeroPassingKernel, got {type(model.covar_module).__name__}"
+        )
+
+    def test_fit_gp_without_zero_passing(self):
+        """fit_gp_botorch with zero_passing=False does NOT wrap the kernel."""
+        ZPK = step04._get_zero_passing_kernel_class()
+        X, Y = self._make_training_data()
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, zero_passing=False, save_state=False,
+        )
+        assert not isinstance(model.covar_module, ZPK), (
+            "Without zero_passing, kernel should not be wrapped"
+        )
+
+    def test_run_gpbo_loop_accepts_zero_passing(self):
+        """run_gpbo_loop accepts zero_passing parameter with correct default."""
+        import inspect
+        sig = inspect.signature(step04.run_gpbo_loop)
+        assert "zero_passing" in sig.parameters
+        assert sig.parameters["zero_passing"].default is False
+
+    def test_fit_gp_botorch_accepts_zero_passing(self):
+        """fit_gp_botorch accepts zero_passing parameter with correct default."""
+        import inspect
+        sig = inspect.signature(step04.fit_gp_botorch)
+        assert "zero_passing" in sig.parameters
+        assert sig.parameters["zero_passing"].default is False
