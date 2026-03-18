@@ -211,6 +211,16 @@ CONVERGENCE_POSTERIOR_EVAL_POINTS = 512
 ENSEMBLE_DEFAULT_N_RESTARTS = 5
 ENSEMBLE_STABILITY_LOW_THRESHOLD = 0.5  # below this → unstable recommendations
 
+# --- Selective log-scaling for concentration dimensions (Kanda 2022) ---
+# Morphogen dose-response is typically log-linear; log1p transform
+# compresses the dynamic range and helps the GP learn smoother functions.
+# Excludes log_harvest_day (already log-scaled) and base media columns
+# (usually constant across conditions → zero-variance → auto-dropped).
+LOG_SCALE_COLUMNS: list[str] = [
+    col for col in MORPHOGEN_COLUMNS
+    if col.endswith("_uM") and col != "log_harvest_day"
+]
+
 # --- Gruffi stress-filtering defaults ---
 GRUFFI_DEFAULT_THRESHOLD = 0.15
 GRUFFI_DEFAULT_RESOLUTION = 2.0

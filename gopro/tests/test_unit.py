@@ -2825,3 +2825,81 @@ class TestBootstrapUncertainty:
         with torch.no_grad():
             post = model.posterior(train_X[:1])
         assert post.mean.shape[-1] == 3  # ILR: 4 types -> 3 components
+
+
+class TestLogScale:
+    """Tests for selective log-scaling of concentration dimensions."""
+
+    def test_apply_log_scale_transforms_selected_columns(self):
+        """log1p is applied only to specified columns."""
+        X = pd.DataFrame({
+            "CHIR99021_uM": [1.0, 3.0, 0.0],
+            "BMP4_uM": [0.001, 0.01, 0.0],
+            "log_harvest_day": [4.28, 4.28, 4.28],
+            "fidelity": [1.0, 1.0, 1.0],
+        })
+        cols = ["CHIR99021_uM", "BMP4_uM"]
+        result = step04._apply_log_scale(X, cols)
+        # Transformed columns should be log1p of original
+        np.testing.assert_allclose(result["CHIR99021_uM"], np.log1p([1.0, 3.0, 0.0]))
+        np.testing.assert_allclose(result["BMP4_uM"], np.log1p([0.001, 0.01, 0.0]))
+        # Non-specified columns unchanged
+        np.testing.assert_array_equal(result["log_harvest_day"], X["log_harvest_day"])
+        np.testing.assert_array_equal(result["fidelity"], X["fidelity"])
+
+    def test_inverse_log_scale_roundtrip(self):
+        """expm1(log1p(x)) recovers original values."""
+        X = pd.DataFrame({
+            "CHIR99021_uM": [0.0, 0.5, 1.0, 3.0, 10.0],
+            "BMP4_uM": [0.0, 0.001, 0.005, 0.01, 0.05],
+            "log_harvest_day": [4.0, 4.1, 4.2, 4.3, 4.4],
+        })
+        cols = ["CHIR99021_uM", "BMP4_uM"]
+        scaled = step04._apply_log_scale(X, cols)
+        recovered = step04._inverse_log_scale(scaled, cols)
+        np.testing.assert_allclose(
+            recovered["CHIR99021_uM"], X["CHIR99021_uM"], atol=1e-12
+        )
+        np.testing.assert_allclose(
+            recovered["BMP4_uM"], X["BMP4_uM"], atol=1e-12
+        )
+        # Untouched column remains the same
+        np.testing.assert_array_equal(recovered["log_harvest_day"], X["log_harvest_day"])
+
+    def test_log_scale_zero_maps_to_zero(self):
+        """log1p(0) = 0, so zero concentrations remain zero."""
+        X = pd.DataFrame({"CHIR99021_uM": [0.0, 0.0, 0.0]})
+        result = step04._apply_log_scale(X, ["CHIR99021_uM"])
+        np.testing.assert_array_equal(result["CHIR99021_uM"], [0.0, 0.0, 0.0])
+
+    def test_log_scale_preserves_ordering(self):
+        """log1p is monotonic, so ordering is preserved."""
+        vals = [0.0, 0.001, 0.01, 0.1, 1.0, 5.0, 10.0]
+        X = pd.DataFrame({"CHIR99021_uM": vals})
+        result = step04._apply_log_scale(X, ["CHIR99021_uM"])
+        transformed = result["CHIR99021_uM"].values
+        assert all(transformed[i] <= transformed[i + 1] for i in range(len(vals) - 1))
+
+    def test_log_scale_does_not_mutate_input(self):
+        """_apply_log_scale returns a copy, not an in-place mutation."""
+        X = pd.DataFrame({"CHIR99021_uM": [1.0, 2.0, 3.0]})
+        original_vals = X["CHIR99021_uM"].values.copy()
+        _ = step04._apply_log_scale(X, ["CHIR99021_uM"])
+        np.testing.assert_array_equal(X["CHIR99021_uM"].values, original_vals)
+
+    def test_log_scale_columns_config_excludes_log_harvest_day(self):
+        """LOG_SCALE_COLUMNS should contain _uM columns but not log_harvest_day."""
+        from gopro.config import LOG_SCALE_COLUMNS, MORPHOGEN_COLUMNS
+        assert "log_harvest_day" not in LOG_SCALE_COLUMNS
+        # All entries should end with _uM
+        for col in LOG_SCALE_COLUMNS:
+            assert col.endswith("_uM"), f"{col} does not end with _uM"
+        # Should contain concentration columns
+        assert "CHIR99021_uM" in LOG_SCALE_COLUMNS
+        assert "BMP4_uM" in LOG_SCALE_COLUMNS
+
+    def test_apply_log_scale_skips_missing_columns(self):
+        """Columns not present in DataFrame are silently skipped."""
+        X = pd.DataFrame({"CHIR99021_uM": [1.0, 2.0]})
+        result = step04._apply_log_scale(X, ["CHIR99021_uM", "NONEXISTENT_uM"])
+        np.testing.assert_allclose(result["CHIR99021_uM"], np.log1p([1.0, 2.0]))

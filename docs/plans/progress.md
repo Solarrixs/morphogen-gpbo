@@ -1,5 +1,47 @@
 # Progress Log
 
+## Iteration 9 — 2026-03-18
+- Task: TODO-28 — Selective log-scaling for concentration dimensions (§1.4 GP Model Improvements)
+- Result: pass
+- Files changed:
+  - `gopro/config.py` — Added `LOG_SCALE_COLUMNS` (all `_uM` columns, excluding `log_harvest_day`)
+  - `gopro/04_gpbo_loop.py` — Added `_apply_log_scale()`, `_inverse_log_scale()` helpers; added `log_scale` param to `run_gpbo_loop()`; added `--log-scale` CLI flag; imported `LOG_SCALE_COLUMNS` from config
+  - `gopro/tests/test_unit.py` — 7 new tests in `TestLogScale`
+  - `docs/task_plan.md` — Marked TODO-28 complete, updated test count to 627
+- Tests: 627 passing (was 620)
+- Notes: §1.4 GP Model Improvements: TODO-9 and TODO-28 done. Next: TODO-29 (MLL restarts), TODO-30 (explicit GP priors), or TODO-31 (FixedNoiseGP).
+
+## Iteration 8 — 2026-03-18T05:46:59Z
+- Task: TODO-9 — Configurable pseudocount for ILR zero-replacement (§1.4 GP Model Improvements)
+- Result: pass
+- Commits:
+  - `4529b34` [ralph-7] TODO-9: Configurable pseudocount for ILR zero-replacement
+  - `18ae6e8` [ralph-simplify] DRY up ilr_transform: return_safe option eliminates duplicate _multiplicative_replacement call
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Added `pseudocount` parameter to `ilr_transform()`, threaded through `_multiplicative_replacement()`, `fit_gp_botorch()`, `fit_tvr_models()`, `compute_ensemble_disagreement()`, `run_gpbo_loop()`; added `--pseudocount` CLI flag; simplify pass added `return_safe` option to eliminate duplicate `_multiplicative_replacement` call
+  - `gopro/tests/test_unit.py` — 3 new tests for pseudocount handling; simplify pass cleaned up test fixtures
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass DRY'd up `ilr_transform` with `return_safe` option, eliminating duplicate `_multiplicative_replacement` call path. No issues found.
+- Notes: §1.4 GP Model Improvements started. TODO-9 complete. Next: TODO-28 (selective log-scaling), TODO-29 (MLL restarts), or TODO-30 (explicit GP priors).
+
+## Iteration 7 — 2026-03-18T05:24:53Z
+- Task: TODO-4 — Handle CellFlow conservative prediction bias (§1.3) + DRY simplify pass
+- Result: pass
+- Commits:
+  - `a96f612` [ralph-6] TODO-4: Add CellFlow variance inflation for conservative prediction bias
+  - `7d753e2` [ralph-simplify] DRY up variance inflation: single canonical implementation, fix double-application risk
+- Files changed:
+  - `gopro/config.py` — Added `CELLFLOW_DEFAULT_VARIANCE_INFLATION = 2.0` constant
+  - `gopro/06_cellflow_virtual.py` — Added `inflate_cellflow_variance()` helper; wired into `predict_cellflow()` via `variance_inflation` parameter
+  - `gopro/04_gpbo_loop.py` — Added `--cellflow-variance-inflation` CLI flag; threaded through `run_gpbo_loop()` → `merge_multi_fidelity_data()`; DRY'd up to single canonical implementation, fixed double-application risk
+  - `gopro/tests/test_phase4_5.py` — 7 new tests in `TestCellFlowVarianceInflation`; simplify pass DRY'd up fixtures
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Tests: 617 passing (was 610)
+- Quality: Simplify pass consolidated variance inflation to single canonical implementation in `06_cellflow_virtual.py`, removed inline duplicate in `04_gpbo_loop.py` merge path that risked double-application. No issues found.
+- Notes: §1.3 CellFlow Integration Fixes now COMPLETE (TODO-1, TODO-3, TODO-4 all done). §1.1, §1.2, §1.3 all COMPLETE. Next: §1.4 GP model improvements (TODO-9 pseudocount) or §1.9 Sanchis-Calleja data ingestion (high priority, 3× training data).
+
 ## Iteration 6 — 2026-03-18T06:00:00Z
 - Task: TODO-4 — Handle CellFlow conservative prediction bias (§1.3)
 - Result: pass

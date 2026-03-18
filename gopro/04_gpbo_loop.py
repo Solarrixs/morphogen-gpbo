@@ -41,6 +41,7 @@ from gopro.config import (
     FIDELITY_R2_THRESHOLDS,
     GP_STATE_DIR,
     KERNEL_COMPLEXITY_THRESHOLDS,
+    LOG_SCALE_COLUMNS,
     MORPHOGEN_COLUMNS,
     PROTEIN_MW_KDA,
     TIMING_FULL,
@@ -225,6 +226,56 @@ def _compute_active_bounds(
                 len(morph_cols) - len([c for c in active_cols if c != "fidelity"]))
 
     return active_bounds, active_cols
+
+
+def _apply_log_scale(
+    X: pd.DataFrame,
+    log_scale_cols: list[str],
+) -> pd.DataFrame:
+    """Apply log1p transform to selected concentration columns.
+
+    Morphogen dose-response is typically log-linear; log1p(x) compresses
+    dynamic range and helps the GP learn smoother functions (Kanda 2022).
+
+    Args:
+        X: Morphogen concentration DataFrame.
+        log_scale_cols: Column names to transform.
+
+    Returns:
+        Copy of X with specified columns log1p-transformed.
+    """
+    X = X.copy()
+    applied = []
+    for col in log_scale_cols:
+        if col in X.columns:
+            X[col] = np.log1p(X[col].values)
+            applied.append(col)
+    if applied:
+        logger.info("Log-scaled %d columns: %s", len(applied), applied)
+    return X
+
+
+def _inverse_log_scale(
+    df: pd.DataFrame,
+    log_scale_cols: list[str],
+) -> pd.DataFrame:
+    """Reverse log1p transform on recommendation columns.
+
+    Applies expm1 to convert log-scaled GP recommendations back to
+    original concentration units (µM).
+
+    Args:
+        df: Recommendations DataFrame with log-scaled values.
+        log_scale_cols: Column names to inverse-transform.
+
+    Returns:
+        Copy of df with specified columns expm1-transformed.
+    """
+    df = df.copy()
+    for col in log_scale_cols:
+        if col in df.columns:
+            df[col] = np.expm1(df[col].values)
+    return df
 
 
 def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
@@ -2669,6 +2720,7 @@ def run_gpbo_loop(
     noise_variance_csv: Optional[Path] = None,
     cellflow_variance_inflation: float = 1.0,
     pseudocount: float | None = None,
+    log_scale: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -2733,6 +2785,9 @@ def run_gpbo_loop(
             (from ``compute_bootstrap_uncertainty``). When provided, uses
             heteroscedastic noise (``train_Yvar``) in the GP. Only applies to
             the standard MAP and per-type-GP paths.
+        log_scale: If True, apply log1p transform to concentration columns
+            (``LOG_SCALE_COLUMNS``) before GP fitting. Recommendations are
+            inverse-transformed (expm1) back to µM. (default: False)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -2835,6 +2890,13 @@ def run_gpbo_loop(
             target_profile = refine_target_profile(
                 Y_real, fidelity_proxy, target_profile, learning_rate=refine_lr,
             )
+
+    # Apply log1p transform to concentration columns before bounds/GP fitting
+    log_scaled_cols: list[str] = []
+    if log_scale:
+        log_scaled_cols = [c for c in LOG_SCALE_COLUMNS if c in X.columns]
+        X = _apply_log_scale(X, log_scaled_cols)
+        X_real = _apply_log_scale(X_real, log_scaled_cols)
 
     # Compute active bounds: use real data for morphogen ranges, but merged X
     # when virtual sources exist so log_harvest_day variance is detected.
@@ -2961,6 +3023,10 @@ def run_gpbo_loop(
         target_profile=target_profile,
         n_duplicates=n_duplicates,
     )
+
+    # Inverse log-scale: convert recommendations back to original µM units
+    if log_scaled_cols:
+        recommendations = _inverse_log_scale(recommendations, log_scaled_cols)
 
     # Restore dropped zero-variance columns as zeros
     all_morph_cols = [c for c in X.columns if c != "fidelity"]
@@ -3186,6 +3252,10 @@ if __name__ == "__main__":
                         help="Path to per-condition bootstrap variance CSV "
                              "(from compute_bootstrap_uncertainty). Enables "
                              "heteroscedastic noise modeling via train_Yvar.")
+    parser.add_argument("--log-scale", action="store_true",
+                        help="Apply log1p transform to concentration columns before GP fitting. "
+                             "Compresses dynamic range for log-linear dose-response (Kanda 2022). "
+                             "Recommendations are inverse-transformed (expm1) back to µM.")
     parser.add_argument("--cellflow-variance-inflation", type=float, default=1.0,
                         help="Inflate CellFlow prediction variance by this factor. "
                              "Values >1.0 spread predictions away from the mean to "
@@ -3366,6 +3436,7 @@ if __name__ == "__main__":
         noise_variance_csv=Path(args.bootstrap_noise) if args.bootstrap_noise else None,
         cellflow_variance_inflation=args.cellflow_variance_inflation,
         pseudocount=args.pseudocount,
+        log_scale=args.log_scale,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
