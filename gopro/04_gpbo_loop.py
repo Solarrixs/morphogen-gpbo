@@ -39,6 +39,7 @@ from gopro.config import (
     FIDELITY_COSTS,
     FIDELITY_LABELS,
     FIDELITY_R2_THRESHOLDS,
+    FIXED_NOISE_MIN_VARIANCE,
     GP_STATE_DIR,
     KERNEL_COMPLEXITY_THRESHOLDS,
     LOG_SCALE_COLUMNS,
@@ -1437,7 +1438,7 @@ def fit_gp_botorch(
                 ilr_var[i] = np.diag(cov_ilr)
             nv_values = ilr_var
         train_Yvar = torch.tensor(nv_values, dtype=DTYPE, device=DEVICE)
-        train_Yvar = torch.clamp(train_Yvar, min=1e-6)
+        train_Yvar = torch.clamp(train_Yvar, min=FIXED_NOISE_MIN_VARIANCE)
         logger.info(
             "Using heteroscedastic noise (train_Yvar): mean=%.2e, range=[%.2e, %.2e]",
             train_Yvar.mean().item(),
@@ -2878,6 +2879,7 @@ def run_gpbo_loop(
     per_type_gp: bool = False,
     ensemble_restarts: int = 0,
     noise_variance_csv: Optional[Path] = None,
+    fixed_noise: bool = False,
     cellflow_variance_inflation: float = 1.0,
     pseudocount: float | None = None,
     log_scale: bool = False,
@@ -2947,6 +2949,13 @@ def run_gpbo_loop(
             (from ``compute_bootstrap_uncertainty``). When provided, uses
             heteroscedastic noise (``train_Yvar``) in the GP. Only applies to
             the standard MAP and per-type-GP paths.
+        fixed_noise: If True, enable heteroscedastic noise modeling.
+            Auto-discovers bootstrap variance CSV at the standard output
+            path (``data/gp_noise_variance_amin_kelley.csv``) when
+            ``noise_variance_csv`` is not provided. If no CSV is found,
+            computes uniform noise from column-wise variance of Y.
+            Noise is clamped at ``FIXED_NOISE_MIN_VARIANCE`` (0.02).
+            (Cosenza 2022). (default: False)
         log_scale: If True, apply log1p transform to concentration columns
             (``LOG_SCALE_COLUMNS``) before GP fitting. Recommendations are
             inverse-transformed (expm1) back to µM. (default: False)
@@ -3107,12 +3116,36 @@ def run_gpbo_loop(
         n_conditions=X_active.shape[0], d_active=d_morph,
     )
 
-    # Load bootstrap noise variance if provided
+    # Load bootstrap noise variance if provided or auto-discover with --fixed-noise
     noise_var_df = None
-    if noise_variance_csv is not None:
-        nv_path = Path(noise_variance_csv)
+    _nv_path = Path(noise_variance_csv) if noise_variance_csv is not None else None
+
+    # Auto-discover bootstrap CSV when --fixed-noise is set without explicit path
+    if _nv_path is None and fixed_noise:
+        _auto_path = DATA_DIR / "gp_noise_variance_amin_kelley.csv"
+        if _auto_path.exists():
+            _nv_path = _auto_path
+            logger.info("Auto-discovered bootstrap noise variance: %s", _nv_path)
+        else:
+            logger.info(
+                "No bootstrap noise CSV found at %s; "
+                "computing uniform noise from Y column variance",
+                _auto_path,
+            )
+            col_var = Y.var(axis=0)
+            noise_var_df = pd.DataFrame(
+                np.tile(col_var.values, (len(Y), 1)),
+                columns=Y.columns,
+                index=Y.index,
+            )
+            logger.info(
+                "Uniform noise variance: mean=%.2e, range=[%.2e, %.2e]",
+                col_var.mean(), col_var.min(), col_var.max(),
+            )
+
+    if _nv_path is not None and noise_var_df is None:
         try:
-            noise_var_df = pd.read_csv(nv_path, index_col=0)
+            noise_var_df = pd.read_csv(_nv_path, index_col=0)
             # Align to Y's index (conditions in merged training set)
             noise_var_df = noise_var_df.reindex(Y.index)
             n_matched = noise_var_df.dropna(how="all").shape[0]
@@ -3129,7 +3162,7 @@ def run_gpbo_loop(
             # Fill unmatched conditions (e.g. virtual data) with column means
             noise_var_df = noise_var_df.fillna(noise_var_df.mean())
         except FileNotFoundError:
-            logger.warning("Noise variance CSV not found: %s", nv_path)
+            logger.warning("Noise variance CSV not found: %s", _nv_path)
 
     # Fit GP on active dimensions only (save/load handled inside fit_gp_botorch)
     if use_tvr and "fidelity" in X_active.columns and X_active["fidelity"].nunique() > 1:
@@ -3424,6 +3457,12 @@ if __name__ == "__main__":
                         help="Path to per-condition bootstrap variance CSV "
                              "(from compute_bootstrap_uncertainty). Enables "
                              "heteroscedastic noise modeling via train_Yvar.")
+    parser.add_argument("--fixed-noise", action="store_true",
+                        help="Enable heteroscedastic noise modeling (Cosenza 2022). "
+                             "Auto-discovers bootstrap variance CSV at standard path "
+                             "(data/gp_noise_variance_amin_kelley.csv) or computes "
+                             "uniform noise from Y column variance. Noise clamped "
+                             "at min=%.2g." % FIXED_NOISE_MIN_VARIANCE)
     parser.add_argument("--log-scale", action="store_true",
                         help="Apply log1p transform to concentration columns before GP fitting. "
                              "Compresses dynamic range for log-linear dose-response (Kanda 2022). "
@@ -3616,6 +3655,7 @@ if __name__ == "__main__":
         per_type_gp=args.per_type_gp,
         ensemble_restarts=args.ensemble_restarts,
         noise_variance_csv=Path(args.bootstrap_noise) if args.bootstrap_noise else None,
+        fixed_noise=args.fixed_noise,
         cellflow_variance_inflation=args.cellflow_variance_inflation,
         pseudocount=args.pseudocount,
         log_scale=args.log_scale,

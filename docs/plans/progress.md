@@ -1,5 +1,30 @@
 # Progress Log
 
+## Iteration 15 — 2026-03-18
+- Task: TODO-31 — FixedNoiseGP with heteroscedastic noise (§1.4)
+- Result: pass
+- Tests: 634 → 638 (+4 new tests)
+- Changes:
+  - `gopro/config.py` — Added `FIXED_NOISE_MIN_VARIANCE = 0.02` constant
+  - `gopro/04_gpbo_loop.py` — Imported `FIXED_NOISE_MIN_VARIANCE`; changed train_Yvar clamp from 1e-6 to 0.02; added `fixed_noise` param to `run_gpbo_loop()` with auto-discovery of bootstrap CSV at `data/gp_noise_variance_amin_kelley.csv` and uniform-noise fallback from Y column variance; added `--fixed-noise` CLI flag
+  - `gopro/tests/test_unit.py` — Added `TestFixedNoise` class with 4 tests (config export, noise clamp, uniform fallback, zero-noise clamp)
+  - `docs/task_plan.md` — Marked TODO-31 complete, updated test count to 638
+- Notes: §1.4 GP Model Improvements: TODO-9, TODO-28, TODO-29, TODO-30, TODO-31 done (5/13). Next: TODO-32 (Sobol QMC sampler), TODO-27 (input warping), or TODO-5 (per-fidelity ARD).
+
+## Iteration 14 — 2026-03-18T07:09:16Z
+- Task: Simplify pass on TODO-30 (explicit GP priors)
+- Result: pass
+- Commits:
+  - `b9d6bb7` [ralph-simplify] Thread explicit_priors through fit_tvr_models
+  - `326ba87` [ralph-10] TODO-30: Explicit GP priors (lengthscale + noise)
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Threaded `explicit_priors` param through `fit_tvr_models()` (+8 lines)
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass threaded `explicit_priors` through TVR model fitting path that was missed in initial implementation. Docs updated.
+- Tests: 634 passing (unchanged)
+- Notes: §1.4 GP Model Improvements: TODO-9, TODO-28, TODO-29, TODO-30 all done (4/13). Next: TODO-31 (FixedNoiseGP), TODO-32 (Sobol QMC), or TODO-27 (input warping).
+
 ## Iteration 13 — 2026-03-18
 - Task: TODO-30 — Explicit GP priors (Cosenza 2022)
 - Result: pass

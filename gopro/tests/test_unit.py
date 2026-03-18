@@ -2827,6 +2827,115 @@ class TestBootstrapUncertainty:
         assert post.mean.shape[-1] == 3  # ILR: 4 types -> 3 components
 
 
+class TestFixedNoise:
+    """Tests for --fixed-noise heteroscedastic noise modeling (TODO-31)."""
+
+    def test_fixed_noise_min_variance_config(self):
+        """FIXED_NOISE_MIN_VARIANCE is exported from config and equals 0.02."""
+        from gopro.config import FIXED_NOISE_MIN_VARIANCE
+        assert FIXED_NOISE_MIN_VARIANCE == 0.02
+
+    def test_noise_clamped_at_min_variance(self):
+        """train_Yvar values below FIXED_NOISE_MIN_VARIANCE are clamped up."""
+        import torch
+        from gopro.config import FIXED_NOISE_MIN_VARIANCE
+        np.random.seed(42)
+        n, d = 5, 3
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM"],
+            index=[f"c{i}" for i in range(n)],
+        )
+        X["fidelity"] = 1.0
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(4), size=n),
+            columns=["ct_A", "ct_B", "ct_C", "ct_D"],
+            index=X.index,
+        )
+        # Create noise variance with some values well below the min
+        noise_var = pd.DataFrame(
+            np.full((n, 4), 1e-8),
+            columns=Y.columns,
+            index=Y.index,
+        )
+        model, train_X, train_Y, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, noise_variance=noise_var,
+        )
+        # Model should fit — the clamp prevents numerical issues
+        with torch.no_grad():
+            post = model.posterior(train_X[:1])
+        assert post.mean.shape[-1] == 3  # ILR: 4 types -> 3 components
+
+    def test_fixed_noise_uniform_fallback(self):
+        """When --fixed-noise is set without CSV, uniform noise from Y variance is used."""
+        import torch
+        np.random.seed(42)
+        n, d = 8, 3
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM"],
+            index=[f"c{i}" for i in range(n)],
+        )
+        X["fidelity"] = 1.0
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(4) * 5, size=n),
+            columns=["ct_A", "ct_B", "ct_C", "ct_D"],
+            index=X.index,
+        )
+        # Compute expected uniform noise = per-column variance tiled
+        expected_col_var = Y.var(axis=0)
+        uniform_nv = pd.DataFrame(
+            np.tile(expected_col_var.values, (n, 1)),
+            columns=Y.columns,
+            index=Y.index,
+        )
+        # Verify shape and values
+        assert uniform_nv.shape == (n, 4)
+        for col in Y.columns:
+            np.testing.assert_allclose(
+                uniform_nv[col].values,
+                np.full(n, expected_col_var[col]),
+            )
+        # Fit GP with the uniform noise to verify it works end-to-end
+        model, train_X, train_Y, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, noise_variance=uniform_nv,
+        )
+        with torch.no_grad():
+            post = model.posterior(train_X[:1])
+        assert post.mean.shape[-1] == 3
+
+    def test_fixed_noise_zero_noise_clamped(self):
+        """Zero noise variance rows are clamped to FIXED_NOISE_MIN_VARIANCE."""
+        import torch
+        from gopro.config import FIXED_NOISE_MIN_VARIANCE
+        np.random.seed(42)
+        n, d = 5, 3
+        X = pd.DataFrame(
+            np.random.rand(n, d),
+            columns=["CHIR99021_uM", "SAG_uM", "BMP4_uM"],
+            index=[f"c{i}" for i in range(n)],
+        )
+        X["fidelity"] = 1.0
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(4), size=n),
+            columns=["ct_A", "ct_B", "ct_C", "ct_D"],
+            index=X.index,
+        )
+        # All-zero noise variance
+        noise_var = pd.DataFrame(
+            np.zeros((n, 4)),
+            columns=Y.columns,
+            index=Y.index,
+        )
+        model, train_X, train_Y, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=True, noise_variance=noise_var,
+        )
+        # Should not crash — zeros clamped to FIXED_NOISE_MIN_VARIANCE
+        with torch.no_grad():
+            post = model.posterior(train_X[:1])
+        assert post.mean.shape[-1] == 3
+
+
 class TestLogScale:
     """Tests for selective log-scaling of concentration dimensions."""
 

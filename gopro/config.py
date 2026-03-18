@@ -170,6 +170,12 @@ CELLFLOW_MAX_TRAINING_DAY: int = 36
 # GP can learn from more spread-out low-fidelity signal.
 CELLFLOW_DEFAULT_VARIANCE_INFLATION: float = 2.0
 
+# --- Fixed-noise GP minimum variance (Cosenza 2022) ---
+# Minimum per-observation noise variance for FixedNoiseGP / heteroscedastic
+# noise modeling.  Clamping at 0.02 prevents the GP from treating any
+# observation as noise-free, which would cause numerical instability.
+FIXED_NOISE_MIN_VARIANCE: float = 0.02
+
 # --- Adaptive kernel complexity schedule (NAIAD, Qin et al. ICML 2025) ---
 # N/d ratio thresholds for auto-selecting GP kernel complexity.
 # Below SHARED: use shared lengthscale (fewest params, avoids overfitting).
