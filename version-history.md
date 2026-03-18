@@ -10,3 +10,4 @@
 | 2 | `02c948c` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix method validation, extract metric dispatch, remove dead import |
 | final | `513eed8` | verified | ralph/production-readiness-phase2 | Bug hunter verified |
 | 3 | `daac41a` | working | ralph/production-readiness-phase2 | [ralph-simplify] Add concentration_scale field to CellFlow encoding |
+| final | `4acab09` | verified | ralph/production-readiness-phase2 | Bug hunter verified |
