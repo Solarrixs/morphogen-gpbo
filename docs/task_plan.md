@@ -4,7 +4,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 **Last updated:** 2026-03-17
 **Branch:** ralph/production-readiness-phase2
-**Tests:** 617 passing (gopro) + 53 (literature) = 670 total
+**Tests:** 620 passing (gopro) + 53 (literature) = 673 total
 **§1.1 Status:** COMPLETE (15/15) — all competitive landscape ideas implemented
 **§1.2 Status:** COMPLETE (3/3) — all critical MF-GP bugs fixed
 
@@ -48,7 +48,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 - [ ] TODO-6: Zero-passing kernel — modified RBF enforcing `k(0,x)=0` for concentration inputs (GPerturb).
 - [ ] TODO-7: Desirability-based feasibility gate — `D(x) = phi(x) * y_bar(x)` gates infeasible regions (Cosenza 2022).
 - [ ] TODO-8: Spike-and-slab output sparsity — scCODA-style continuous relaxation.
-- [ ] TODO-9: Verify pseudocount handling before ILR — consider `--pseudocount` CLI flag.
+- [x] TODO-9: Verify pseudocount handling before ILR — `--pseudocount` CLI flag, threaded through all ILR call sites.
 - [ ] TODO-10: Dirichlet-Multinomial alternative — `--dirichlet` flag for comparison.
 - [ ] TODO-11: ILR vs ALR comparison test — verify ILR outperforms ALR for GP fitting.
 - [ ] TODO-27: Input warping (Kumaraswamy CDF) — `--input-warp` CLI flag (Kanda 2022).

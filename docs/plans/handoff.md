@@ -1,15 +1,15 @@
-# Handoff to Iteration 7
+# Handoff to Iteration 8
 
-## Last Completed: TODO-4 — Handle CellFlow conservative prediction bias (§1.3)
-Added `CELLFLOW_DEFAULT_VARIANCE_INFLATION = 2.0` to config.py. Added `inflate_cellflow_variance()` helper to `06_cellflow_virtual.py` that amplifies deviations from global mean, clamps to non-negative, and re-normalises. Wired into `predict_cellflow()` via `variance_inflation` parameter. Added `--cellflow-variance-inflation` CLI flag to `04_gpbo_loop.py`, threaded through `run_gpbo_loop()` → `merge_multi_fidelity_data()`. Inline inflation also applied in merge for CellFlow data (fidelity=0.0). 7 new tests, 617 total passing.
+## Last Completed: TODO-9 — Configurable pseudocount for ILR transform (§1.4 started)
+Added `pseudocount` parameter to `ilr_transform()`, threaded through `_multiplicative_replacement()`, `fit_gp_botorch()`, `fit_tvr_models()`, `compute_ensemble_disagreement()`, and `run_gpbo_loop()`. Added `--pseudocount` CLI flag (default: None → uses multiplicative replacement default of ~3.8e-4 for 17 cell types). 3 new tests, 620 total passing.
 
-## Next Up: §1.4 GP Model Improvements — TODO-9 (pseudocount handling)
-- Verify and fix pseudocount handling before ILR transform
-- Add `--pseudocount` CLI flag (default 1e-6)
-- File: `04_gpbo_loop.py`
-- Acceptance: pseudocount applied consistently; test with zero-fraction row passes; 2+ new tests
+## Next Up: §1.4 GP Model Improvements — TODO-28 (selective log-scaling)
+- Add `LOG_SCALE_COLUMNS` list to config.py
+- Apply log1p transform to those columns in `build_training_set()`
+- Provide inverse for recommendations
+- Acceptance: config constant defined; transform applied; inverse available; 3+ new tests
 
-Alternative: §1.9 Sanchis-Calleja data ingestion (HIGH priority, 3× training data increase).
+Alternative: TODO-29 (MLL optimization restarts) or TODO-30 (explicit GP priors).
 
 ## Warnings
 - Data CSVs in `data/` are modified but uncommitted (convergence_diagnostics, gp_diagnostics, gp_recommendations)
@@ -18,13 +18,15 @@ Alternative: §1.9 Sanchis-Calleja data ingestion (HIGH priority, 3× training d
 - CellFlow imports: use `jax` and `jax.random`, NOT `torch` or `jax.numpy`
 - OOD warning uses `CELLFLOW_MAX_TRAINING_DAY` from config — don't hardcode 36
 - Variance inflation uses `CELLFLOW_DEFAULT_VARIANCE_INFLATION` from config — don't hardcode 2.0
+- Variance inflation lives in `06_cellflow_virtual.py` only — `04_gpbo_loop.py` calls it, does NOT duplicate the logic
+- Pseudocount default is None (uses multiplicative replacement default) — don't hardcode a value
 
 ## Key Context
 - Branch: `ralph/production-readiness-phase2`
 - Task plan: `docs/task_plan.md` (~120+ tasks across 5 sections)
-- Tests: `python -m pytest gopro/tests/ -v` (617 passing)
-- §1.1 COMPLETE, §1.2 COMPLETE, §1.3 COMPLETE (TODO-1, TODO-3, TODO-4 all done)
-- Config: `gopro/config.py` — all constants (including `CELLFLOW_MAX_TRAINING_DAY`, `CELLFLOW_DEFAULT_VARIANCE_INFLATION`)
+- Tests: `python -m pytest gopro/tests/ -v` (620 passing)
+- §1.1 COMPLETE, §1.2 COMPLETE, §1.3 COMPLETE, §1.4 started (TODO-9 done)
+- Config: `gopro/config.py` — all constants
 - Conventions: import from `gopro.config`, use `get_logger(__name__)`, `.copy()` before mutating DFs
 
-## Remaining: ~100 tasks todo, 0 blocked, ~28 complete
+## Remaining: ~100 tasks todo, 0 blocked, ~29 complete

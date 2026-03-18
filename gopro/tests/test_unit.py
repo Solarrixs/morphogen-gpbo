@@ -46,6 +46,33 @@ class TestILRTransform:
         assert Z.shape == (1, 2)
         assert np.all(np.isfinite(Z))
 
+    def test_ilr_pseudocount_custom(self):
+        """Custom pseudocount is threaded to multiplicative replacement."""
+        Y = np.array([[0.5, 0.5, 0.0]])  # has a zero
+        Z_default = step04.ilr_transform(Y)
+        Z_custom = step04.ilr_transform(Y, pseudocount=1e-8)
+        # Both should be finite
+        assert np.all(np.isfinite(Z_default))
+        assert np.all(np.isfinite(Z_custom))
+        # Different pseudocounts should produce different ILR values
+        assert not np.allclose(Z_default, Z_custom)
+
+    def test_ilr_pseudocount_zero_row(self):
+        """All-zero row handled gracefully with custom pseudocount."""
+        Y = np.array([[0.0, 0.0, 0.0], [0.5, 0.3, 0.2]])
+        Z = step04.ilr_transform(Y, pseudocount=1e-6)
+        assert Z.shape == (2, 2)
+        assert np.all(np.isfinite(Z))
+        # All-zero row → uniform after replacement → near-zero ILR coords
+        np.testing.assert_allclose(Z[0], np.zeros(2), atol=0.1)
+
+    def test_ilr_pseudocount_roundtrip(self):
+        """ILR roundtrip works with custom pseudocount when no zeros present."""
+        Y = np.array([[0.5, 0.3, 0.2], [0.1, 0.8, 0.1]])
+        Z = step04.ilr_transform(Y, pseudocount=1e-6)
+        Y_recovered = step04.ilr_inverse(Z, D=3)
+        np.testing.assert_allclose(Y, Y_recovered, atol=1e-3)
+
 
 class TestMorphogenBounds:
     """Tests for morphogen bounds configuration."""

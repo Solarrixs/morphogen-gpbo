@@ -581,7 +581,7 @@ def _multiplicative_replacement(Y: np.ndarray, delta: float | None = None) -> np
     return Y_out
 
 
-def ilr_transform(Y: np.ndarray) -> np.ndarray:
+def ilr_transform(Y: np.ndarray, pseudocount: float | None = None) -> np.ndarray:
     """Isometric log-ratio transform for compositional data.
 
     Transforms D-part compositions to (D-1)-dimensional real space,
@@ -592,12 +592,16 @@ def ilr_transform(Y: np.ndarray) -> np.ndarray:
 
     Args:
         Y: Array of shape (N, D) with rows summing to 1.
+        pseudocount: Replacement value for zeros in multiplicative
+            replacement.  If None, uses the default from
+            ``_multiplicative_replacement`` (~0.65/(D*100)).
+            Configurable via ``--pseudocount`` CLI flag.
 
     Returns:
         Array of shape (N, D-1) in ILR space.
     """
     D = Y.shape[1]
-    Y_safe = _multiplicative_replacement(Y)
+    Y_safe = _multiplicative_replacement(Y, delta=pseudocount)
     log_Y = np.log(Y_safe)
 
     V = _helmert_basis(D)
@@ -886,6 +890,7 @@ def fit_tvr_models(
     Y: pd.DataFrame,
     target_cell_types: Optional[list[str]] = None,
     use_ilr: bool = True,
+    pseudocount: float | None = None,
 ) -> tuple:
     """Fit separate GPs per fidelity level for Targeted Variance Reduction.
 
@@ -928,7 +933,7 @@ def fit_tvr_models(
     Y_values = Y_selected.values
     if use_ilr and Y_values.shape[1] > 1:
         logger.info("Applying ILR transform to compositional Y data...")
-        Y_values = ilr_transform(Y_values)
+        Y_values = ilr_transform(Y_values, pseudocount=pseudocount)
 
     # Morphogen columns (excluding fidelity)
     morph_cols = [c for c in X.columns if c != "fidelity"]
@@ -1124,6 +1129,7 @@ def fit_gp_botorch(
     per_type_gp: bool = False,
     noise_variance: Optional[pd.DataFrame] = None,
     save_state: bool = True,
+    pseudocount: float | None = None,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
 
@@ -1196,7 +1202,7 @@ def fit_gp_botorch(
 
     if use_ilr and Y_values.shape[1] > 1:
         logger.info("Applying ILR transform to compositional Y data...")
-        Y_values = ilr_transform(Y_values)
+        Y_values = ilr_transform(Y_values, pseudocount=pseudocount)
         logger.info("ILR-transformed Y shape: %s", Y_values.shape)
 
     train_Y = torch.tensor(Y_values, dtype=DTYPE, device=DEVICE)
@@ -1212,7 +1218,7 @@ def fit_gp_botorch(
             # where J = diag(1/y) @ V is the Jacobian of log(y) @ V.
             D = nv_values.shape[1]
             V = _helmert_basis(D)  # (D, D-1)
-            Y_safe = _multiplicative_replacement(Y_selected.values)
+            Y_safe = _multiplicative_replacement(Y_selected.values, delta=pseudocount)
             ilr_var = np.empty((nv_values.shape[0], D - 1))
             for i in range(nv_values.shape[0]):
                 J = np.diag(1.0 / Y_safe[i]) @ V  # (D, D-1)
@@ -2090,6 +2096,7 @@ def compute_ensemble_disagreement(
     per_type_gp: bool = False,
     n_eval_points: int = 128,
     existing_model: Optional[Any] = None,
+    pseudocount: float | None = None,
 ) -> dict:
     """Compute ensemble disagreement by fitting N independent GPs.
 
@@ -2182,6 +2189,7 @@ def compute_ensemble_disagreement(
                     per_type_gp=per_type_gp,
                     round_num=1,
                     save_state=False,
+                    pseudocount=pseudocount,
                 )
                 _collect_from_model(model_i)
             except (RuntimeError, ValueError) as e:
@@ -2644,6 +2652,7 @@ def run_gpbo_loop(
     ensemble_restarts: int = 0,
     noise_variance_csv: Optional[Path] = None,
     cellflow_variance_inflation: float = 1.0,
+    pseudocount: float | None = None,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -2883,6 +2892,7 @@ def run_gpbo_loop(
             X_active, Y,
             target_cell_types=target_cell_types,
             use_ilr=use_ilr,
+            pseudocount=pseudocount,
         )
     else:
         if use_tvr:
@@ -2900,6 +2910,7 @@ def run_gpbo_loop(
             cat_dims=timing_cat_dims,
             per_type_gp=per_type_gp,
             noise_variance=noise_var_df,
+            pseudocount=pseudocount,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -3050,6 +3061,7 @@ def run_gpbo_loop(
                 cat_dims=timing_cat_dims,
                 per_type_gp=per_type_gp,
                 existing_model=model,
+                pseudocount=pseudocount,
             )
             diagnostics["ensemble_stability_score"] = ens_diag["stability_score"]
             diagnostics["ensemble_ls_agreement"] = ens_diag["lengthscale_agreement"]
@@ -3085,6 +3097,11 @@ if __name__ == "__main__":
                         help="Optimization round number (default: 1)")
     parser.add_argument("--no-ilr", action="store_true",
                         help="Disable ILR transform")
+    parser.add_argument("--pseudocount", type=float, default=None,
+                        help="Zero-replacement value for multiplicative replacement before ILR "
+                             "transform (default: 0.65/(D*100) ≈ 3.8e-4 for 17 cell types). "
+                             "Smaller values preserve extreme compositions; larger values "
+                             "regularize toward uniform.")
     parser.add_argument("--multi-objective", action="store_true",
                         help="Use multi-objective acquisition (qLogNEHVI)")
     parser.add_argument("--cellrank2-fractions", type=str, default=None,
@@ -3332,6 +3349,7 @@ if __name__ == "__main__":
         ensemble_restarts=args.ensemble_restarts,
         noise_variance_csv=Path(args.bootstrap_noise) if args.bootstrap_noise else None,
         cellflow_variance_inflation=args.cellflow_variance_inflation,
+        pseudocount=args.pseudocount,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
