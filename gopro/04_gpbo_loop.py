@@ -581,7 +581,11 @@ def _multiplicative_replacement(Y: np.ndarray, delta: float | None = None) -> np
     return Y_out
 
 
-def ilr_transform(Y: np.ndarray, pseudocount: float | None = None) -> np.ndarray:
+def ilr_transform(
+    Y: np.ndarray,
+    pseudocount: float | None = None,
+    return_safe: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Isometric log-ratio transform for compositional data.
 
     Transforms D-part compositions to (D-1)-dimensional real space,
@@ -596,16 +600,24 @@ def ilr_transform(Y: np.ndarray, pseudocount: float | None = None) -> np.ndarray
             replacement.  If None, uses the default from
             ``_multiplicative_replacement`` (~0.65/(D*100)).
             Configurable via ``--pseudocount`` CLI flag.
+        return_safe: If True, return ``(Z, Y_safe)`` where ``Y_safe`` is
+            the zero-replaced composition array.  Useful when the caller
+            also needs the replaced values (e.g. for delta-method variance
+            propagation) without recomputing multiplicative replacement.
 
     Returns:
-        Array of shape (N, D-1) in ILR space.
+        Array of shape (N, D-1) in ILR space, or ``(Z, Y_safe)`` tuple
+        when *return_safe* is True.
     """
     D = Y.shape[1]
     Y_safe = _multiplicative_replacement(Y, delta=pseudocount)
     log_Y = np.log(Y_safe)
 
     V = _helmert_basis(D)
-    return log_Y @ V
+    Z = log_Y @ V
+    if return_safe:
+        return Z, Y_safe
+    return Z
 
 
 def ilr_inverse(Z: np.ndarray, D: int) -> np.ndarray:
@@ -1200,9 +1212,13 @@ def fit_gp_botorch(
     train_X = torch.tensor(X.values, dtype=DTYPE, device=DEVICE)
     Y_values = Y_selected.values
 
+    # Track zero-replaced compositions for delta-method variance propagation
+    Y_safe_for_jacobian = None
     if use_ilr and Y_values.shape[1] > 1:
         logger.info("Applying ILR transform to compositional Y data...")
-        Y_values = ilr_transform(Y_values, pseudocount=pseudocount)
+        Y_values, Y_safe_for_jacobian = ilr_transform(
+            Y_values, pseudocount=pseudocount, return_safe=True
+        )
         logger.info("ILR-transformed Y shape: %s", Y_values.shape)
 
     train_Y = torch.tensor(Y_values, dtype=DTYPE, device=DEVICE)
@@ -1218,7 +1234,7 @@ def fit_gp_botorch(
             # where J = diag(1/y) @ V is the Jacobian of log(y) @ V.
             D = nv_values.shape[1]
             V = _helmert_basis(D)  # (D, D-1)
-            Y_safe = _multiplicative_replacement(Y_selected.values, delta=pseudocount)
+            Y_safe = Y_safe_for_jacobian
             ilr_var = np.empty((nv_values.shape[0], D - 1))
             for i in range(nv_values.shape[0]):
                 J = np.diag(1.0 / Y_safe[i]) @ V  # (D, D-1)

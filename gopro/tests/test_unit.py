@@ -63,15 +63,17 @@ class TestILRTransform:
         Z = step04.ilr_transform(Y, pseudocount=1e-6)
         assert Z.shape == (2, 2)
         assert np.all(np.isfinite(Z))
-        # All-zero row → uniform after replacement → near-zero ILR coords
-        np.testing.assert_allclose(Z[0], np.zeros(2), atol=0.1)
+        # All-zero row → uniform after replacement → exact zero ILR coords
+        np.testing.assert_allclose(Z[0], np.zeros(2), atol=1e-6)
 
     def test_ilr_pseudocount_roundtrip(self):
-        """ILR roundtrip works with custom pseudocount when no zeros present."""
-        Y = np.array([[0.5, 0.3, 0.2], [0.1, 0.8, 0.1]])
-        Z = step04.ilr_transform(Y, pseudocount=1e-6)
+        """ILR roundtrip with custom pseudocount on data containing zeros."""
+        Y = np.array([[0.5, 0.5, 0.0], [0.0, 0.8, 0.2]])
+        # With zeros, multiplicative replacement shifts values, so the
+        # roundtrip recovers the *replaced* composition, not the original.
+        Z, Y_safe = step04.ilr_transform(Y, pseudocount=1e-6, return_safe=True)
         Y_recovered = step04.ilr_inverse(Z, D=3)
-        np.testing.assert_allclose(Y, Y_recovered, atol=1e-3)
+        np.testing.assert_allclose(Y_safe, Y_recovered, atol=1e-10)
 
 
 class TestMorphogenBounds:
