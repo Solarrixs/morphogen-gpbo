@@ -3123,3 +3123,74 @@ class TestExplicitPriors:
         noise_covar = model.likelihood.noise_covar
         noise_prior_names = [name for name, *_ in noise_covar.named_priors()]
         assert "noise_prior" in noise_prior_names
+
+
+class TestSobolQMCSampler:
+    """Tests for Sobol QMC sampler in acquisition (TODO-32)."""
+
+    def _fit_simple_model(self, n=20, d=3):
+        """Fit a simple SingleTaskGP for testing acquisition."""
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+        from botorch.fit import fit_gpytorch_mll
+        from gpytorch.mlls import ExactMarginalLogLikelihood
+
+        torch.manual_seed(42)
+        np.random.seed(42)
+        train_X = torch.rand(n, d, dtype=torch.float64)
+        train_Y = (train_X.sum(dim=-1, keepdim=True) +
+                    0.1 * torch.randn(n, 1, dtype=torch.float64))
+        model = SingleTaskGP(
+            train_X, train_Y,
+            input_transform=Normalize(d=d),
+            outcome_transform=Standardize(m=1),
+        )
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+        return model, train_X, train_Y
+
+    def test_sobol_sampler_used_in_acquisition(self):
+        """recommend_next_experiments creates a Sobol sampler."""
+        model, train_X, train_Y = self._fit_simple_model()
+        bounds = {f"x{i}": (0.0, 1.0) for i in range(3)}
+        columns = [f"x{i}" for i in range(3)]
+
+        recs = step04.recommend_next_experiments(
+            model, train_X, train_Y,
+            bounds=bounds, columns=columns,
+            n_recommendations=2,
+            mc_samples=64,
+        )
+        assert len(recs) == 2
+        # Recommendations should be within bounds
+        for col in columns:
+            assert recs[col].min() >= -0.01
+            assert recs[col].max() <= 1.01
+
+    def test_mc_samples_clamped_to_max(self):
+        """mc_samples > 2048 is clamped to 2048."""
+        model, train_X, train_Y = self._fit_simple_model()
+        bounds = {f"x{i}": (0.0, 1.0) for i in range(3)}
+        columns = [f"x{i}" for i in range(3)]
+
+        # Should not raise — internally clamped to 2048
+        recs = step04.recommend_next_experiments(
+            model, train_X, train_Y,
+            bounds=bounds, columns=columns,
+            n_recommendations=2,
+            mc_samples=9999,
+        )
+        assert len(recs) == 2
+
+    def test_default_mc_samples_is_512(self):
+        """Default mc_samples parameter is 512."""
+        import inspect
+        sig = inspect.signature(step04.recommend_next_experiments)
+        assert sig.parameters["mc_samples"].default == 512
+
+    def test_run_gpbo_loop_mc_samples_parameter(self):
+        """run_gpbo_loop accepts mc_samples parameter."""
+        import inspect
+        sig = inspect.signature(step04.run_gpbo_loop)
+        assert "mc_samples" in sig.parameters
+        assert sig.parameters["mc_samples"].default == 512

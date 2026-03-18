@@ -1712,6 +1712,7 @@ def recommend_next_experiments(
     cell_type_cols: Optional[list[str]] = None,
     target_profile: Optional[pd.Series] = None,
     n_duplicates: int = 0,
+    mc_samples: int = 512,
 ) -> pd.DataFrame:
     """Use acquisition function to recommend next experiments.
 
@@ -1734,12 +1735,21 @@ def recommend_next_experiments(
             new conditions are duplicated to enable observation noise estimation
             from the same round (complements n_replicates in run_gpbo_loop which
             re-runs conditions from prior rounds).
+        mc_samples: Number of MC samples for the Sobol QMC sampler used in
+            acquisition function evaluation (Cosenza 2022). Higher values
+            reduce variance in acquisition estimates. (default: 512, max: 2048)
 
     Returns:
         DataFrame with recommended morphogen concentrations and predictions.
     """
     from botorch.optim import optimize_acqf
     from botorch.acquisition import qLogExpectedImprovement
+    from botorch.sampling import SobolQMCNormalSampler
+
+    # Clamp mc_samples to valid range
+    mc_samples = max(1, min(mc_samples, 2048))
+    sampler = SobolQMCNormalSampler(sample_shape=torch.Size([mc_samples]))
+    logger.info("Using Sobol QMC sampler with %d MC samples", mc_samples)
 
     # Build bounds tensor
     lower = []
@@ -1776,6 +1786,7 @@ def recommend_next_experiments(
             model=model,
             ref_point=ref_point_tensor,
             X_baseline=train_X,
+            sampler=sampler,
         )
     else:
         # Guard: SAASBO ModelListGP with scalarized qLogEI is unsupported —
@@ -1844,11 +1855,13 @@ def recommend_next_experiments(
                 model=model,
                 best_f=best_f,
                 objective=objective,
+                sampler=sampler,
             )
         else:
             acqf = qLogExpectedImprovement(
                 model=model,
                 best_f=train_Y.max(),
+                sampler=sampler,
             )
 
     # Reserve slots for QC duplicates
@@ -2885,6 +2898,7 @@ def run_gpbo_loop(
     log_scale: bool = False,
     mll_restarts: int = 1,
     explicit_priors: bool = False,
+    mc_samples: int = 512,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -2966,6 +2980,9 @@ def run_gpbo_loop(
         explicit_priors: If True, set explicit priors on GP hyperparameters:
             LogNormal lengthscale prior + Gamma(3, 6) noise prior
             (Cosenza 2022). Only applies to MAP fitting paths. (default: False)
+        mc_samples: Number of Sobol QMC samples for acquisition function
+            evaluation (Cosenza 2022). Higher values reduce variance in
+            acquisition estimates. Clamped to [1, 2048]. (default: 512)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -3227,6 +3244,7 @@ def run_gpbo_loop(
         cell_type_cols=cell_type_cols,
         target_profile=target_profile,
         n_duplicates=n_duplicates,
+        mc_samples=mc_samples,
     )
 
     # Inverse log-scale: convert recommendations back to original µM units
@@ -3482,6 +3500,10 @@ if __name__ == "__main__":
                              "LogNormal lengthscale prior (Hvarfner 2024) + "
                              "Gamma(3,6) noise prior (Cosenza 2022). "
                              "Only applies to MAP paths.")
+    parser.add_argument("--mc-samples", type=int, default=512,
+                        help="Number of Sobol QMC samples for acquisition "
+                             "function evaluation (Cosenza 2022). Higher values "
+                             "reduce variance. Clamped to [1, 2048]. (default: 512)")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -3661,6 +3683,7 @@ if __name__ == "__main__":
         log_scale=args.log_scale,
         mll_restarts=args.mll_restarts,
         explicit_priors=args.explicit_priors,
+        mc_samples=args.mc_samples,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
