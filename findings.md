@@ -9,7 +9,7 @@
 ## Gotchas
 - fidelity=1.0 collapses MF-GP inter-fidelity kernel (TODO-24, unfixed)
 - CellFlow dose encoding uses raw dose×onehot instead of log1p (TODO-26, unfixed)
-- Fidelity correlation threshold at Spearman 0.3 is too permissive (TODO-25, unfixed)
+- Fidelity correlation threshold now R²-based 3-zone routing (TODO-25, fixed)
 
 ## Quality Issues Found
 - Bug-hunter iteration 4: 76 findings (6 critical, 38 warning, 32 info). See `.bug-hunter/SUMMARY.md`
@@ -38,3 +38,19 @@
 5. **[A-W-NEW-2] Zero-division guard in `compute_soft_cell_type_fractions`** (`02_map_to_hnoca.py:436`)
    - `row_sums` could be zero for edge-case conditions. NaN would propagate to GP training.
    - Fix: `row_sums.replace(0, 1)` with warning log.
+
+## Bug Hunter Fixes (Round 8 — 2026-03-17)
+
+### Critical Fixes
+1. **[A-C-005] TVR + multi-objective crash** (`04_gpbo_loop.py:2684`)
+   - `--tvr --multi-objective` causes `AttributeError` because `_TVRPosterior` lacks `covariance_matrix`/`mvn` required by `qLogNEHVI`. Crashes after GP fitting, wasting compute.
+   - Fix: Added `ValueError` guard at top of `run_gpbo_loop()`.
+
+2. **[RF-A-C-001] Silent threshold semantic break** (`config.py:143`)
+   - Legacy alias `FIDELITY_CORRELATION_THRESHOLD` silently changed from Spearman 0.3 to R² 0.80 (2.7x stricter, different metric). `visualize_report.py` chart annotations showed wrong threshold.
+   - Fix: Renamed to `FIDELITY_DROP_R2_THRESHOLD` / `FIDELITY_SKIP_R2_THRESHOLD`; updated all consumers.
+
+### Warning Fix
+3. **[A-W-007] Hardcoded h5ad path in `generate_report()`** (`visualize_report.py:1081`)
+   - `"amin_kelley_mapped.h5ad"` ignored `output_prefix` parameter. UMAP section silently missing for SAG screen reports.
+   - Fix: Changed to `f"{output_prefix}_mapped.h5ad"`.
