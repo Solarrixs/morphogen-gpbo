@@ -1350,3 +1350,192 @@ class TestModelPathDiscovery:
 
         result = step06.discover_cellflow_model()
         assert result == model_file
+
+
+class TestPredictWithCellflowJAX:
+    """Test that _predict_with_cellflow uses JAX API, not PyTorch."""
+
+    def test_uses_jax_not_torch(self, monkeypatch):
+        """_predict_with_cellflow should import jax, not torch."""
+        import types
+
+        # Track which modules are imported
+        imported_modules = []
+
+        # Create mock jax module
+        mock_jax = types.ModuleType("jax")
+        mock_jax_random = types.ModuleType("jax.random")
+        mock_jax_numpy = types.ModuleType("jax.numpy")
+
+        # Mock jax.random.PRNGKey and split
+        mock_jax_random.PRNGKey = lambda seed: ("prng_key", seed)
+        mock_jax_random.split = lambda key: (("split_a",), ("split_b",))
+        mock_jax.random = mock_jax_random
+        mock_jax.numpy = mock_jax_numpy
+
+        # Create a mock AnnData-like prediction result
+        mock_obs = pd.DataFrame({"cell_type": ["Neuron", "Neuron", "NPC"]})
+
+        class MockPred:
+            obs = mock_obs
+
+        # Create mock CellFlow model
+        class MockModel:
+            @staticmethod
+            def predict(encodings, n_cells=500, rng_key=None):
+                # Verify rng_key is passed (JAX API)
+                assert rng_key is not None, "rng_key must be passed (JAX API)"
+                return [MockPred() for _ in encodings]
+
+        mock_cellflow = types.ModuleType("cellflow")
+        mock_cellflow.CellFlowModel = types.SimpleNamespace(
+            load=lambda path: MockModel()
+        )
+
+        monkeypatch.setitem(__import__("sys").modules, "jax", mock_jax)
+        monkeypatch.setitem(__import__("sys").modules, "jax.random", mock_jax_random)
+        monkeypatch.setitem(__import__("sys").modules, "jax.numpy", mock_jax_numpy)
+        monkeypatch.setitem(__import__("sys").modules, "cellflow", mock_cellflow)
+
+        protocols = pd.DataFrame(
+            {"CHIR99021_uM": [3.0], "log_harvest_day": [math.log(21)]},
+            index=["test_cond"],
+        )
+
+        result = step06._predict_with_cellflow(
+            protocols, Path("/fake/model"), batch_size=256, n_cells_per_condition=100
+        )
+
+        assert isinstance(result, pd.DataFrame)
+        assert "test_cond" in result.index
+        # Fractions should sum to 1
+        assert abs(result.iloc[0].sum() - 1.0) < 1e-6
+
+    def test_rng_key_differs_per_batch(self, monkeypatch):
+        """Each batch should get a different rng_key via jax.random.split."""
+        import types
+        import sys
+
+        rng_keys_seen = []
+
+        # Create mock jax that tracks PRNG key splits
+        mock_jax = types.ModuleType("jax")
+        mock_jax_random = types.ModuleType("jax.random")
+        mock_jax_numpy = types.ModuleType("jax.numpy")
+
+        key_counter = [0]
+
+        def mock_prng_key(seed):
+            return ("prng", seed)
+
+        def mock_split(key):
+            key_counter[0] += 1
+            return (("key", key_counter[0]), ("subkey", key_counter[0]))
+
+        mock_jax_random.PRNGKey = mock_prng_key
+        mock_jax_random.split = mock_split
+        mock_jax.random = mock_jax_random
+        mock_jax.numpy = mock_jax_numpy
+
+        mock_obs = pd.DataFrame({"cell_type": ["Neuron"]})
+
+        class MockPred:
+            obs = mock_obs
+
+        class MockModel:
+            @staticmethod
+            def predict(encodings, n_cells=500, rng_key=None):
+                rng_keys_seen.append(rng_key)
+                return [MockPred() for _ in encodings]
+
+        mock_cellflow = types.ModuleType("cellflow")
+        mock_cellflow.CellFlowModel = types.SimpleNamespace(
+            load=lambda path: MockModel()
+        )
+
+        monkeypatch.setitem(sys.modules, "jax", mock_jax)
+        monkeypatch.setitem(sys.modules, "jax.random", mock_jax_random)
+        monkeypatch.setitem(sys.modules, "jax.numpy", mock_jax_numpy)
+        monkeypatch.setitem(sys.modules, "cellflow", mock_cellflow)
+
+        # 3 protocols with batch_size=1 → 3 batches → 3 different keys
+        protocols = pd.DataFrame(
+            {"CHIR99021_uM": [3.0, 1.5, 6.0], "log_harvest_day": [math.log(21)] * 3},
+            index=["c1", "c2", "c3"],
+        )
+
+        step06._predict_with_cellflow(
+            protocols, Path("/fake/model"), batch_size=1, n_cells_per_condition=10
+        )
+
+        assert len(rng_keys_seen) == 3
+        # Each batch should have received a distinct subkey
+        assert len(set(str(k) for k in rng_keys_seen)) == 3
+
+    def test_fallback_clustering_when_no_cell_type(self, monkeypatch):
+        """When prediction lacks cell_type column, should fall back to clustering."""
+        import types
+        import sys
+
+        mock_jax = types.ModuleType("jax")
+        mock_jax_random = types.ModuleType("jax.random")
+        mock_jax_numpy = types.ModuleType("jax.numpy")
+        mock_jax_random.PRNGKey = lambda seed: ("prng", seed)
+        mock_jax_random.split = lambda key: (("a",), ("b",))
+        mock_jax.random = mock_jax_random
+        mock_jax.numpy = mock_jax_numpy
+
+        # Mock prediction without cell_type column
+        mock_obs = pd.DataFrame({"leiden": ["0", "0", "1", "1", "2"]})
+
+        class MockPredNoCellType:
+            obs = mock_obs
+
+            class X:
+                shape = (5, 100)
+
+        # Need to mock scanpy clustering path
+        class MockScanpy:
+            class pp:
+                @staticmethod
+                def pca(adata, n_comps=20):
+                    pass
+
+                @staticmethod
+                def neighbors(adata, n_neighbors=15):
+                    pass
+
+            class tl:
+                @staticmethod
+                def leiden(adata, resolution=0.5):
+                    # leiden column already set in mock obs
+                    pass
+
+        class MockModel:
+            @staticmethod
+            def predict(encodings, n_cells=500, rng_key=None):
+                return [MockPredNoCellType()]
+
+        mock_cellflow = types.ModuleType("cellflow")
+        mock_cellflow.CellFlowModel = types.SimpleNamespace(
+            load=lambda path: MockModel()
+        )
+
+        monkeypatch.setitem(sys.modules, "jax", mock_jax)
+        monkeypatch.setitem(sys.modules, "jax.random", mock_jax_random)
+        monkeypatch.setitem(sys.modules, "jax.numpy", mock_jax_numpy)
+        monkeypatch.setitem(sys.modules, "cellflow", mock_cellflow)
+        monkeypatch.setitem(sys.modules, "scanpy", MockScanpy())
+
+        protocols = pd.DataFrame(
+            {"CHIR99021_uM": [3.0], "log_harvest_day": [math.log(21)]},
+            index=["test_cond"],
+        )
+
+        result = step06._predict_with_cellflow(
+            protocols, Path("/fake/model"), batch_size=256, n_cells_per_condition=5
+        )
+
+        assert isinstance(result, pd.DataFrame)
+        # Should have cluster_* columns from leiden fallback
+        assert any(c.startswith("cluster_") for c in result.columns)

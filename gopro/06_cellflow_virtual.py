@@ -333,6 +333,11 @@ def _predict_with_cellflow(
 ) -> pd.DataFrame:
     """Run predictions using actual CellFlow model.
 
+    CellFlow (Klein et al., bioRxiv 2025) is built on JAX/Flax, not PyTorch.
+    This function uses CellFlow's JAX-based API: jnp arrays for inputs,
+    and no explicit gradient context manager (JAX does not track gradients
+    by default — only ``jax.grad`` triggers differentiation).
+
     Args:
         protocols: Morphogen concentration vectors.
         model_path: Path to trained CellFlow model directory.
@@ -343,13 +348,17 @@ def _predict_with_cellflow(
         Predicted cell type fractions.
     """
     import cellflow
-    import torch
+    import jax
+    import jax.numpy as jnp
 
     logger.info("Loading CellFlow model from %s...", model_path)
     model = cellflow.CellFlowModel.load(str(model_path))
 
     all_fractions = []
     n_batches = (len(protocols) + batch_size - 1) // batch_size
+
+    # Use a fixed PRNG key for reproducibility; split per batch
+    rng_key = jax.random.PRNGKey(42)
 
     for batch_idx in range(n_batches):
         start = batch_idx * batch_size
@@ -366,17 +375,17 @@ def _predict_with_cellflow(
             enc = encode_protocol_cellflow(row.to_dict())
             encodings.append(enc)
 
-        # Generate virtual cells
-        with torch.no_grad():
-            predictions = model.predict(
-                encodings,
-                n_cells=n_cells_per_condition,
-            )
+        # Generate virtual cells — JAX does not track gradients by default,
+        # so no torch.no_grad() equivalent is needed.
+        rng_key, subkey = jax.random.split(rng_key)
+        predictions = model.predict(
+            encodings,
+            n_cells=n_cells_per_condition,
+            rng_key=subkey,
+        )
 
         # Aggregate to cell type fractions
-        for i, (cond_name, pred) in enumerate(
-            zip(batch.index, predictions)
-        ):
+        for cond_name, pred in zip(batch.index, predictions):
             if hasattr(pred, "obs") and "cell_type" in pred.obs.columns:
                 fracs = pred.obs["cell_type"].value_counts(normalize=True)
                 frac_dict = fracs.to_dict()

@@ -1,15 +1,33 @@
 # Progress Log
 
-## Iteration 3 — 2026-03-18
-- Task: TODO-26 — Fix CellFlow dose encoding (§1.2 FINAL)
+## Iteration 4 — 2026-03-18
+- Task: TODO-1 — Fix CellFlow JAX vs PyTorch API mismatch (§1.3)
 - Result: pass
-- Commits: pending
+- Commits:
+  - `[ralph-4] TODO-1: Fix CellFlow JAX vs PyTorch API mismatch`
 - Files changed:
-  - `gopro/06_cellflow_virtual.py` — Changed `encode_protocol_cellflow()` concentration from raw `conc` to `math.log1p(conc)`
+  - `gopro/06_cellflow_virtual.py` — Replaced `import torch` + `torch.no_grad()` with `import jax` + `jax.random.PRNGKey`/`split` in `_predict_with_cellflow()`. Added `rng_key` param to `model.predict()` for reproducible JAX sampling.
+  - `gopro/tests/test_phase4_5.py` — 3 new tests: `test_uses_jax_not_torch`, `test_rng_key_differs_per_batch`, `test_fallback_clustering_when_no_cell_type`
+  - `docs/task_plan.md` — Marked TODO-1 complete, updated test count to 605
+- Tests: 605 passing (was 602)
+- Notes: CellFlow (Klein et al., bioRxiv 2025) is built on JAX/Flax. The previous code incorrectly imported PyTorch. JAX doesn't track gradients by default (only jax.grad does), so no no_grad context needed. Next: TODO-3 (OOD warning) or TODO-4 (variance inflation).
+
+## Iteration 3 — 2026-03-18T03:08:23Z
+- Task: TODO-26 — Fix CellFlow dose encoding (§1.2 FINAL) + simplify pass
+- Result: pass
+- Commits:
+  - `48212c6` [ralph-3] TODO-26: Fix CellFlow dose encoding to use log1p
+  - `df3ea3a` [ralph-simplify] Add concentration_scale field to CellFlow encoding
+- Files changed:
+  - `gopro/06_cellflow_virtual.py` — Changed `encode_protocol_cellflow()` concentration from raw `conc` to `math.log1p(conc)`, added `concentration_scale` field
   - `gopro/tests/test_phase4_5.py` — 3 new tests: `test_concentration_uses_log1p`, `test_log1p_zero_dose_maps_to_zero`, `test_log1p_preserves_ordering`
   - `docs/task_plan.md` — Marked TODO-26 complete, updated §1.2 status to COMPLETE
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `ralph-pipeline.sh` — pipeline script updates
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
 - Tests: 602 passing (was 599)
-- Notes: All §1.2 critical bugs now resolved (TODO-24, TODO-25, TODO-26). Next: §1.3 CellFlow integration or §1.9 data ingestion.
+- Quality: Simplify pass added `concentration_scale` metadata field to CellFlow encoding for traceability. Docs updated across audit report, architecture, competitive landscape, and README.
+- Notes: All §1.2 critical bugs now resolved (TODO-24, TODO-25, TODO-26). §1.1 and §1.2 both COMPLETE. Next: §1.3 CellFlow integration fixes, §1.4 GP model improvements, or §1.9 data ingestion (high priority).
 
 ## Iteration 2 — 2026-03-18T01:39:37Z
 - Task: TODO-25 — R²-based 3-zone fidelity routing
