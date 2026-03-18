@@ -2990,3 +2990,69 @@ class TestMLLRestarts:
         assert model is not None
         assert tX.shape[0] == 15
         assert set(cols) == {"ct_A", "ct_B"}
+
+
+class TestExplicitPriors:
+    """Tests for explicit GP priors (TODO-30): lengthscale + noise priors."""
+
+    def test_set_noise_prior_attaches_gamma(self):
+        """_set_noise_prior attaches a GammaPrior to the likelihood noise."""
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+
+        train_X = torch.rand(10, 3, dtype=torch.float64)
+        train_Y = torch.rand(10, 1, dtype=torch.float64)
+        model = SingleTaskGP(
+            train_X, train_Y,
+            input_transform=Normalize(d=3),
+            outcome_transform=Standardize(m=1),
+        )
+        step04._set_noise_prior(model)
+        # Verify the prior is registered on the noise_covar
+        noise_covar = model.likelihood.noise_covar
+        prior_names = [name for name, *_ in noise_covar.named_priors()]
+        assert "noise_prior" in prior_names
+
+    def test_set_explicit_priors_attaches_both(self):
+        """_set_explicit_priors sets both lengthscale and noise priors."""
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+
+        train_X = torch.rand(10, 5, dtype=torch.float64)
+        train_Y = torch.rand(10, 1, dtype=torch.float64)
+        model = SingleTaskGP(
+            train_X, train_Y,
+            input_transform=Normalize(d=5),
+            outcome_transform=Standardize(m=1),
+        )
+        step04._set_explicit_priors(model, d=5)
+        # Noise prior
+        noise_covar = model.likelihood.noise_covar
+        noise_prior_names = [name for name, *_ in noise_covar.named_priors()]
+        assert "noise_prior" in noise_prior_names
+        # Lengthscale prior on the kernel that has lengthscale
+        covar = model.covar_module
+        base = getattr(covar, "base_kernel", covar)
+        ls_prior_names = [name for name, *_ in base.named_priors()]
+        assert "lengthscale_prior" in ls_prior_names
+
+    def test_fit_gp_botorch_explicit_priors_flag(self, tmp_path, monkeypatch):
+        """fit_gp_botorch with explicit_priors=True produces a valid model with priors."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        np.random.seed(42)
+
+        X = pd.DataFrame(np.random.rand(15, 3), columns=["a", "b", "c"])
+        Y = pd.DataFrame({
+            "ct_A": 0.4 + 0.2 * np.random.rand(15),
+            "ct_B": 0.6 - 0.2 * np.random.rand(15),
+        })
+
+        model, tX, tY, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, explicit_priors=True,
+        )
+        assert model is not None
+        # Verify noise prior was attached
+        noise_covar = model.likelihood.noise_covar
+        noise_prior_names = [name for name, *_ in noise_covar.named_priors()]
+        assert "noise_prior" in noise_prior_names

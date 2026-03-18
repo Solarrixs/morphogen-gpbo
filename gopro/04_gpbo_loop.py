@@ -316,6 +316,48 @@ def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
                 )
 
 
+def _set_noise_prior(model) -> None:
+    """Set a Gamma(3, 6) prior on the GP likelihood noise variance.
+
+    Gamma(concentration=3, rate=6) has mean=0.5, mode=1/3.  On standardised
+    data this keeps the noise estimate moderate and prevents the optimiser
+    from collapsing noise to near-zero (overfitting) or inflating it
+    excessively (Cosenza 2022).
+
+    Args:
+        model: BoTorch SingleTaskGP (or compatible).
+    """
+    from gpytorch.priors import GammaPrior
+
+    if not hasattr(model, "likelihood") or not hasattr(model.likelihood, "noise_covar"):
+        return
+    try:
+        model.likelihood.noise_covar.register_prior(
+            "noise_prior",
+            GammaPrior(concentration=3.0, rate=6.0),
+            lambda m: m.noise,
+            lambda m, v: m._set_noise(v),
+        )
+        logger.info("Set Gamma(3, 6) noise prior on likelihood")
+    except Exception as exc:
+        logger.warning("Could not set noise prior: %s", exc)
+
+
+def _set_explicit_priors(model, d: int) -> None:
+    """Set both lengthscale and noise priors on a GP model.
+
+    Combines the dimensionality-scaled LogNormal lengthscale prior
+    (Hvarfner et al. ICML 2024) with a Gamma(3, 6) noise prior
+    (Cosenza 2022).
+
+    Args:
+        model: BoTorch SingleTaskGP (or compatible).
+        d: Number of input dimensions.
+    """
+    _set_dim_scaled_lengthscale_prior(model, d)
+    _set_noise_prior(model)
+
+
 def _fit_mll_with_restarts(
     model_factory,
     n_restarts: int = 1,
@@ -1279,6 +1321,7 @@ def fit_gp_botorch(
     save_state: bool = True,
     pseudocount: float | None = None,
     mll_restarts: int = 1,
+    explicit_priors: bool = False,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
 
@@ -1329,6 +1372,12 @@ def fit_gp_botorch(
             log-likelihood. Only applies to MAP paths (standard,
             MixedSingleTaskGP, per-type-GP, multi-fidelity). Ignored
             for SAASBO and LassoBO. (default: 1 = single fit)
+        explicit_priors: If True, set explicit priors on GP hyperparameters:
+            LogNormal lengthscale prior (Hvarfner et al. ICML 2024) +
+            Gamma(3, 6) noise prior (Cosenza 2022). Applies to MAP paths
+            only (standard, MixedSingleTaskGP, per-type-GP, multi-fidelity).
+            Ignored for SAASBO and LassoBO which have their own priors.
+            (default: False)
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -1445,6 +1494,8 @@ def fit_gp_botorch(
                 input_transform=Normalize(d=train_X.shape[1]),
                 outcome_transform=Standardize(m=train_Y.shape[1]),
             )
+            if explicit_priors:
+                _set_explicit_priors(m, train_X.shape[1])
             if warm_start:
                 load_gp_state(m, gp_state_path)
             return m
@@ -1523,6 +1574,8 @@ def fit_gp_botorch(
                 ),
                 outcome_transform=Standardize(m=train_Y.shape[1]),
             )
+            if explicit_priors:
+                _set_explicit_priors(m, train_X.shape[1])
             if warm_start:
                 load_gp_state(m, gp_state_path)
             return m
@@ -1547,7 +1600,10 @@ def fit_gp_botorch(
                     input_transform=Normalize(d=train_X.shape[1]),
                     outcome_transform=Standardize(m=1),
                 )
-                _set_dim_scaled_lengthscale_prior(m, train_X.shape[1])
+                if explicit_priors:
+                    _set_explicit_priors(m, train_X.shape[1])
+                else:
+                    _set_dim_scaled_lengthscale_prior(m, train_X.shape[1])
                 return m
 
             m = _fit_mll_with_restarts(_per_type_factory, n_restarts=mll_restarts)
@@ -1580,7 +1636,9 @@ def fit_gp_botorch(
                 input_transform=Normalize(d=train_X.shape[1]),
                 outcome_transform=Standardize(m=train_Y.shape[1]),
             )
-            if covar is None:
+            if explicit_priors:
+                _set_explicit_priors(m, train_X.shape[1])
+            elif covar is None:
                 _set_dim_scaled_lengthscale_prior(m, train_X.shape[1])
             if warm_start:
                 load_gp_state(m, gp_state_path)
@@ -2819,6 +2877,7 @@ def run_gpbo_loop(
     pseudocount: float | None = None,
     log_scale: bool = False,
     mll_restarts: int = 1,
+    explicit_priors: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -2890,6 +2949,9 @@ def run_gpbo_loop(
             (Kanda 2022, Cosenza 2022). Each restart re-initialises
             hyperparameters and keeps the fit with the highest MLL.
             Only applies to MAP fitting paths. (default: 1)
+        explicit_priors: If True, set explicit priors on GP hyperparameters:
+            LogNormal lengthscale prior + Gamma(3, 6) noise prior
+            (Cosenza 2022). Only applies to MAP fitting paths. (default: False)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -3092,6 +3154,7 @@ def run_gpbo_loop(
             noise_variance=noise_var_df,
             pseudocount=pseudocount,
             mll_restarts=mll_restarts,
+            explicit_priors=explicit_priors,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -3369,6 +3432,11 @@ if __name__ == "__main__":
                              "(Kanda 2022, Cosenza 2022). Each restart re-initialises "
                              "hyperparameters and keeps the best fit. Only applies to "
                              "MAP paths (not SAASBO/LassoBO). (default: 1)")
+    parser.add_argument("--explicit-priors", action="store_true",
+                        help="Set explicit priors on GP hyperparameters: "
+                             "LogNormal lengthscale prior (Hvarfner 2024) + "
+                             "Gamma(3,6) noise prior (Cosenza 2022). "
+                             "Only applies to MAP paths.")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -3546,6 +3614,7 @@ if __name__ == "__main__":
         pseudocount=args.pseudocount,
         log_scale=args.log_scale,
         mll_restarts=args.mll_restarts,
+        explicit_priors=args.explicit_priors,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

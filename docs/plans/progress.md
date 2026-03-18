@@ -1,5 +1,24 @@
 # Progress Log
 
+## Iteration 13 — 2026-03-18
+- Task: TODO-30 — Explicit GP priors (Cosenza 2022)
+- Result: pass
+- Tests: 631 → 634 (+3 new tests)
+- Changes:
+  - `gopro/04_gpbo_loop.py` — Added `_set_noise_prior()` (Gamma(3,6) on likelihood noise), `_set_explicit_priors()` (combines lengthscale + noise priors); added `explicit_priors` param to `fit_gp_botorch` and `run_gpbo_loop`; wired into all MAP factory paths (standard, MF, Mixed, per-type); added `--explicit-priors` CLI flag
+  - `gopro/tests/test_unit.py` — Added `TestExplicitPriors` class with 3 tests (noise prior attachment, combined priors, integration with fit_gp_botorch)
+
+## Iteration 12 — 2026-03-18T06:42:41Z
+- Task: Simplify pass on TODO-29 (MLL restarts hardening)
+- Result: pass
+- Commits:
+  - `46fb2c9` [ralph-simplify] Validate n_restarts >= 1 and log HP randomisation failures
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Added `n_restarts >= 1` validation guard; added logging for HP randomisation failures in `_fit_mll_with_restarts()`
+- Quality: Hardened `_fit_mll_with_restarts()` with input validation and failure logging. No new tests needed (existing tests cover the behavior).
+- Tests: 631 passing (unchanged)
+- Notes: §1.4 GP Model Improvements: TODO-9, TODO-28, TODO-29 all done. Next: TODO-30 (explicit GP priors), TODO-31 (FixedNoiseGP), or TODO-32 (Sobol QMC sampler).
+
 ## Iteration 11 — 2026-03-18
 - Task: TODO-29 — MLL optimization restarts
 - Result: pass

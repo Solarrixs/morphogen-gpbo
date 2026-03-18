@@ -4,7 +4,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 **Last updated:** 2026-03-17
 **Branch:** ralph/production-readiness-phase2
-**Tests:** 631 passing (gopro) + 53 (literature) = 684 total
+**Tests:** 634 passing (gopro) + 53 (literature) = 687 total
 **§1.1 Status:** COMPLETE (15/15) — all competitive landscape ideas implemented
 **§1.2 Status:** COMPLETE (3/3) — all critical MF-GP bugs fixed
 
@@ -54,7 +54,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 - [ ] TODO-27: Input warping (Kumaraswamy CDF) — `--input-warp` CLI flag (Kanda 2022).
 - [x] TODO-28: Selective log-scaling for concentration dimensions — `LOG_SCALE_COLUMNS` in config.py (Kanda 2022).
 - [x] TODO-29: MLL optimization restarts (20 restarts) — `--mll-restarts N` flag (Kanda 2022, Cosenza 2022).
-- [ ] TODO-30: Explicit priors on GP hyperparameters — MVN prior on lengthscales, Gamma on noise (Cosenza 2022).
+- [x] TODO-30: Explicit priors on GP hyperparameters — MVN prior on lengthscales, Gamma on noise (Cosenza 2022).
 - [ ] TODO-31: FixedNoiseGP with per-observation heteroscedastic noise — `train_Yvar.clamp(min=0.02)` (Cosenza 2022).
 - [ ] TODO-32: Sobol QMC sampler (2048 samples) for acquisition — `--mc-samples N` flag (Cosenza 2022).
 
