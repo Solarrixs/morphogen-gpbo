@@ -24,5 +24,6 @@
       "mcp__claude_ai_PubMed__get_article_metadata",
       "WebFetch(domain:aacrjournals.org)"
     ]
-  }
+  },
+  "outputStyle": "default"
 }
