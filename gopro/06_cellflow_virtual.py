@@ -349,7 +349,6 @@ def _predict_with_cellflow(
     """
     import cellflow
     import jax
-    import jax.numpy as jnp
 
     logger.info("Loading CellFlow model from %s...", model_path)
     model = cellflow.CellFlowModel.load(str(model_path))
