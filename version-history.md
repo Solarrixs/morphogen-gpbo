@@ -17,3 +17,4 @@
 | 7 | `18ae6e8` | working | ralph/production-readiness-phase2 | [ralph-simplify] DRY up ilr_transform: return_safe option eliminates duplicate _multiplicative_replacement call |
 | 8 | `da16394` | working | ralph/production-readiness-phase2 | [ralph-simplify] Remove redundant filter and double column-existence check in log-scale |
 | 9 | `46fb2c9` | working | ralph/production-readiness-phase2 | [ralph-simplify] Validate n_restarts >= 1 and log HP randomisation failures |
+| 10 | `b9d6bb7` | working | ralph/production-readiness-phase2 | [ralph-simplify] Thread explicit_priors through fit_tvr_models |
