@@ -279,7 +279,6 @@ def predict_cellflow(
     batch_size: int = 256,
     n_cells_per_condition: int = 500,
     real_fractions_csv: Optional[Path] = None,
-    variance_inflation: float = 1.0,
 ) -> pd.DataFrame:
     """Run CellFlow predictions for a batch of protocols.
 
@@ -296,8 +295,6 @@ def predict_cellflow(
         n_cells_per_condition: Number of virtual cells to generate.
         real_fractions_csv: Path to real training fractions CSV for
             cell type vocabulary alignment (used by heuristic fallback).
-        variance_inflation: Factor to inflate prediction variance
-            (>1 spreads predictions away from mean, 1.0 = no-op).
 
     Returns:
         DataFrame with predicted cell type fractions per protocol.
@@ -331,10 +328,6 @@ def predict_cellflow(
         else:
             logger.info("CellFlow model path does not exist: %s. Falling back to heuristic.", model_path)
         result = _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
-
-    # Apply variance inflation if requested
-    if variance_inflation != 1.0:
-        result = inflate_cellflow_variance(result, factor=variance_inflation)
 
     return result
 
@@ -385,14 +378,18 @@ def inflate_cellflow_variance(
     if factor == 1.0 or len(fractions) == 0:
         return fractions
 
-    fractions = fractions.copy()
     mean_composition = fractions.values.mean(axis=0, keepdims=True)
     inflated = mean_composition + factor * (fractions.values - mean_composition)
 
     # Clamp to non-negative, then re-normalise rows to sum to 1
     inflated = np.maximum(inflated, 0.0)
     row_sums = inflated.sum(axis=1, keepdims=True)
-    row_sums = np.where(row_sums == 0, 1.0, row_sums)
+    # Replace all-zero rows with mean composition (can happen with extreme
+    # factors when all values clamp to zero — avoids downstream ILR NaNs)
+    zero_rows = (row_sums == 0).ravel()
+    if zero_rows.any():
+        inflated[zero_rows] = mean_composition
+        row_sums[zero_rows] = mean_composition.sum()
     inflated = inflated / row_sums
 
     result = pd.DataFrame(inflated, index=fractions.index, columns=fractions.columns)

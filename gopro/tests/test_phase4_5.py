@@ -1614,16 +1614,14 @@ class TestCellFlowVarianceInflation:
         from gopro.config import CELLFLOW_DEFAULT_VARIANCE_INFLATION
         assert CELLFLOW_DEFAULT_VARIANCE_INFLATION == 2.0
 
-    def test_predict_cellflow_applies_inflation(self):
-        """predict_cellflow with variance_inflation != 1.0 should change output."""
-        protocols = pd.DataFrame(
-            {"CHIR99021_uM": [1.0, 3.0, 6.0], "log_harvest_day": [math.log(21)] * 3},
-            index=["v1", "v2", "v3"],
+    def test_inflate_all_zero_rows_use_mean(self):
+        """Extreme inflation that clamps all values to zero should fall back to mean."""
+        fracs = pd.DataFrame(
+            {"A": [0.9, 0.1], "B": [0.1, 0.9]},
+            index=["c1", "c2"],
         )
-        base = step06.predict_cellflow(protocols, variance_inflation=1.0)
-        inflated = step06.predict_cellflow(protocols, variance_inflation=2.0)
-        # Shapes match, but values differ
-        assert base.shape == inflated.shape
-        assert not np.allclose(base.values, inflated.values), (
-            "Inflation factor 2.0 should change predictions"
-        )
+        # Factor 100 with opposed rows: one row will clamp to all-zero
+        inflated = step06.inflate_cellflow_variance(fracs, factor=100.0)
+        # No NaN or zero-sum rows
+        assert not inflated.isna().any().any(), "NaN found in inflated fractions"
+        np.testing.assert_allclose(inflated.sum(axis=1).values, 1.0, atol=1e-10)

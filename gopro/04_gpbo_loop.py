@@ -52,6 +52,17 @@ from gopro.config import (
 
 logger = get_logger(__name__)
 
+
+def _inflate_cellflow_variance(fractions: pd.DataFrame, factor: float) -> pd.DataFrame:
+    """Lazy-import wrapper for inflate_cellflow_variance from step 06."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "step06", str(Path(__file__).parent / "06_cellflow_virtual.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.inflate_cellflow_variance(fractions, factor=factor)
+
+
 # BoTorch requires float64, which MPS doesn't support. Use CPU for GP fitting.
 # MPS can be used for neural network components (CellFlow, scPoli) separately.
 DEVICE = torch.device("cpu")
@@ -2311,17 +2322,9 @@ def merge_multi_fidelity_data(
             ct_cols = [c for c in Y.columns if c != "fidelity"]
             if ct_cols:
                 Y = Y.copy()
-                vals = Y[ct_cols].values
-                mean_comp = vals.mean(axis=0, keepdims=True)
-                inflated = mean_comp + cellflow_variance_inflation * (vals - mean_comp)
-                inflated = np.maximum(inflated, 0.0)
-                row_sums = inflated.sum(axis=1, keepdims=True)
-                row_sums = np.where(row_sums == 0, 1.0, row_sums)
-                Y[ct_cols] = inflated / row_sums
-                logger.info(
-                    "Applied variance inflation (factor=%.1f) to %d CellFlow points",
-                    cellflow_variance_inflation, len(Y),
-                )
+                Y[ct_cols] = _inflate_cellflow_variance(
+                    Y[ct_cols], factor=cellflow_variance_inflation,
+                ).values
 
         all_X.append(X)
         all_Y.append(Y)
