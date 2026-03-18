@@ -4,7 +4,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 **Last updated:** 2026-03-17
 **Branch:** ralph/production-readiness-phase2
-**Tests:** 642 passing (gopro) + 53 (literature) = 695 total
+**Tests:** 647 passing (gopro) + 53 (literature) = 700 total
 **§1.1 Status:** COMPLETE (15/15) — all competitive landscape ideas implemented
 **§1.2 Status:** COMPLETE (3/3) — all critical MF-GP bugs fixed
 
@@ -51,7 +51,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 - [x] TODO-9: Verify pseudocount handling before ILR — `--pseudocount` CLI flag, threaded through all ILR call sites.
 - [ ] TODO-10: Dirichlet-Multinomial alternative — `--dirichlet` flag for comparison.
 - [ ] TODO-11: ILR vs ALR comparison test — verify ILR outperforms ALR for GP fitting.
-- [ ] TODO-27: Input warping (Kumaraswamy CDF) — `--input-warp` CLI flag (Kanda 2022).
+- [x] TODO-27: Input warping (Kumaraswamy CDF) — `--input-warp` CLI flag (Kanda 2022).
 - [x] TODO-28: Selective log-scaling for concentration dimensions — `LOG_SCALE_COLUMNS` in config.py (Kanda 2022).
 - [x] TODO-29: MLL optimization restarts (20 restarts) — `--mll-restarts N` flag (Kanda 2022, Cosenza 2022).
 - [x] TODO-30: Explicit priors on GP hyperparameters — MVN prior on lengthscales, Gamma on noise (Cosenza 2022).

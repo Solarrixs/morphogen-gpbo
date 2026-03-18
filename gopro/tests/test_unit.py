@@ -3208,3 +3208,76 @@ class TestSobolQMCSampler:
         sig = inspect.signature(step04.run_gpbo_loop)
         assert "mc_samples" in sig.parameters
         assert sig.parameters["mc_samples"].default == 512
+
+
+class TestInputWarp:
+    """Tests for Kumaraswamy CDF input warping (TODO-27)."""
+
+    def _make_training_data(self, n=20, d=3, n_outputs=2):
+        """Build simple training DataFrames for GP fitting."""
+        np.random.seed(42)
+        cols = [f"x{i}" for i in range(d)]
+        X = pd.DataFrame(np.random.rand(n, d), columns=cols,
+                         index=[f"c{i}" for i in range(n)])
+        Y = pd.DataFrame(
+            np.random.dirichlet(np.ones(n_outputs), size=n),
+            columns=[f"ct{i}" for i in range(n_outputs)],
+            index=X.index,
+        )
+        return X, Y
+
+    def test_input_warp_applies_chained_transform(self):
+        """fit_gp_botorch with input_warp=True uses ChainedInputTransform."""
+        from botorch.models.transforms.input import ChainedInputTransform
+        X, Y = self._make_training_data()
+        model, train_X, train_Y, cell_type_cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, input_warp=True, save_state=False,
+        )
+        # Model should have a ChainedInputTransform containing Warp + Normalize
+        itf = model.input_transform
+        assert isinstance(itf, ChainedInputTransform), (
+            f"Expected ChainedInputTransform, got {type(itf).__name__}"
+        )
+        assert "warp" in itf, "ChainedInputTransform should contain 'warp' key"
+        assert "normalize" in itf, "ChainedInputTransform should contain 'normalize' key"
+
+    def test_input_warp_false_uses_normalize_only(self):
+        """fit_gp_botorch with input_warp=False uses plain Normalize."""
+        from botorch.models.transforms import Normalize
+        X, Y = self._make_training_data()
+        model, _, _, _ = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, input_warp=False, save_state=False,
+        )
+        itf = model.input_transform
+        assert isinstance(itf, Normalize), (
+            f"Expected Normalize, got {type(itf).__name__}"
+        )
+
+    def test_build_input_transform_helper(self):
+        """_build_input_transform returns correct types for warp/no-warp."""
+        from botorch.models.transforms import Normalize
+        from botorch.models.transforms.input import ChainedInputTransform
+
+        # No warp
+        tf_plain = step04._build_input_transform(d=5, warp=False)
+        assert isinstance(tf_plain, Normalize)
+
+        # With warp
+        tf_warp = step04._build_input_transform(d=5, warp=True)
+        assert isinstance(tf_warp, ChainedInputTransform)
+        assert "warp" in tf_warp
+        assert "normalize" in tf_warp
+
+    def test_run_gpbo_loop_input_warp_parameter(self):
+        """run_gpbo_loop accepts input_warp parameter with correct default."""
+        import inspect
+        sig = inspect.signature(step04.run_gpbo_loop)
+        assert "input_warp" in sig.parameters
+        assert sig.parameters["input_warp"].default is False
+
+    def test_fit_gp_botorch_input_warp_parameter(self):
+        """fit_gp_botorch accepts input_warp parameter with correct default."""
+        import inspect
+        sig = inspect.signature(step04.fit_gp_botorch)
+        assert "input_warp" in sig.parameters
+        assert sig.parameters["input_warp"].default is False

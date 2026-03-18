@@ -1306,6 +1306,44 @@ class _TVRPosterior:
         return self._mean.shape[-1:]
 
 
+def _build_input_transform(d: int, warp: bool, cat_dims: Optional[list[int]] = None):
+    """Build input transform, optionally chaining Kumaraswamy warping with Normalize.
+
+    Args:
+        d: Number of input dimensions.
+        warp: If True, apply Kumaraswamy CDF warping to continuous dimensions.
+        cat_dims: Indices of categorical dimensions (excluded from warping
+            and normalization).
+
+    Returns:
+        A BoTorch input transform (Normalize, Warp, or ChainedInputTransform).
+    """
+    from botorch.models.transforms import Normalize
+    from botorch.models.transforms.input import ChainedInputTransform, Warp
+
+    # Determine which indices are continuous (exclude categorical)
+    cat_set = set(cat_dims or [])
+    cont_indices = [i for i in range(d) if i not in cat_set]
+
+    if not warp:
+        if cat_dims:
+            return Normalize(d=d, indices=cont_indices)
+        return Normalize(d=d)
+
+    if not cont_indices:
+        logger.warning("Input warping requested but no continuous dims; skipping warp")
+        return Normalize(d=d)
+
+    logger.info(
+        "Applying Kumaraswamy input warping to %d continuous dimensions", len(cont_indices)
+    )
+    normalize_kwargs = {"d": d, "indices": cont_indices} if cat_dims else {"d": d}
+    return ChainedInputTransform(
+        warp=Warp(d=d, indices=cont_indices),
+        normalize=Normalize(**normalize_kwargs),
+    )
+
+
 def fit_gp_botorch(
     X: pd.DataFrame,
     Y: pd.DataFrame,
@@ -1328,6 +1366,7 @@ def fit_gp_botorch(
     pseudocount: float | None = None,
     mll_restarts: int = 1,
     explicit_priors: bool = False,
+    input_warp: bool = False,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
 
@@ -1384,6 +1423,12 @@ def fit_gp_botorch(
             only (standard, MixedSingleTaskGP, per-type-GP, multi-fidelity).
             Ignored for SAASBO and LassoBO which have their own priors.
             (default: False)
+        input_warp: If True, apply Kumaraswamy CDF input warping to all
+            continuous input dimensions (Kanda 2022). Learns non-linear
+            monotonic transforms per dimension, automatically handling
+            skewed concentration distributions. Chained with Normalize.
+            Only applies to MAP paths (standard, per-type-GP). Ignored
+            for SAASBO, LassoBO, and multi-fidelity. (default: False)
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
@@ -1484,6 +1529,8 @@ def fit_gp_botorch(
             logger.info("LassoBO ignored — multi-fidelity takes priority")
         if per_type_gp:
             logger.info("per_type_gp ignored — multi-fidelity takes priority")
+        if input_warp:
+            logger.info("input_warp ignored — multi-fidelity takes priority")
         # Remap fidelity values to open interval (0, 1) to prevent boundary
         # collapse in LinearTruncatedFidelityKernel (TODO-24).
         train_X = train_X.clone()
@@ -1513,6 +1560,8 @@ def fit_gp_botorch(
                 "SAASBO does not support categorical dims; ignoring cat_dims=%s",
                 cat_dims,
             )
+        if input_warp:
+            logger.info("input_warp ignored — SAASBO has its own input handling")
         from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
         from botorch.fit import fit_fully_bayesian_model_nuts
 
@@ -1557,6 +1606,8 @@ def fit_gp_botorch(
                 "LassoBO does not support categorical dims; ignoring cat_dims=%s",
                 cat_dims,
             )
+        if input_warp:
+            logger.info("input_warp ignored — LassoBO has its own input handling")
         logger.info("Using LassoBO (L1-regularized MAP, alpha=%.3f)", lassobo_alpha)
         model = _fit_lassobo(
             train_X, train_Y,
@@ -1603,7 +1654,7 @@ def fit_gp_botorch(
                     train_X,
                     train_Y[:, idx:idx+1],
                     train_Yvar=yv,
-                    input_transform=Normalize(d=train_X.shape[1]),
+                    input_transform=_build_input_transform(train_X.shape[1], warp=input_warp),
                     outcome_transform=Standardize(m=1),
                 )
                 if explicit_priors:
@@ -1639,7 +1690,7 @@ def fit_gp_botorch(
                 train_Y,
                 train_Yvar=train_Yvar,
                 covar_module=covar,
-                input_transform=Normalize(d=train_X.shape[1]),
+                input_transform=_build_input_transform(train_X.shape[1], warp=input_warp),
                 outcome_transform=Standardize(m=train_Y.shape[1]),
             )
             if explicit_priors:
@@ -2903,6 +2954,7 @@ def run_gpbo_loop(
     mll_restarts: int = 1,
     explicit_priors: bool = False,
     mc_samples: int = 512,
+    input_warp: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -2987,6 +3039,9 @@ def run_gpbo_loop(
         mc_samples: Number of Sobol QMC samples for acquisition function
             evaluation (Cosenza 2022). Higher values reduce variance in
             acquisition estimates. Clamped to [1, 2048]. (default: 512)
+        input_warp: If True, apply Kumaraswamy CDF input warping to
+            continuous dimensions (Kanda 2022). Learns non-linear monotonic
+            transforms per dimension. Only applies to MAP paths. (default: False)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -3215,6 +3270,7 @@ def run_gpbo_loop(
             pseudocount=pseudocount,
             mll_restarts=mll_restarts,
             explicit_priors=explicit_priors,
+            input_warp=input_warp,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -3508,6 +3564,11 @@ if __name__ == "__main__":
                         help="Number of Sobol QMC samples for acquisition "
                              "function evaluation (Cosenza 2022). Higher values "
                              "reduce variance. Clamped to [1, 2048]. (default: 512)")
+    parser.add_argument("--input-warp", action="store_true",
+                        help="Apply Kumaraswamy CDF input warping to continuous "
+                             "dimensions (Kanda 2022). Learns non-linear monotonic "
+                             "transforms per dimension, handling skewed concentration "
+                             "distributions. Only applies to MAP paths.")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -3688,6 +3749,7 @@ if __name__ == "__main__":
         mll_restarts=args.mll_restarts,
         explicit_priors=args.explicit_priors,
         mc_samples=args.mc_samples,
+        input_warp=args.input_warp,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
