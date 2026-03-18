@@ -947,6 +947,7 @@ def assemble_html_report(
 def generate_report(
     data_dir: Path,
     output_path: Path | None = None,
+    output_prefix: str = "amin_kelley",
 ) -> Path:
     """Generate the full GP-BO visualization report.
 
@@ -955,6 +956,7 @@ def generate_report(
     Args:
         data_dir: Directory containing pipeline outputs.
         output_path: Override for output HTML path. Default: data_dir/report_round{N}.html.
+        output_prefix: Dataset prefix for CSV filenames (default: "amin_kelley").
 
     Returns:
         Path to the generated HTML report.
@@ -974,15 +976,15 @@ def generate_report(
     # Load data
     logger.info("Loading pipeline data files")
     fidelity_df = load_fidelity_report(data_dir / "fidelity_report.csv")
-    morphogen_df = load_morphogen_matrix(data_dir / "morphogen_matrix_amin_kelley.csv")
+    morphogen_df = load_morphogen_matrix(data_dir / f"morphogen_matrix_{output_prefix}.csv")
     recs = load_recommendations(data_dir / f"gp_recommendations_round{current_round}.csv")
     diagnostics = load_diagnostics(data_dir / f"gp_diagnostics_round{current_round}.csv")
 
     # Load cell type fractions
-    labels_path = data_dir / "gp_training_labels_amin_kelley.csv"
+    labels_path = data_dir / f"gp_training_labels_{output_prefix}.csv"
     labels_df = load_cell_type_fractions(labels_path) if labels_path.exists() else None
 
-    regions_path = data_dir / "gp_training_regions_amin_kelley.csv"
+    regions_path = data_dir / f"gp_training_regions_{output_prefix}.csv"
     regions_df = load_cell_type_fractions(regions_path) if regions_path.exists() else None
 
     # Sections: dict of name -> (description, content)

@@ -1113,6 +1113,7 @@ def fit_gp_botorch(
     cat_dims: Optional[list[int]] = None,
     per_type_gp: bool = False,
     noise_variance: Optional[pd.DataFrame] = None,
+    save_state: bool = True,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
 
@@ -1414,8 +1415,9 @@ def fit_gp_botorch(
         fit_gpytorch_mll(mll)
 
     # Save GP state for warm-starting future rounds
-    save_path = GP_STATE_DIR / f"round_{round_num}.pt"
-    save_gp_state(model, save_path)
+    if save_state:
+        save_path = GP_STATE_DIR / f"round_{round_num}.pt"
+        save_gp_state(model, save_path)
 
     # Report kernel parameters
     logger.info("GP Kernel Parameters:")
@@ -2137,6 +2139,7 @@ def compute_ensemble_disagreement(
                     cat_dims=cat_dims,
                     per_type_gp=per_type_gp,
                     round_num=1,
+                    save_state=False,
                 )
                 _collect_from_model(model_i)
             except (RuntimeError, ValueError) as e:
@@ -2835,6 +2838,14 @@ def run_gpbo_loop(
 
     # Reserve wells for replicates if requested
     n_novel = max(1, n_recommendations - n_replicates)
+    if n_duplicates >= n_novel:
+        raise ValueError(
+            f"Not enough wells for novel candidates: n_recommendations={n_recommendations}, "
+            f"n_replicates={n_replicates}, n_duplicates={n_duplicates}. "
+            f"After reserving replicates, only {n_novel} wells remain but "
+            f"{n_duplicates} are needed for QC duplicates. "
+            f"Increase --n-recommendations or decrease --n-replicates/--n-duplicates."
+        )
     recommendations = recommend_next_experiments(
         model, train_X, train_Y,
         bounds=rec_bounds,

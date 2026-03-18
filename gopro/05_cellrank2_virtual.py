@@ -300,7 +300,7 @@ def _embed_query_in_atlas_pca(
         sc.pp.normalize_total(query_subset, target_sum=1e4)
         sc.pp.log1p(query_subset)
 
-        gene_idx = [list(hvg_genes).index(g) for g in shared_genes]
+        gene_idx = [list(atlas_adata.var_names).index(g) for g in shared_genes]
         query_expr = (
             query_subset.X.toarray()
             if hasattr(query_subset.X, "toarray")

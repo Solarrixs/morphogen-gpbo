@@ -434,7 +434,13 @@ def compute_soft_cell_type_fractions(
 
     # Re-normalize rows to sum to 1 (should be close already)
     row_sums = fractions.sum(axis=1)
-    fractions = fractions.div(row_sums, axis=0)
+    zero_mask = row_sums == 0
+    if zero_mask.any():
+        logger.warning(
+            "Zero-sum conditions detected (%d): %s. Setting to uniform.",
+            zero_mask.sum(), list(fractions.index[zero_mask]),
+        )
+    fractions = fractions.div(row_sums.replace(0, 1), axis=0)
 
     logger.info("Result: %d conditions x %d cell types", fractions.shape[0], fractions.shape[1])
     return fractions
