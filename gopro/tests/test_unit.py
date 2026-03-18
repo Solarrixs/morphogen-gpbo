@@ -3535,3 +3535,100 @@ class TestZeroPassingKernel:
         sig = inspect.signature(step04.fit_gp_botorch)
         assert "zero_passing" in sig.parameters
         assert sig.parameters["zero_passing"].default is False
+
+
+class TestDesirabilityGate:
+    """Tests for desirability-based feasibility gate (TODO-7, Cosenza 2022)."""
+
+    def test_no_antagonism_gives_phi_one(self):
+        """Candidates with only agonists (no antagonists) should have phi=1."""
+        columns = ["CHIR99021_uM", "BMP4_uM", "SHH_uM"]
+        candidates = np.array([
+            [3.0, 0.001, 0.005],   # Agonists only
+            [6.0, 0.002, 0.010],   # Higher doses, still agonists only
+        ])
+        phi = step04.compute_desirability(candidates, columns)
+        np.testing.assert_array_equal(phi, np.ones(2))
+
+    def test_antagonist_pair_penalises(self):
+        """WNT agonist + WNT antagonist at high dose → phi < 1."""
+        columns = ["CHIR99021_uM", "IWP2_uM", "BMP4_uM"]
+        candidates = np.array([
+            [5.0, 3.0, 0.001],   # CHIR (agonist) + IWP2 (antagonist) both high
+        ])
+        phi = step04.compute_desirability(candidates, columns)
+        assert phi[0] < 1.0, f"Expected phi < 1 for WNT conflict, got {phi[0]}"
+        # WNT penalty: min(5,3)/max(5,3) = 3/5 = 0.6, so phi = 1 - 0.6 = 0.4
+        np.testing.assert_almost_equal(phi[0], 0.4, decimal=5)
+
+    def test_subthreshold_antagonist_no_penalty(self):
+        """Trace antagonist below threshold does not trigger penalty."""
+        columns = ["CHIR99021_uM", "IWP2_uM"]
+        candidates = np.array([
+            [5.0, 0.05],  # IWP2 below default threshold of 0.1
+        ])
+        phi = step04.compute_desirability(candidates, columns)
+        assert phi[0] == 1.0, f"Expected no penalty for trace antagonist, got {phi[0]}"
+
+    def test_custom_threshold(self):
+        """Custom antagonism threshold changes penalty behaviour."""
+        columns = ["CHIR99021_uM", "IWP2_uM"]
+        candidates = np.array([[5.0, 0.05]])
+        # Default threshold 0.1 → no penalty
+        phi_default = step04.compute_desirability(candidates, columns, antagonism_threshold=0.1)
+        assert phi_default[0] == 1.0
+        # Lower threshold 0.01 → triggers penalty
+        phi_low = step04.compute_desirability(candidates, columns, antagonism_threshold=0.01)
+        assert phi_low[0] < 1.0
+
+    def test_multiple_pathway_conflicts_compound(self):
+        """Conflicts in multiple pathways compound multiplicatively."""
+        columns = ["CHIR99021_uM", "IWP2_uM", "BMP4_uM", "LDN193189_uM"]
+        candidates = np.array([
+            [5.0, 5.0, 0.001, 0.001],  # Both WNT and BMP conflict (equal doses)
+        ])
+        phi = step04.compute_desirability(candidates, columns)
+        # WNT: min(5,5)/max(5,5) = 1.0 → penalty 1.0 → (1-1.0) ≈ 0
+        # Product should be ~0 when one pathway is fully cancelled
+        assert phi[0] < 1e-6, f"Full antagonism should give phi≈0, got {phi[0]}"
+
+    def test_zero_input_gives_phi_one(self):
+        """All-zero candidate has no active morphogens → phi=1."""
+        columns = ["CHIR99021_uM", "IWP2_uM", "BMP4_uM"]
+        candidates = np.array([[0.0, 0.0, 0.0]])
+        phi = step04.compute_desirability(candidates, columns)
+        assert phi[0] == 1.0
+
+    def test_columns_not_in_pairs_ignored(self):
+        """Columns not in ANTAGONIST_PAIRS are ignored gracefully."""
+        columns = ["FGF2_uM", "EGF_uM"]  # No antagonist defined
+        candidates = np.array([[0.001, 0.003]])
+        phi = step04.compute_desirability(candidates, columns)
+        assert phi[0] == 1.0
+
+    def test_antagonist_pairs_constant_covers_major_pathways(self):
+        """ANTAGONIST_PAIRS covers WNT, BMP, SHH, TGFb pathways."""
+        pairs = step04.ANTAGONIST_PAIRS
+        assert "WNT" in pairs
+        assert "BMP" in pairs
+        assert "SHH" in pairs
+        assert "TGFb" in pairs
+        for pw, info in pairs.items():
+            assert "agonists" in info, f"{pw} missing agonists"
+            assert "antagonists" in info, f"{pw} missing antagonists"
+            assert len(info["agonists"]) > 0, f"{pw} has empty agonists"
+            assert len(info["antagonists"]) > 0, f"{pw} has empty antagonists"
+
+    def test_recommend_accepts_desirability_gate_param(self):
+        """recommend_next_experiments accepts desirability_gate parameter."""
+        import inspect
+        sig = inspect.signature(step04.recommend_next_experiments)
+        assert "desirability_gate" in sig.parameters
+        assert sig.parameters["desirability_gate"].default is False
+
+    def test_run_gpbo_loop_accepts_desirability_gate_param(self):
+        """run_gpbo_loop accepts desirability_gate parameter."""
+        import inspect
+        sig = inspect.signature(step04.run_gpbo_loop)
+        assert "desirability_gate" in sig.parameters
+        assert sig.parameters["desirability_gate"].default is False

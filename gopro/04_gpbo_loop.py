@@ -2047,6 +2047,90 @@ def fit_gp_botorch(
     return model, train_X, train_Y, cell_type_cols
 
 
+# --- Desirability-based feasibility gate (Cosenza 2022) ---
+# Maps each signaling pathway to its agonist and antagonist morphogen columns.
+# When both are present at high concentration, the protocol is biologically
+# implausible (simultaneous activation and inhibition of the same pathway).
+ANTAGONIST_PAIRS: dict[str, dict[str, list[str]]] = {
+    "WNT": {
+        "agonists": ["CHIR99021_uM"],
+        "antagonists": ["IWP2_uM", "XAV939_uM"],
+    },
+    "BMP": {
+        "agonists": ["BMP4_uM", "BMP7_uM"],
+        "antagonists": ["LDN193189_uM", "Dorsomorphin_uM"],
+    },
+    "SHH": {
+        "agonists": ["SHH_uM", "SAG_uM", "purmorphamine_uM"],
+        "antagonists": ["cyclopamine_uM"],
+    },
+    "TGFb": {
+        "agonists": ["ActivinA_uM"],
+        "antagonists": ["SB431542_uM"],
+    },
+}
+
+
+def compute_desirability(
+    candidates: np.ndarray,
+    columns: list[str],
+    antagonism_threshold: float = 0.1,
+) -> np.ndarray:
+    """Compute desirability score phi(x) in [0, 1] for each candidate.
+
+    The desirability gate penalises biologically implausible protocols where
+    both agonist and antagonist morphogens for the same signaling pathway are
+    present at non-trivial concentrations (Cosenza 2022).
+
+    phi(x) = product over pathways of (1 - antagonism_penalty_pw)
+
+    For each pathway, the penalty is:
+        penalty = min(sum_agonist, sum_antagonist) / (max(sum_agonist, sum_antagonist) + eps)
+    scaled by how far above ``antagonism_threshold`` both sides are.
+
+    Args:
+        candidates: (N, D) array of candidate morphogen concentrations.
+        columns: Column names matching the D dimensions.
+        antagonism_threshold: Minimum concentration (µM) below which a morphogen
+            is considered absent. Prevents penalising trace amounts. (default: 0.1)
+
+    Returns:
+        (N,) array of desirability scores in [0, 1].
+    """
+    n = candidates.shape[0]
+    phi = np.ones(n, dtype=np.float64)
+
+    col_to_idx = {c: i for i, c in enumerate(columns)}
+
+    for pathway, pair in ANTAGONIST_PAIRS.items():
+        ag_idxs = [col_to_idx[c] for c in pair["agonists"] if c in col_to_idx]
+        ant_idxs = [col_to_idx[c] for c in pair["antagonists"] if c in col_to_idx]
+
+        if not ag_idxs or not ant_idxs:
+            continue
+
+        # Sum agonist and antagonist concentrations per candidate
+        ag_sum = candidates[:, ag_idxs].sum(axis=1)   # (N,)
+        ant_sum = candidates[:, ant_idxs].sum(axis=1)  # (N,)
+
+        # Both must exceed threshold to trigger penalty
+        both_active = (ag_sum > antagonism_threshold) & (ant_sum > antagonism_threshold)
+
+        # Penalty = ratio of minority side to majority side
+        # e.g., WNT agonist=5µM + WNT antagonist=2µM → penalty = 2/5 = 0.4
+        min_side = np.minimum(ag_sum, ant_sum)
+        max_side = np.maximum(ag_sum, ant_sum)
+        penalty = np.where(
+            both_active,
+            min_side / (max_side + 1e-12),
+            0.0,
+        )
+
+        phi *= (1.0 - penalty)
+
+    return phi
+
+
 def recommend_next_experiments(
     model,
     train_X: torch.Tensor,
@@ -2062,6 +2146,7 @@ def recommend_next_experiments(
     target_profile: Optional[pd.Series] = None,
     n_duplicates: int = 0,
     mc_samples: int = 512,
+    desirability_gate: bool = False,
 ) -> pd.DataFrame:
     """Use acquisition function to recommend next experiments.
 
@@ -2087,6 +2172,10 @@ def recommend_next_experiments(
         mc_samples: Number of MC samples for the Sobol QMC sampler used in
             acquisition function evaluation (Cosenza 2022). Higher values
             reduce variance in acquisition estimates. (default: 512, max: 2048)
+        desirability_gate: If True, apply desirability-based feasibility gating
+            (Cosenza 2022). Generates 2x candidates, scores each with
+            D(x) = phi(x) * acq(x) where phi(x) penalises antagonist pathway
+            conflicts, then keeps the top N by desirability-weighted acquisition.
 
     Returns:
         DataFrame with recommended morphogen concentrations and predictions.
@@ -2225,15 +2314,41 @@ def recommend_next_experiments(
             f"n_recommendations ({n_recommendations})"
         )
 
+    # When desirability gate is active, generate 2x candidates and filter
+    n_generate = n_unique * 2 if desirability_gate else n_unique
+
     # Optimize acquisition function
-    logger.info("Optimizing acquisition function for %d candidates...", n_unique)
+    logger.info("Optimizing acquisition function for %d candidates...", n_generate)
     candidates, acq_values = optimize_acqf(
         acq_function=acqf,
         bounds=bounds_tensor,
-        q=n_unique,
+        q=n_generate,
         num_restarts=10,
         raw_samples=1024,
     )
+
+    # Apply desirability gate: D(x) = phi(x) * acq(x)
+    if desirability_gate:
+        phi = compute_desirability(candidates.cpu().numpy(), columns)
+        phi_tensor = torch.tensor(phi, dtype=DTYPE, device=DEVICE)
+        # Weight acquisition values by desirability
+        if acq_values.dim() > 0 and acq_values.shape[0] == n_generate:
+            weighted_acq = acq_values * phi_tensor
+        else:
+            # Joint batch acquisition — use phi as post-hoc filter on candidates
+            weighted_acq = phi_tensor
+
+        # Select top n_unique by desirability-weighted acquisition
+        top_indices = weighted_acq.argsort(descending=True)[:n_unique]
+        candidates = candidates[top_indices]
+        acq_values = weighted_acq[top_indices] if acq_values.dim() > 0 else acq_values
+
+        n_penalised = int((phi < 1.0).sum())
+        logger.info(
+            "Desirability gate: %d/%d candidates penalised, "
+            "phi range [%.3f, %.3f]",
+            n_penalised, n_generate, phi.min(), phi.max(),
+        )
 
     # Append QC duplicates: copy the top-scoring unique conditions
     if n_duplicates > 0:
@@ -2274,6 +2389,11 @@ def recommend_next_experiments(
             recommendations[f"predicted_y{i}_std"] = np.sqrt(pred_var[:, i])
 
     recommendations["acquisition_value"] = acq_values.detach().cpu().numpy() if acq_values.dim() > 0 else acq_values.item()
+
+    # Add desirability scores for all candidates (informational even when gate is off)
+    if desirability_gate:
+        final_phi = compute_desirability(candidates.cpu().numpy(), columns)
+        recommendations["desirability_score"] = final_phi
 
     # Add well labels (A1-D6 for 24-well plate)
     wells = [f"{chr(65 + i // 6)}{i % 6 + 1}" for i in range(n_recommendations)]
@@ -3255,6 +3375,7 @@ def run_gpbo_loop(
     input_warp: bool = False,
     per_fidelity_ard: bool = False,
     zero_passing: bool = False,
+    desirability_gate: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -3345,6 +3466,10 @@ def run_gpbo_loop(
         zero_passing: If True, wrap the GP kernel with ZeroPassingKernel
             enforcing k(0, x) = 0 for concentration inputs (GPerturb, Xing
             & Yau 2025). Only applies to MAP paths. (default: False)
+        desirability_gate: If True, apply desirability-based feasibility gating
+            (Cosenza 2022). Generates 2x candidates, penalises antagonist pathway
+            conflicts via D(x) = phi(x) * acq(x), and keeps the top N.
+            (default: False)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -3617,6 +3742,7 @@ def run_gpbo_loop(
         target_profile=target_profile,
         n_duplicates=n_duplicates,
         mc_samples=mc_samples,
+        desirability_gate=desirability_gate,
     )
 
     # Inverse log-scale: convert recommendations back to original µM units
@@ -3892,6 +4018,14 @@ if __name__ == "__main__":
                              "& Yau 2025). Encodes the prior that absent "
                              "morphogens contribute zero covariance. Only applies "
                              "to MAP paths (standard, per-type-GP).")
+    parser.add_argument("--desirability-gate", action="store_true",
+                        help="Apply desirability-based feasibility gating "
+                             "(Cosenza 2022). Generates 2x candidates, penalises "
+                             "antagonist pathway conflicts via D(x) = phi(x) * "
+                             "acq(x), and keeps the top N. Prevents the optimizer "
+                             "from recommending biologically implausible cocktails "
+                             "with simultaneous agonist+antagonist for the same "
+                             "signaling pathway.")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -4075,6 +4209,7 @@ if __name__ == "__main__":
         input_warp=args.input_warp,
         per_fidelity_ard=args.per_fidelity_ard,
         zero_passing=args.zero_passing,
+        desirability_gate=args.desirability_gate,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

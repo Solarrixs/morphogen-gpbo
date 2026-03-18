@@ -1,10 +1,10 @@
-# Handoff to Iteration 22
+# Handoff to Iteration 23
 
-## Last Completed: TODO-6 — Zero-passing kernel (`--zero-passing`)
-Implemented `ZeroPassingKernel` wrapping any GPyTorch kernel with a smooth mask `phi(x) = 1 - exp(-||x_conc||^2 / eps)` that forces `k(0,x) = 0` for concentration inputs (GPerturb, Xing & Yau 2025). Kernel inherits from `gpytorch.kernels.Kernel` via lazy factory to defer imports. Applied in standard and per-type-GP MAP paths. 8 new tests, 662 total passing.
+## Last Completed: TODO-7 — Desirability-based feasibility gate (`--desirability-gate`)
+Implemented `compute_desirability()` function and `ANTAGONIST_PAIRS` constant in `04_gpbo_loop.py`. The gate penalises biologically implausible protocols where both agonist and antagonist morphogens for the same signaling pathway are present at non-trivial concentrations (Cosenza 2022). D(x) = phi(x) * acq(x) where phi(x) is a product of per-pathway penalties. Generates 2x candidates when active, scores and keeps top N. Added `--desirability-gate` CLI flag threaded through `run_gpbo_loop()` → `recommend_next_experiments()`. 10 new tests, 672 total passing.
 
-## Next Up: TODO-7 — Desirability-based feasibility gate
-- `D(x) = phi(x) * y_bar(x)` gates infeasible regions (Cosenza 2022)
+## Next Up: TODO-8 — Spike-and-slab output sparsity
+- scCODA-style continuous relaxation
 - File: `04_gpbo_loop.py`
 
 Alternative: TODO-11 (ILR vs ALR), TODO-12 (contextual parameters), TODO-36 (carry-forward controls)
@@ -22,13 +22,15 @@ Alternative: TODO-11 (ILR vs ALR), TODO-12 (contextual parameters), TODO-36 (car
 - Variance inflation lives in `06_cellflow_virtual.py` only — `04_gpbo_loop.py` calls it, does NOT duplicate
 - CellFlow uses JAX (`jax.random`), NOT torch
 - `mc_samples` is clamped to [1, 2048] inside `recommend_next_experiments()`
+- `desirability_gate` generates 2x candidates then filters — only modifies recommendation selection, not GP fitting
+- `ANTAGONIST_PAIRS` covers WNT, BMP, SHH, TGFb — add Notch if DAPT antagonist conflicts become relevant
 
 ## Key Context
 - Branch: `ralph/production-readiness-phase2`
 - Task plan: `docs/task_plan.md` (~100+ tasks across 5 sections)
-- Tests: `python -m pytest gopro/tests/ -v` (662 passing)
-- §1.1 COMPLETE, §1.2 COMPLETE, §1.3 COMPLETE, §1.4 in progress (9/13 done)
+- Tests: `python -m pytest gopro/tests/ -v` (672 passing)
+- §1.1 COMPLETE, §1.2 COMPLETE, §1.3 COMPLETE, §1.4 in progress (10/13 done)
 - Config: `gopro/config.py` — all constants
 - Conventions: import from `gopro.config`, use `get_logger(__name__)`, `.copy()` before mutating DFs
 
-## Remaining: ~83 tasks todo, 0 blocked, ~47 complete
+## Remaining: ~82 tasks todo, 0 blocked, ~48 complete
