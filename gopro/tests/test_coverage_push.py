@@ -545,8 +545,8 @@ class TestResolveTargetLabelsExtended:
         labels, fracs, col = step05._resolve_target_labels(obs, "nonexistent")
         assert col == "cell_type"
         # Should be harmonized
-        assert "Cortical EN" in labels.values
-        assert "Cortical RG" in labels.values
+        assert "Non-telencephalic Neuron" in labels.values
+        assert "Non-telencephalic NPC" in labels.values
 
     def test_standard_column_no_harmonization(self):
         """When preferred column exists, no harmonization should occur."""

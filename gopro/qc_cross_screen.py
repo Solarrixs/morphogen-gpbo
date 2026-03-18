@@ -16,8 +16,8 @@ from gopro.config import get_logger
 logger = get_logger(__name__)
 
 
-def _aitchison_similarity_vec(a: np.ndarray, b: np.ndarray) -> float:
-    """Aitchison similarity between two composition vectors in [0, 1]."""
+def _aitchison_distance_vec(a: np.ndarray, b: np.ndarray) -> float:
+    """Aitchison distance between two composition vectors."""
     eps = 1e-6
     a_safe = np.maximum(a.ravel(), eps)
     b_safe = np.maximum(b.ravel(), eps)
@@ -25,8 +25,11 @@ def _aitchison_similarity_vec(a: np.ndarray, b: np.ndarray) -> float:
     b_safe = b_safe / b_safe.sum()
     clr_a = np.log(a_safe) - np.mean(np.log(a_safe))
     clr_b = np.log(b_safe) - np.mean(np.log(b_safe))
-    dist = float(np.linalg.norm(clr_a - clr_b))
-    return float(np.exp(-dist / 2.0))
+    return float(np.linalg.norm(clr_a - clr_b))
+
+
+# Fallback scale when fewer than 2 pairwise distances are available.
+_AITCHISON_FALLBACK_SCALE = 2.0
 
 
 def compute_cross_screen_similarity(
@@ -55,7 +58,8 @@ def compute_cross_screen_similarity(
         if col not in fracs_b.columns:
             fracs_b[col] = 0.0
 
-    results = {}
+    # First pass: compute all pairwise Aitchison distances.
+    dist_records: list[tuple[str, str, float]] = []
     for cond_a, cond_b in condition_mapping.items():
         if cond_a not in fracs_a.index or cond_b not in fracs_b.index:
             logger.warning("Condition not found: %s or %s", cond_a, cond_b)
@@ -63,8 +67,20 @@ def compute_cross_screen_similarity(
 
         vec_a = fracs_a.loc[cond_a, all_cols].values
         vec_b = fracs_b.loc[cond_b, all_cols].values
+        dist_records.append((cond_a, cond_b, _aitchison_distance_vec(vec_a, vec_b)))
 
-        sim = _aitchison_similarity_vec(vec_a, vec_b)
+    # Median heuristic for kernel bandwidth (Garreau et al., 2017).
+    if len(dist_records) >= 2:
+        scale = float(np.median([d for _, _, d in dist_records]))
+        if scale < 1e-8:
+            scale = _AITCHISON_FALLBACK_SCALE
+    else:
+        scale = _AITCHISON_FALLBACK_SCALE
+
+    # Second pass: convert distances to similarities.
+    results = {}
+    for cond_a, cond_b, dist in dist_records:
+        sim = float(np.exp(-dist / scale))
         results[cond_a] = {
             "similarity": sim,
             "screen_b_condition": cond_b,

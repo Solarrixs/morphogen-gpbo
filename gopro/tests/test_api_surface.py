@@ -9,7 +9,7 @@ class TestDirectImports:
     def test_import_morphogen_columns(self):
         from gopro import MORPHOGEN_COLUMNS
         assert isinstance(MORPHOGEN_COLUMNS, list)
-        assert len(MORPHOGEN_COLUMNS) == 24
+        assert len(MORPHOGEN_COLUMNS) == 25
 
     def test_import_config_functions(self):
         from gopro import get_logger, ng_mL_to_uM, nM_to_uM

@@ -1,13 +1,15 @@
 """
 Step 6: CellFlow Virtual Protocol Screening.
 
-Uses CellFlow (Klein et al., bioRxiv 2025) — a flow-matching generative model
-trained on 176 conditions from Sanchis-Calleja + Azbukina — to predict
-single-cell distributions from novel protocol encodings.
+Uses CellFlow (Klein et al. 2025, bioRxiv, DOI:10.1101/2025.04.11.648220)
+— a flow-matching generative model trained on 176 conditions from
+Sanchis-Calleja + Azbukina — to predict single-cell distributions from
+novel protocol encodings.
 
 CellFlow encodes protocols using:
   1. Molecular fingerprints (small molecules via RDKit)
-  2. ESM2 protein embeddings (growth factors)
+  2. ESM2 protein embeddings (Lin et al. 2023, Science 379:1123-1130,
+     DOI:10.1126/science.ade2574) for growth factors
   3. Concentration, timing window, pathway annotations
   4. Base protocol / dataset label
 
@@ -368,9 +370,21 @@ def inflate_cellflow_variance(
 
     ``inflated = mean + factor * (original - mean)``
 
+    .. warning::
+        CellFlow (Klein et al. 2025, DOI:10.1101/2025.04.11.648220) was
+        trained on Day 1-36 data from Sanchis-Calleja et al. 2025
+        (DOI:10.1038/s41592-025-02927-5). Predictions for harvest days
+        beyond Day 36 (e.g. Day 70-72 used in the Amin/Kelley pipeline)
+        are out-of-distribution temporal extrapolations. The default
+        ``factor=2.0`` is a heuristic, not calibrated against ground truth.
+        Use ``--cellflow-relevance-check`` to validate whether CellFlow
+        data actually helps GP predictions (Mikkola et al. 2023,
+        arXiv:2210.13937).
+
     Args:
         fractions: Predicted cell type fractions (rows sum to ~1).
         factor: Inflation multiplier (>1 spreads predictions, 1.0 = no-op).
+            Default 2.0 is a heuristic for OOD extrapolation regime.
 
     Returns:
         DataFrame with inflated fractions, same shape as input.
@@ -409,7 +423,8 @@ def _predict_with_cellflow(
 ) -> pd.DataFrame:
     """Run predictions using actual CellFlow model.
 
-    CellFlow (Klein et al., bioRxiv 2025) is built on JAX/Flax, not PyTorch.
+    CellFlow (Klein et al. 2025, bioRxiv, DOI:10.1101/2025.04.11.648220)
+    is built on JAX/Flax, not PyTorch.
     This function uses CellFlow's JAX-based API: jnp arrays for inputs,
     and no explicit gradient context manager (JAX does not track gradients
     by default — only ``jax.grad`` triggers differentiation).
@@ -511,11 +526,23 @@ def sigmoid_response(concentration: float, ec50: float, hill_coeff: float = 1.0)
 # Morphogen-pathway lookup table mapping each morphogen to its signaling
 # pathway, agonist/antagonist direction, EC50 (µM), Hill coefficient,
 # and expected effects on cell type composition.
-# EC50 values are approximate midpoints of published dose-response ranges.
+#
+# Approximate phenotypic EC50 values for organoid differentiation outcomes
+# (not biochemical IC50s).
+# References for key values:
+# - CHIR99021: cellular Wnt activation EC50 ~1-3 µM
+#   (Law & Zheng 2022, DOI:10.1016/j.isci.2022.104159)
+# - BMP4: effective range 1-50 ng/mL
+#   (Heemskerk et al. 2019, DOI:10.7554/eLife.40526)
+# - SAG: biochemical EC50 ~3 nM
+#   (Chen et al. 2002, DOI:10.1073/pnas.212323999);
+#   0.5 µM here is a conservative phenotypic estimate, may be too high
+# NOTE: These are approximate. Effect magnitudes below are hand-tuned
+# priors with NO literature basis.
 MORPHOGEN_PATHWAY_MAP: dict[str, dict] = {
     "CHIR99021_uM": {
         "pathway": "WNT", "direction": "agonist", "ec50": 3.0, "hill": 1.5,
-        "effects": {
+        "effects": {  # HEURISTIC: hand-tuned directional guesses, no literature basis. Low impact: feeds fidelity=0.0 virtual data.
             "Neuron": +0.15, "NPC": -0.05, "IP": +0.05,
             "Neuroepithelium": -0.10, "Glioblast": +0.03,
         },

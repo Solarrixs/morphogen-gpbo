@@ -56,19 +56,24 @@ MOSCOT_EPSILON = float(os.environ.get("GPBO_MOSCOT_EPSILON", "1e-3"))
 MOSCOT_TAU_A = float(os.environ.get("GPBO_MOSCOT_TAU_A", "0.94"))
 MOSCOT_TAU_B = float(os.environ.get("GPBO_MOSCOT_TAU_B", "0.94"))
 
-# Label harmonization: map atlas-native cell type names to HNOCA level-2 vocabulary
+# Label harmonization: map Azbukina atlas cell type names to HNOCA level_2
+# vocabulary (He et al. 2024, DOI:10.1038/s41586-024-08172-8).
+# The Azbukina atlas covers posterior brain (midbrain/hindbrain/cerebellum),
+# so excitatory and inhibitory neurons map to Non-telencephalic types, not
+# cortical (Dorsal Telencephalic). See also the Snapseed marker hierarchy in
+# data/neural_organoid_atlas/supplemental_files/Data_S1_snapseed_markers.yaml.
 LABEL_HARMONIZATION: dict[str, str] = {
-    "Excitatory neuron": "Cortical EN",
-    "Inhibitory neuron": "Cortical IN",
-    "Radial glia": "Cortical RG",
-    "Intermediate progenitor": "Cortical IP",
-    "Astrocyte": "Astroglia",
+    "Excitatory neuron": "Non-telencephalic Neuron",
+    "Inhibitory neuron": "Non-telencephalic Neuron",
+    "Radial glia": "Non-telencephalic NPC",
+    "Intermediate progenitor": "Dorsal Telencephalic IP",
+    "Astrocyte": "Astrocyte",
     "Oligodendrocyte precursor": "OPC",
     "Oligodendrocyte": "OPC",
-    "Choroid plexus": "CP epithelial",
+    "Choroid plexus": "CP",
     "Microglia": "Microglia",
-    "Endothelial": "Vascular endothelial",
-    "Fibroblast": "Mesenchymal",
+    "Endothelial": "EC",
+    "Fibroblast": "MC",
 }
 
 
@@ -237,6 +242,11 @@ def compute_fate_probabilities(
         adata: Temporal atlas AnnData.
         kernel: CellRank kernel with transition matrix.
         n_macrostates: Number of macrostates to identify.
+            Default 12 matches approximate number of HNOCA level_2 cell types.
+            Ideally validated via eigenvalue gap of the transition matrix Schur
+            decomposition (Reuter et al. 2018, DOI:10.1021/acs.jctc.8b00079).
+            Consider using ``cr.estimators.GPCCA.compute_schur()`` to determine
+            optimal n.
 
     Returns:
         Tuple of (GPCCA estimator, fate_probabilities DataFrame).

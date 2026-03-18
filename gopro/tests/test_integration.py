@@ -32,7 +32,7 @@ class TestMorphogenParserIntegration:
             "SAG-d16-21", "SAG-d6-11", "SAG1000", "SAG250",
         ]
         matrix = morphogen_parser.build_morphogen_matrix(conditions)
-        assert matrix.shape == (46, 24)
+        assert matrix.shape == (46, 25)
         assert not matrix.isnull().any().any()
 
     def test_all_conditions_have_harvest_day(self):

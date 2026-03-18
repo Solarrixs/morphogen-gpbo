@@ -7,7 +7,16 @@ BrainSTEM-inspired two-tier fidelity scoring:
 The Braun fetal brain reference (~1.65M cells, 11 GB) is loaded in backed mode
 to extract region-level cell type composition profiles. These serve as the
 ground truth "ideal" composition vectors. Each organoid condition is scored by
-cosine similarity of its cell type composition to the fetal reference.
+Aitchison similarity of its cell type composition to the fetal reference.
+
+This module produces a **composite fidelity score** as a convenience summary,
+but the sub-scores (RSS, on-target, off-target, entropy) are also available
+individually in the fidelity report.  For rigorous optimization, the
+recommended approach is multi-objective BO (``--multi-objective`` in step 04),
+which treats each sub-score as a separate objective and returns Pareto-optimal
+conditions without requiring weight selection.  See
+:data:`DEFAULT_COMPOSITE_WEIGHTS` and :func:`sensitivity_analysis_weights` for
+details on the heuristic weighting and how to verify ranking robustness.
 
 Inputs:
   - data/amin_kelley_mapped.h5ad     (from step 02, with HNOCA cell type labels)
@@ -217,8 +226,8 @@ def aitchison_distance(a: np.ndarray, b: np.ndarray) -> float:
     The Aitchison distance is the Euclidean distance in CLR (centered
     log-ratio) space.  Unlike cosine similarity it respects the simplex
     geometry of compositional data — it is scale-invariant, permutation-
-    invariant, and satisfies sub-compositional dominance (Quinn et al.,
-    *Bioinformatics* 2018).
+    invariant, and satisfies sub-compositional dominance (Quinn et al.
+    2018, *Bioinformatics* 34(16):2870-2878, DOI:10.1093/bioinformatics/bty175).
 
     Args:
         a: First composition vector (non-negative, sums to ~1).
@@ -227,7 +236,10 @@ def aitchison_distance(a: np.ndarray, b: np.ndarray) -> float:
     Returns:
         Aitchison distance (>= 0).  Returns 0 for identical compositions.
     """
-    # Small pseudo-count to handle zeros (multiplicative-style)
+    # Additive pseudo-count for CLR computation. Adequate for distance
+    # calculation where zeros are rare. The ILR path in 04_gpbo_loop.py
+    # uses multiplicative replacement (Martin-Fernandez 2003) which better
+    # preserves simplex geometry.
     eps = 1e-6
     a_safe = np.maximum(a, eps)
     b_safe = np.maximum(b, eps)
@@ -240,24 +252,37 @@ def aitchison_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.linalg.norm(clr_a - clr_b))
 
 
-def aitchison_similarity(a: np.ndarray, b: np.ndarray) -> float:
+def aitchison_similarity(
+    a: np.ndarray,
+    b: np.ndarray,
+    scale: float | None = None,
+) -> float:
     """Convert Aitchison distance to a similarity score in [0, 1].
 
-    Uses an exponential decay: ``sim = exp(-dist / scale)`` where
-    *scale* is set so that typical between-region distances map to
-    moderate similarity values.
+    Uses an exponential decay: ``sim = exp(-dist / scale)``.
+
+    When *scale* is provided, it is used directly.  When *scale* is
+    ``None``, falls back to ``_AITCHISON_FALLBACK_SCALE`` (2.0).
+    Callers that have access to a corpus of pairwise distances should
+    pre-compute the median and pass it as *scale* (the **median
+    heuristic**; Garreau, Jitkrittum & Kanagawa, 2017).
 
     Args:
         a: First composition vector.
         b: Second composition vector.
+        scale: Kernel bandwidth.  ``None`` → fallback constant.
 
     Returns:
         Similarity in [0, 1].  1 = identical, 0 = maximally different.
     """
     dist = aitchison_distance(a, b)
-    # Scale factor chosen so that a distance of ~4 (typical for dissimilar
-    # brain regions with ~17 cell types) maps to similarity ~0.14.
-    return float(np.exp(-dist / 2.0))
+    if scale is None:
+        scale = _AITCHISON_FALLBACK_SCALE
+    return float(np.exp(-dist / scale))
+
+
+# Fallback when no pairwise corpus is available (e.g. single comparison).
+_AITCHISON_FALLBACK_SCALE = 2.0
 
 
 def shannon_entropy(fractions: np.ndarray) -> float:
@@ -322,12 +347,28 @@ def compute_rss(
     all_labels = sorted(set(condition_vec.index) | set(reference_profiles.columns))
     cond_aligned = np.array([condition_vec.get(l, 0.0) for l in all_labels])
 
+    # Compute all Aitchison distances first, then derive the scale via the
+    # median heuristic (Garreau, Jitkrittum & Kanagawa, 2017): set kernel
+    # bandwidth to the median of observed pairwise distances.
+    ref_aligned_vecs = {}
+    distances = {}
+    for region in reference_profiles.index:
+        ref_vec = np.array([reference_profiles.loc[region].get(l, 0.0) for l in all_labels])
+        ref_aligned_vecs[region] = ref_vec
+        distances[region] = aitchison_distance(cond_aligned, ref_vec)
+
+    if len(distances) >= 2:
+        scale = float(np.median(list(distances.values())))
+        # Guard against degenerate case where median is ~0
+        if scale < 1e-8:
+            scale = _AITCHISON_FALLBACK_SCALE
+    else:
+        scale = _AITCHISON_FALLBACK_SCALE
+
     best_region = "none"
     best_sim = 0.0
-
-    for region in reference_profiles.index:
-        ref_aligned = np.array([reference_profiles.loc[region].get(l, 0.0) for l in all_labels])
-        sim = aitchison_similarity(cond_aligned, ref_aligned)
+    for region, dist in distances.items():
+        sim = float(np.exp(-dist / scale))
         if sim > best_sim:
             best_sim = sim
             best_region = region
@@ -404,7 +445,38 @@ def compute_braun_entropy_center(braun_profiles: pd.DataFrame) -> float:
 
 # Fallback when no Braun reference is available
 _DEFAULT_ENTROPY_CENTER = 0.55
+# Heuristic: no literature basis for sigma=0.2. Consider deriving from
+# variance of Braun region entropies for a data-driven alternative.
 _ENTROPY_SIGMA = 0.2
+
+# ---------------------------------------------------------------------------
+# Default composite fidelity weights — HEURISTIC, NOT LITERATURE-BACKED.
+#
+# These weights are engineering choices that produce reasonable condition
+# rankings for the Amin & Kelley 2024 morphogen screen.  No published
+# organoid evaluation framework uses fixed-weight composite scores.
+#
+# Literature alternatives:
+#   - Per-cell-type transcriptomic similarity
+#     (He, Treutlein et al. 2024, DOI:10.1038/s41586-024-08172-8)
+#   - NEST-Score for organoid benchmarking
+#     (Naas, Knoblich et al. 2025, DOI:10.1016/j.celrep.2025.116168)
+#   - Hierarchical staged QC with pass/fail gating
+#     (Castiglione et al. 2025, DOI:10.1038/s41598-025-14425-x)
+#
+# Principled approach: use multi-objective BO (--multi-objective in step 04)
+# which treats each sub-score as a separate objective and returns Pareto-
+# optimal conditions without weight selection (Daulton et al. 2020, qEHVI).
+#
+# Use sensitivity_analysis_weights() to verify ranking robustness before
+# relying on this composite score for decision-making.
+# ---------------------------------------------------------------------------
+DEFAULT_COMPOSITE_WEIGHTS: dict[str, float] = {
+    "rss": 0.35,
+    "on_target": 0.25,
+    "off_target": 0.25,
+    "entropy": 0.15,
+}
 
 
 def compute_composite_fidelity(
@@ -418,18 +490,35 @@ def compute_composite_fidelity(
     """Compute a single composite fidelity score in [0, 1].
 
     Combines four sub-scores with configurable weights:
-    - RSS (cosine similarity to fetal brain): higher is better
+    - RSS (Aitchison similarity to fetal brain): higher is better
     - On-target fraction: higher is better
     - Off-target fraction: lower is better (inverted)
     - Normalized entropy: moderate is best (penalize extremes)
 
+    .. note:: **Heuristic weighting — not literature-backed.**
+
+       The default weights (RSS=0.35, on-target=0.25, off-target=0.25,
+       entropy=0.15) are engineering choices tuned for reasonable ranking
+       behaviour.  No published organoid evaluation framework uses fixed-
+       weight composite scores.  See ``DEFAULT_COMPOSITE_WEIGHTS`` docstring
+       for literature alternatives.
+
+       **Recommended principled approach**: use multi-objective Bayesian
+       optimization (``--multi-objective`` flag in step 04), which treats
+       RSS, on-target, off-target, and entropy as separate objectives and
+       returns Pareto-optimal conditions without requiring weight selection
+       (Daulton et al. 2020, qEHVI; DOI:10.48550/arXiv.2006.05078).
+
+       Use :func:`sensitivity_analysis_weights` to verify that condition
+       rankings are robust to weight perturbation.
+
     Args:
-        rss_score: Cosine similarity to best-matching fetal region [0, 1].
+        rss_score: Aitchison similarity to best-matching fetal region [0, 1].
         on_target_frac: Fraction of cells in dominant region [0, 1].
         off_target_frac: Fraction of non-neural cells [0, 1].
         norm_entropy: Normalized Shannon entropy [0, 1].
         weights: Dict with keys 'rss', 'on_target', 'off_target', 'entropy'.
-            Defaults to equal weighting.
+            Must sum to ~1.0. Defaults to ``DEFAULT_COMPOSITE_WEIGHTS``.
         entropy_center: Center of Gaussian entropy penalty [0, 1].
             Derived from Braun fetal brain reference via
             ``compute_braun_entropy_center()``. Falls back to 0.55 if None.
@@ -438,12 +527,7 @@ def compute_composite_fidelity(
         Composite fidelity score in [0, 1].
     """
     if weights is None:
-        weights = {
-            "rss": 0.35,
-            "on_target": 0.25,
-            "off_target": 0.25,
-            "entropy": 0.15,
-        }
+        weights = dict(DEFAULT_COMPOSITE_WEIGHTS)
 
     if entropy_center is None:
         entropy_center = _DEFAULT_ENTROPY_CENTER
@@ -466,6 +550,98 @@ def compute_composite_fidelity(
     )
 
     return float(np.clip(score, 0.0, 1.0))
+
+
+def sensitivity_analysis_weights(
+    report: pd.DataFrame,
+    n_samples: int = 200,
+    seed: int = 42,
+    entropy_center: Optional[float] = None,
+) -> pd.DataFrame:
+    """Sweep random weight combinations and report ranking stability.
+
+    Generates ``n_samples`` random weight vectors drawn from a symmetric
+    Dirichlet distribution, re-scores all conditions under each weight
+    vector, and computes the Spearman rank correlation between the
+    resulting ranking and the default-weight ranking.
+
+    Inspired by the sensitivity-to-assumptions principle in Castiglione
+    et al. 2025 (DOI:10.1038/s41598-025-14425-x): before trusting a
+    composite score, verify that the ranking is not an artefact of the
+    particular weight choice.
+
+    If the median Spearman rho is high (>0.85), the ranking is robust
+    and the composite score is a reliable summary.  If it is low, prefer
+    multi-objective optimization (``--multi-objective`` in step 04) which
+    avoids weight selection entirely.
+
+    Args:
+        report: Fidelity report DataFrame from :func:`score_all_conditions`,
+            must contain columns ``rss_score``, ``on_target_fraction``,
+            ``off_target_fraction``, ``normalized_entropy``.
+        n_samples: Number of random weight vectors to draw.
+        seed: Random seed for reproducibility.
+        entropy_center: Entropy center for scoring.  If None, uses the
+            module default (``_DEFAULT_ENTROPY_CENTER``).
+
+    Returns:
+        DataFrame with one row per weight sample, columns:
+        ``w_rss``, ``w_on_target``, ``w_off_target``, ``w_entropy``,
+        ``spearman_rho``, ``spearman_pvalue``.
+    """
+    from scipy.stats import spearmanr
+
+    rng = np.random.default_rng(seed)
+
+    required = {"rss_score", "on_target_fraction", "off_target_fraction", "normalized_entropy"}
+    missing = required - set(report.columns)
+    if missing:
+        raise ValueError(f"Report is missing columns needed for sensitivity analysis: {missing}")
+
+    # Baseline ranking under default weights
+    baseline_scores = np.array([
+        compute_composite_fidelity(
+            row["rss_score"], row["on_target_fraction"],
+            row["off_target_fraction"], row["normalized_entropy"],
+            entropy_center=entropy_center,
+        )
+        for _, row in report.iterrows()
+    ])
+    baseline_rank = np.argsort(-baseline_scores)  # descending
+
+    results: list[dict] = []
+    # Draw weight vectors from Dirichlet(1,1,1,1) — uniform on the simplex
+    weight_samples = rng.dirichlet(np.ones(4), size=n_samples)
+
+    for w in weight_samples:
+        wdict = {"rss": w[0], "on_target": w[1], "off_target": w[2], "entropy": w[3]}
+        scores = np.array([
+            compute_composite_fidelity(
+                row["rss_score"], row["on_target_fraction"],
+                row["off_target_fraction"], row["normalized_entropy"],
+                weights=wdict,
+                entropy_center=entropy_center,
+            )
+            for _, row in report.iterrows()
+        ])
+        rho, pval = spearmanr(baseline_rank, np.argsort(-scores))
+        results.append({
+            "w_rss": w[0],
+            "w_on_target": w[1],
+            "w_off_target": w[2],
+            "w_entropy": w[3],
+            "spearman_rho": rho,
+            "spearman_pvalue": pval,
+        })
+
+    result_df = pd.DataFrame(results)
+    median_rho = result_df["spearman_rho"].median()
+    logger.info(
+        "Weight sensitivity analysis (%d samples): median Spearman rho = %.3f "
+        "(>0.85 suggests robust ranking)",
+        n_samples, median_rho,
+    )
+    return result_df
 
 
 # ---------------------------------------------------------------------------

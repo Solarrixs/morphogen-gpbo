@@ -322,7 +322,11 @@ def transfer_labels_knn(
 
         # Compute combined weights
         if class_balanced:
-            # Inverse-sqrt class frequency weighting per label column
+            # Inverse-sqrt class frequency weighting per label column.
+            # Pipeline-specific heuristic for HNOCA class imbalance (~43%
+            # dorsal telencephalon). sqrt-frequency is a compromise between
+            # no correction (majority bias) and full 1/freq (rare class
+            # overweighting). Not from published scRNA-seq methodology.
             class_counts = np.bincount(label_indices, minlength=n_classes).astype(float)
             class_freq = class_counts / class_counts.sum()
             class_weight = 1.0 / np.sqrt(class_freq + 1e-10)  # sqrt correction

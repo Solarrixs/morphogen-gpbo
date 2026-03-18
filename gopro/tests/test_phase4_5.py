@@ -889,8 +889,8 @@ class TestLabelHarmonization:
 
     def test_harmonization_known_mapping(self):
         """Known mappings are correct."""
-        assert step05.LABEL_HARMONIZATION["Excitatory neuron"] == "Cortical EN"
-        assert step05.LABEL_HARMONIZATION["Inhibitory neuron"] == "Cortical IN"
+        assert step05.LABEL_HARMONIZATION["Excitatory neuron"] == "Non-telencephalic Neuron"
+        assert step05.LABEL_HARMONIZATION["Inhibitory neuron"] == "Non-telencephalic Neuron"
 
 
 class TestResolveTargetLabels:

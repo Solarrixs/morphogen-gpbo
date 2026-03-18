@@ -65,6 +65,150 @@ def _inflate_cellflow_variance(fractions: pd.DataFrame, factor: float) -> pd.Dat
     return mod.inflate_cellflow_variance(fractions, factor=factor)
 
 
+def cellflow_relevance_check(
+    X_all: pd.DataFrame,
+    Y_all: pd.DataFrame,
+    X_real: pd.DataFrame,
+    Y_real: pd.DataFrame,
+) -> dict:
+    """LOO-CV relevance check: does CellFlow data help GP predictions?
+
+    Compares leave-one-out RMSE on real (fidelity=1.0) data points with
+    and without CellFlow (fidelity=0.0) data included in the training set.
+    If including CellFlow worsens predictions, it should be excluded.
+
+    Follows the rMFBO approach (Mikkola et al. 2023, arXiv:2210.13937):
+    evaluate whether a low-fidelity source actually improves the GP's
+    predictive performance on high-fidelity targets before trusting it.
+
+    For efficiency, fits single-output GPs on the first principal component
+    of Y (captures most variance in cell type fractions).
+
+    Args:
+        X_all: Merged training X (real + CellFlow, with fidelity column).
+        Y_all: Merged training Y (real + CellFlow).
+        X_real: Real-only training X (fidelity=1.0).
+        Y_real: Real-only training Y.
+
+    Returns:
+        Dict with keys:
+            - rmse_with_cellflow: float (LOO RMSE including CellFlow)
+            - rmse_without_cellflow: float (LOO RMSE real-only)
+            - cellflow_helps: bool (True if CellFlow reduces RMSE)
+            - improvement_pct: float (% RMSE reduction, negative = worse)
+    """
+    from sklearn.decomposition import PCA
+
+    # Project Y onto first PC for a scalar LOO target
+    real_fidelity_mask = X_all["fidelity"] == 1.0
+    n_real = int(real_fidelity_mask.sum())
+
+    if n_real < 3:
+        logger.warning(
+            "CellFlow relevance check: only %d real points, too few for LOO-CV. "
+            "Skipping check and keeping CellFlow data.", n_real,
+        )
+        return {
+            "rmse_with_cellflow": float("nan"),
+            "rmse_without_cellflow": float("nan"),
+            "cellflow_helps": True,
+            "improvement_pct": 0.0,
+        }
+
+    # PCA on real Y only, then project all Y
+    ct_cols = [c for c in Y_all.columns if c != "fidelity"]
+    pca = PCA(n_components=1)
+    pca.fit(Y_real[ct_cols].values)
+    y_all_pc1 = pca.transform(Y_all[ct_cols].values).ravel()
+    y_real_pc1 = pca.transform(Y_real[ct_cols].values).ravel()
+
+    # Identify active morphogen columns (non-zero variance)
+    morph_cols = [c for c in X_all.columns if c != "fidelity"]
+    active_cols_mask = X_all[morph_cols].std() > 1e-10
+    active_morph = [c for c, m in zip(morph_cols, active_cols_mask) if m]
+    if not active_morph:
+        active_morph = morph_cols[:1]  # fallback
+
+    # Include fidelity if multi-fidelity
+    fit_cols_all = active_morph + (["fidelity"] if "fidelity" in X_all.columns else [])
+    fit_cols_real = active_morph
+
+    def _loo_rmse(X_df: pd.DataFrame, y_vec: np.ndarray,
+                  fit_cols: list[str], real_indices: np.ndarray) -> float:
+        """Compute LOO-RMSE on real data points only."""
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+        from gpytorch.mlls import ExactMarginalLogLikelihood
+        from botorch.fit import fit_gpytorch_mll
+
+        errors = []
+        for loo_idx in real_indices:
+            # Leave out one real point
+            train_mask = np.ones(len(X_df), dtype=bool)
+            train_mask[loo_idx] = False
+
+            X_train = torch.tensor(
+                X_df.iloc[train_mask][fit_cols].values, dtype=torch.double
+            )
+            y_train = torch.tensor(
+                y_vec[train_mask].reshape(-1, 1), dtype=torch.double
+            )
+            X_test = torch.tensor(
+                X_df.iloc[loo_idx:loo_idx + 1][fit_cols].values, dtype=torch.double
+            )
+            y_test = y_vec[loo_idx]
+
+            try:
+                model = SingleTaskGP(
+                    X_train, y_train,
+                    input_transform=Normalize(d=X_train.shape[1]),
+                    outcome_transform=Standardize(m=1),
+                )
+                mll = ExactMarginalLogLikelihood(model.likelihood, model)
+                fit_gpytorch_mll(mll, max_retries=0)
+
+                with torch.no_grad():
+                    pred = model.posterior(X_test).mean.item()
+                errors.append((pred - y_test) ** 2)
+            except Exception:
+                # If fitting fails for this fold, skip it
+                continue
+
+        if not errors:
+            return float("inf")
+        return float(np.sqrt(np.mean(errors)))
+
+    # Get indices of real data points within X_all
+    real_indices = np.where(real_fidelity_mask.values)[0]
+
+    # LOO on all data (real + CellFlow)
+    rmse_with = _loo_rmse(X_all, y_all_pc1, fit_cols_all, real_indices)
+
+    # LOO on real data only
+    rmse_without = _loo_rmse(X_real, y_real_pc1, fit_cols_real,
+                             np.arange(len(X_real)))
+
+    if rmse_without > 0:
+        improvement_pct = 100.0 * (rmse_without - rmse_with) / rmse_without
+    else:
+        improvement_pct = 0.0
+
+    cellflow_helps = rmse_with < rmse_without
+
+    logger.info(
+        "CellFlow relevance check (LOO-CV on PC1): "
+        "RMSE with=%.4f, without=%.4f, improvement=%.1f%%, helps=%s",
+        rmse_with, rmse_without, improvement_pct, cellflow_helps,
+    )
+
+    return {
+        "rmse_with_cellflow": rmse_with,
+        "rmse_without_cellflow": rmse_without,
+        "cellflow_helps": cellflow_helps,
+        "improvement_pct": improvement_pct,
+    }
+
+
 # BoTorch requires float64, which MPS doesn't support. Use CPU for GP fitting.
 # MPS can be used for neural network components (CellFlow, scPoli) separately.
 DEVICE = torch.device("cpu")
@@ -147,6 +291,11 @@ def _build_per_fidelity_ard_model(
     n_fidelities: int,
 ) -> "SingleTaskGP":
     """Build a GP with g(x) + delta(x,m) per-fidelity ARD kernel structure.
+
+    Follows the Intrinsic Coregionalization Model (ICM) pattern (Bonilla
+    et al. 2007, "Multi-task Gaussian Process Prediction", NeurIPS;
+    Alvarez et al. 2012, "Kernels for Vector-Valued Functions: A Review",
+    Foundations and Trends in Machine Learning 4(3):195-266).
 
     The kernel decomposes into:
       k((x,m), (x',m')) = k_base(x, x') + k_fidelity(m, m') * k_residual(x, x')
@@ -250,6 +399,7 @@ MORPHOGEN_BOUNDS_LITERATURE = {
     "SHH_uM":           (0.0, ng_mL_to_uM(500.0, PROTEIN_MW_KDA["SHH"])),
     "SAG_uM":           (0.0, nM_to_uM(2000.0)),
     "RA_uM":            (0.0, nM_to_uM(1000.0)),
+    "SR11237_uM":       (0.0, nM_to_uM(500.0)),   # RXR agonist; only 1 condition at 100 nM
     "FGF8_uM":          (0.0, ng_mL_to_uM(200.0, PROTEIN_MW_KDA["FGF8"])),
     "FGF2_uM":          (0.0, ng_mL_to_uM(100.0, PROTEIN_MW_KDA["FGF2"])),
     "FGF4_uM":          (0.0, ng_mL_to_uM(200.0, PROTEIN_MW_KDA["FGF4"])),
@@ -406,10 +556,10 @@ def _inverse_log_scale(
 def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
     """Set a dimensionality-scaled log-normal prior on kernel lengthscales.
 
-    Following Hvarfner et al. (ICML 2024, arXiv:2402.02229), a log-normal
-    prior with mode scaled by sqrt(d) prevents vanishing gradients during
-    MLE in high-dimensional BO.  This improves exploration in our ~8D
-    active morphogen space.
+    Following Hvarfner et al. (ICML 2024, arXiv:2402.02229), Equation 4:
+    ``LogNormal(loc=sqrt(2) + log(d)/2, scale=sqrt(3))``.  This prior
+    prevents vanishing gradients during MLE in high-dimensional BO and
+    improves exploration in our ~8D active morphogen space.
 
     Args:
         model: BoTorch SingleTaskGP or SingleTaskMultiFidelityGP.
@@ -417,10 +567,10 @@ def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
     """
     from gpytorch.priors import LogNormalPrior
 
-    # Mode of LogNormal(loc, scale) = exp(loc - scale^2).
-    # We want mode ~ sqrt(d), so loc = log(sqrt(d)) + scale^2.
-    scale = 1.0
-    loc = math.log(math.sqrt(d)) + scale ** 2
+    # Equation 4 of Hvarfner et al. (arXiv:2402.02229):
+    #   loc = sqrt(2) + log(d)/2,  scale = sqrt(3)
+    scale = math.sqrt(3)
+    loc = math.sqrt(2) + math.log(d) / 2
     prior = LogNormalPrior(loc=loc, scale=scale)
 
     if hasattr(model, "covar_module"):
@@ -442,12 +592,12 @@ def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
 
 
 def _set_noise_prior(model) -> None:
-    """Set a Gamma(3, 6) prior on the GP likelihood noise variance.
+    """Set a Gamma(1.1, 0.05) prior on the GP likelihood noise variance.
 
-    Gamma(concentration=3, rate=6) has mean=0.5, mode=1/3.  On standardised
-    data this keeps the noise estimate moderate and prevents the optimiser
-    from collapsing noise to near-zero (overfitting) or inflating it
-    excessively (Cosenza 2022).
+    Gamma(concentration=1.1, rate=0.05) has mean=22, mode=2.  This prior
+    prevents the optimiser from collapsing noise to near-zero (overfitting).
+    Cosenza et al. 2022 (DOI:10.1002/bit.28132) inspired the multi-source BO
+    approach; specific noise prior parameters are pipeline heuristics.
 
     Args:
         model: BoTorch SingleTaskGP (or compatible).
@@ -459,11 +609,11 @@ def _set_noise_prior(model) -> None:
     try:
         model.likelihood.noise_covar.register_prior(
             "noise_prior",
-            GammaPrior(concentration=3.0, rate=6.0),
+            GammaPrior(concentration=1.1, rate=0.05),
             lambda m: m.noise,
             lambda m, v: m._set_noise(v),
         )
-        logger.info("Set Gamma(3, 6) noise prior on likelihood")
+        logger.info("Set Gamma(1.1, 0.05) noise prior on likelihood")
     except Exception as exc:
         logger.warning("Could not set noise prior: %s", exc)
 
@@ -472,8 +622,9 @@ def _set_explicit_priors(model, d: int) -> None:
     """Set both lengthscale and noise priors on a GP model.
 
     Combines the dimensionality-scaled LogNormal lengthscale prior
-    (Hvarfner et al. ICML 2024) with a Gamma(3, 6) noise prior
-    (Cosenza 2022).
+    (Hvarfner et al. ICML 2024) with a Gamma(1.1, 0.05) noise prior.
+    Cosenza et al. 2022 (DOI:10.1002/bit.28132) inspired the multi-source BO
+    approach; specific noise prior parameters are pipeline heuristics.
 
     Args:
         model: BoTorch SingleTaskGP (or compatible).
@@ -577,15 +728,15 @@ def _fit_lassobo(
 ) -> "SingleTaskGP":
     """Fit a GP with Lasso-regularized lengthscale estimation.
 
-    LassoBO (AISTATS 2025) applies an L1 penalty to the inverse lengthscales
-    during MAP optimization, encouraging sparsity.  This achieves similar
-    variable selection to SAASBO but via gradient-based optimization rather
-    than NUTS sampling, making it much faster (~10x) while giving comparable
-    variable selection.
+    LassoBO (Hoang et al. AISTATS 2025, arXiv:2504.01743) applies an L1
+    penalty to the squared inverse lengthscales during MAP optimization,
+    encouraging sparsity.  This achieves similar variable selection to SAASBO
+    but via gradient-based optimization rather than NUTS sampling, making it
+    much faster (~10x) while giving comparable variable selection.
 
     The penalized objective is::
 
-        loss = -MLL + alpha * sum(1 / lengthscale_i)
+        loss = -MLL + lambda * sum(1 / lengthscale_i^2)
 
     Small lengthscales → large penalties, so the optimizer drives irrelevant
     dimensions' lengthscales toward infinity (effectively removing them).
@@ -647,10 +798,10 @@ def _fit_lassobo(
             mll_value = mll(output, model.train_targets)
             loss = -mll_value.sum()  # sum for multi-output
 
-            # L1 penalty on inverse lengthscales → drives irrelevant dims to ∞
+            # L1 penalty on squared inverse lengthscales → drives irrelevant dims to ∞
             if has_lengthscale:
-                inv_ls = 1.0 / base_kernel.lengthscale.clamp(min=1e-6)
-                loss = loss + lasso_alpha * inv_ls.sum()
+                inv_ls_sq = 1.0 / base_kernel.lengthscale.clamp(min=1e-6) ** 2
+                loss = loss + lasso_alpha * inv_ls_sq.sum()
 
             loss.backward()
             optimizer.step()
@@ -692,20 +843,36 @@ def _make_zero_passing_kernel_class():
     class _ZeroPassingKernel(Kernel):
         """Kernel wrapper enforcing k(0, x) = 0 for concentration inputs.
 
-        Wraps any GPyTorch kernel and multiplies by phi(x) * phi(x') where
-        phi(x) = 1 - exp(-||x||^2 / eps) is a smooth indicator that vanishes
-        when x is a zero vector.  This encodes the biological prior that an
-        absent morphogen (concentration 0) contributes zero covariance — the
-        response at zero dosage is uncorrelated with the response at any
-        non-zero dosage (GPerturb, Xing & Yau, Nature Communications 2025).
+        Supports two methods for constructing the zero-passing kernel:
+
+        **Schur complement** (``method="schur"``, default): Conditions the base
+        kernel on f(0)=0 via the Schur complement (GP conditioning formula)::
+
+            k_zp(x1, x2) = k(x1, x2) - k(x1, 0) * k(x2, 0) / k(0, 0)
+
+        This is the mathematically principled formulation from GPerturb:
+
+        - Xing & Yau (2024), BMC Bioinformatics 25:104,
+          DOI: 10.1186/s12859-024-05682-0
+        - Xing & Yau (2025), Nature Communications,
+          DOI: 10.1038/s41467-025-61165-7
+
+        **Multiplicative mask** (``method="phi_mask"``): Multiplies by
+        phi(x) * phi(x') where phi(x) = 1 - exp(-||x||^2 / eps) is a smooth
+        indicator that vanishes when x is a zero vector.  This is a heuristic
+        approximation that enforces k(0, x) ~ 0 without exact conditioning.
 
         Args:
             base_kernel: The inner GPyTorch kernel to wrap.
             concentration_dims: Indices of concentration dimensions.  Only these
-                dimensions contribute to the zero-passing mask.  If ``None``,
-                all dimensions are used.
-            eps: Smoothness parameter for the exponential mask.  Smaller values
-                make the transition sharper near zero. (default: 1.0)
+                dimensions contribute to the zero-passing constraint.  If
+                ``None``, all dimensions are used.
+            eps: Smoothness parameter for the exponential mask (phi_mask method
+                only).  Smaller values make the transition sharper near zero.
+                (default: 1.0)
+            method: Zero-passing method.  ``"schur"`` uses the Schur complement
+                (GP conditioning); ``"phi_mask"`` uses the multiplicative mask.
+                (default: ``"schur"``)
         """
 
         has_lengthscale = False
@@ -715,11 +882,18 @@ def _make_zero_passing_kernel_class():
             base_kernel,
             concentration_dims: list[int] | None = None,
             eps: float = 1.0,
+            method: str = "schur",
         ):
+            if method not in ("schur", "phi_mask"):
+                raise ValueError(
+                    f"Unknown zero-passing method {method!r}; "
+                    "expected 'schur' or 'phi_mask'"
+                )
             super().__init__()
             self.base_kernel = base_kernel
             self.concentration_dims = concentration_dims
             self.eps = eps
+            self.method = method
 
         def _phi(self, x: torch.Tensor) -> torch.Tensor:
             """Smooth zero-passing mask: 1 - exp(-||x_conc||^2 / eps)."""
@@ -730,7 +904,38 @@ def _make_zero_passing_kernel_class():
             sq_norm = (x_conc ** 2).sum(dim=-1, keepdim=True)
             return 1.0 - torch.exp(-sq_norm / self.eps)
 
+        def _make_zero(self, x: torch.Tensor) -> torch.Tensor:
+            """Create a zero-origin point matching x's shape and device.
+
+            Returns a tensor shaped (..., 1, D) with concentration dimensions
+            zeroed out.  Non-concentration dimensions are copied from the first
+            point of *x* so that the origin sits on the same slice of input
+            space (e.g. same fidelity level).
+            """
+            x0 = x[..., :1, :].clone()
+            if self.concentration_dims is not None:
+                for d in self.concentration_dims:
+                    x0[..., :, d] = 0.0
+            else:
+                x0.zero_()
+            return x0
+
         def forward(self, x1, x2, diag=False, **params):
+            """Evaluate the zero-passing kernel.
+
+            For ``method="schur"``::
+
+                k_zp(x1, x2) = k(x1, x2) - k(x1, 0) * k(x2, 0) / k(0, 0)
+
+            For ``method="phi_mask"``::
+
+                k_zp(x1, x2) = k(x1, x2) * phi(x1) * phi(x2)
+            """
+            if self.method == "phi_mask":
+                return self._forward_phi_mask(x1, x2, diag=diag, **params)
+            return self._forward_schur(x1, x2, diag=diag, **params)
+
+        def _forward_phi_mask(self, x1, x2, diag=False, **params):
             """Evaluate k_zp(x1, x2) = k_base(x1, x2) * phi(x1) * phi(x2)."""
             base_cov = self.base_kernel(x1, x2, diag=diag, **params)
             phi1 = self._phi(x1)  # (..., N, 1)
@@ -744,6 +949,38 @@ def _make_zero_passing_kernel_class():
                 if hasattr(base_cov, 'to_dense'):
                     return base_cov.to_dense() * mask
                 return base_cov * mask
+
+        def _forward_schur(self, x1, x2, diag=False, **params):
+            """Evaluate k_zp via Schur complement: k(x1,x2) - k(x1,0)k(x2,0)/k(0,0)."""
+            x0 = self._make_zero(x1)  # (..., 1, D)
+
+            # k(0, 0) — scalar
+            k00 = self.base_kernel(x0, x0, **params)
+            if hasattr(k00, 'to_dense'):
+                k00 = k00.to_dense()
+            k00_val = k00[..., 0, 0].clamp(min=1e-10)  # avoid division by zero
+
+            # k(x1, x2)
+            base_cov = self.base_kernel(x1, x2, diag=diag, **params)
+            if hasattr(base_cov, 'to_dense'):
+                base_cov = base_cov.to_dense()
+
+            # k(x1, 0) -> (..., N, 1) and k(x2, 0) -> (..., M, 1)
+            k1_0 = self.base_kernel(x1, x0, **params)
+            if hasattr(k1_0, 'to_dense'):
+                k1_0 = k1_0.to_dense()
+            k2_0 = self.base_kernel(x2, x0, **params)
+            if hasattr(k2_0, 'to_dense'):
+                k2_0 = k2_0.to_dense()
+
+            if diag:
+                # k1_0: (..., N, 1), k2_0: (..., M, 1) — squeeze last dim
+                correction = (k1_0.squeeze(-1) * k2_0.squeeze(-1)) / k00_val
+                return base_cov - correction
+            else:
+                # Outer product: (..., N, 1) @ (..., 1, M) -> (..., N, M)
+                correction = (k1_0 @ k2_0.transpose(-2, -1)) / k00_val.unsqueeze(-1).unsqueeze(-1)
+                return base_cov - correction
 
     return _ZeroPassingKernel
 
@@ -760,7 +997,12 @@ def _get_zero_passing_kernel_class():
     return ZeroPassingKernel
 
 
-def _wrap_zero_passing(model, concentration_dims: list[int] | None = None, eps: float = 1.0):
+def _wrap_zero_passing(
+    model,
+    concentration_dims: list[int] | None = None,
+    eps: float = 1.0,
+    method: str = "schur",
+):
     """Wrap a BoTorch GP model's covariance module with ZeroPassingKernel.
 
     Modifies the model in-place.
@@ -768,7 +1010,8 @@ def _wrap_zero_passing(model, concentration_dims: list[int] | None = None, eps: 
     Args:
         model: A BoTorch GP model with a ``covar_module`` attribute.
         concentration_dims: Indices of concentration dimensions.
-        eps: Smoothness for the exponential mask.
+        eps: Smoothness for the exponential mask (phi_mask method only).
+        method: Zero-passing method (``"schur"`` or ``"phi_mask"``).
     """
     if not hasattr(model, 'covar_module'):
         logger.warning("Model has no covar_module; cannot apply zero-passing kernel")
@@ -778,18 +1021,21 @@ def _wrap_zero_passing(model, concentration_dims: list[int] | None = None, eps: 
         model.covar_module,
         concentration_dims=concentration_dims,
         eps=eps,
+        method=method,
     )
     logger.info(
-        "Applied zero-passing kernel wrapper (concentration_dims=%s, eps=%.2g)",
-        concentration_dims, eps,
+        "Applied zero-passing kernel wrapper (method=%s, concentration_dims=%s, eps=%.2g)",
+        method, concentration_dims, eps,
     )
 
 
 def _build_additive_interaction_kernel(d: int):
     """Build an additive + interaction kernel for GP fitting.
 
-    Following NAIAD (Qin et al., ICML 2025, arXiv:2411.12010), decomposes the
-    covariance function into:
+    Reference: Duvenaud et al. (2011), "Additive Gaussian Processes",
+    NeurIPS.
+
+    Decomposes the covariance function into:
       k(x, x') = k_additive(x, x') + k_interaction(x, x')
 
     where k_additive is a sum of 1D Matern 5/2 kernels (one per morphogen) and
@@ -838,13 +1084,15 @@ def _select_kernel_complexity(
 ) -> dict:
     """Auto-select GP kernel complexity based on data density.
 
-    Implements the adaptive complexity schedule from NAIAD (Qin et al.,
-    ICML 2025): start simple in sparse-data regimes to avoid overfitting,
-    increase complexity as data accumulates.
+    Start simple in sparse-data regimes to avoid overfitting, increase
+    complexity as data accumulates.  ARD with dimensionality-scaled
+    lengthscale priors (Hvarfner et al., ICML 2024, arXiv:2402.02229)
+    is feasible even in moderate-data regimes.  SAASBO (Eriksson &
+    Jankowiak, UAI 2021, arXiv:2103.00349) adds fully Bayesian sparsity.
 
     The N/d ratio (conditions per active dimension) drives the selection:
-      - N/d < 8:  shared lengthscale (fewest params)
-      - 8 ≤ N/d < 15: per-dim ARD (standard)
+      - N/d < 3:  shared lengthscale (fewest params)
+      - 3 ≤ N/d < 15: per-dim ARD (standard)
       - N/d ≥ 15: SAASBO (fully Bayesian with sparsity prior)
 
     Args:
@@ -932,6 +1180,10 @@ def _resolve_kernel_spec(
 def _helmert_basis(D: int) -> np.ndarray:
     """Construct the Helmert ILR basis matrix.
 
+    Reference: Egozcue et al. (2003), "Isometric Logratio Transformations for
+    Compositional Data Analysis", Mathematical Geology 35:279-300,
+    DOI:10.1023/A:1023818214614.
+
     Args:
         D: Number of composition parts.
 
@@ -949,15 +1201,27 @@ def _helmert_basis(D: int) -> np.ndarray:
 def _multiplicative_replacement(Y: np.ndarray, delta: float | None = None) -> np.ndarray:
     """Replace zeros in compositional data using multiplicative replacement.
 
-    Following Martin-Fernandez et al. (Statistical Modelling 2015), zeros
-    are replaced with a small value *delta* and non-zero entries are scaled
-    down proportionally so each row still sums to 1.  This avoids the
-    extreme log-ratios produced by naive additive pseudo-counts (e.g. 1e-10).
+    Following Martin-Fernandez et al. (2015), "Bayesian-multiplicative
+    treatment of count zeros in compositional data sets", Statistical
+    Modelling 15(2):134-158, DOI:10.1177/1471082X14535524.  See also the
+    original non-Bayesian formulation: Martin-Fernandez et al. (2003),
+    "Dealing with Zeros and Missing Values in Compositional Data Sets
+    Using Nonparametric Imputation", Mathematical Geology 35:253-278,
+    DOI:10.1023/A:1023866030544.
+
+    Zeros are replaced with a small value *delta* and non-zero entries are
+    scaled down proportionally so each row still sums to 1.  This avoids
+    the extreme log-ratios produced by naive additive pseudo-counts
+    (e.g. 1e-10).
 
     Args:
         Y: Array of shape (N, D) with rows summing to ~1. May contain zeros.
         delta: Replacement value for zeros.  If None, defaults to
             ``0.65 / (D * 100)`` which gives ~3.8e-4 for 17 cell types.
+            The 0.65 fraction comes from zCompositions defaults
+            (Martin-Fernandez et al.); D*100 is the pipeline's detection
+            limit approximation (1 / (D * typical_cell_count), assuming
+            ~100 cells per condition as a conservative floor).
 
     Returns:
         Array of shape (N, D) with no zeros, rows summing to 1.
@@ -997,8 +1261,13 @@ def ilr_transform(
     Transforms D-part compositions to (D-1)-dimensional real space,
     removing the sum-to-one constraint that violates GP assumptions.
 
+    Reference: Egozcue et al. (2003), "Isometric Logratio Transformations
+    for Compositional Data Analysis", Mathematical Geology 35:279-300,
+    DOI:10.1023/A:1023818214614.
+
     Uses multiplicative replacement for zeros (Martin-Fernandez et al.
-    2015) instead of a naive additive pseudo-count.
+    2015, DOI:10.1177/1471082X14535524) instead of a naive additive
+    pseudo-count.
 
     Args:
         Y: Array of shape (N, D) with rows summing to 1.
@@ -1055,6 +1324,9 @@ def alr_transform(
     Transforms D-part compositions to (D-1)-dimensional real space using
     the last component as reference: z_j = log(y_j / y_D).
 
+    Reference: Aitchison (1986), *The Statistical Analysis of Compositional
+    Data*, Chapman & Hall.
+
     Simpler than ILR (no Helmert basis) but introduces asymmetry — the
     reference component is treated differently. Useful as a comparison
     baseline for ILR.
@@ -1081,6 +1353,9 @@ def alr_transform(
 
 def alr_inverse(Z: np.ndarray, D: int) -> np.ndarray:
     """Inverse ALR transform: (D-1) real coordinates → D-part composition.
+
+    Reference: Aitchison (1986), *The Statistical Analysis of Compositional
+    Data*, Chapman & Hall.
 
     Args:
         Z: Array of shape (N, D-1) in ALR space.
@@ -1376,7 +1651,9 @@ def fit_tvr_models(
 ) -> tuple:
     """Fit separate GPs per fidelity level for Targeted Variance Reduction.
 
-    TVR (Fare et al. 2022, McDonald et al. 2025) fits independent GPs for
+    TVR (Fare et al. 2022, npj Computational Materials 8:257,
+    DOI:10.1038/s41524-022-00947-9; McDonald et al. 2025, ACS Central
+    Science 11(2):346-356, DOI:10.1021/acscentsci.4c01991) fits independent GPs for
     each fidelity level and combines them by selecting the model with the
     lowest cost-scaled posterior variance at each candidate point.
 
@@ -1604,6 +1881,11 @@ class _TVRPosterior:
 def _build_input_transform(d: int, warp: bool, cat_dims: Optional[list[int]] = None):
     """Build input transform, optionally chaining Kumaraswamy warping with Normalize.
 
+    Kumaraswamy input warping follows Snoek et al. (2014), "Input Warping
+    for Bayesian Optimization of Non-Stationary Functions", ICML,
+    arXiv:1402.0929.  BoTorch uses the Kumaraswamy CDF (closed-form)
+    instead of the Beta CDF from the original paper.
+
     Args:
         d: Number of input dimensions.
         warp: If True, apply Kumaraswamy CDF warping to continuous dimensions.
@@ -1646,9 +1928,10 @@ def fit_gp_botorch(
     use_ilr: bool = True,
     use_alr: bool = False,
     use_saasbo: bool = False,
-    saasbo_warmup: int = 256,
-    saasbo_num_samples: int = 128,
-    saasbo_thinning: int = 16,
+    saasbo_warmup: int = 256,       # Half BoTorch default (512) for speed
+    saasbo_num_samples: int = 128,  # Half BoTorch default (256) -> ~8 effective
+    saasbo_thinning: int = 16,      # posterior samples vs default 16.
+    # Ref: Eriksson & Jankowiak, UAI 2021 (arXiv:2103.00349).
     use_lassobo: bool = False,
     lassobo_alpha: float = 0.1,
     warm_start: bool = False,
@@ -1667,6 +1950,9 @@ def fit_gp_botorch(
     zero_passing: bool = False,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
+
+    Uses BoTorch (Balandat et al. 2020, "BoTorch: A Framework for Efficient
+    Monte-Carlo Bayesian Optimization", NeurIPS, arXiv:1910.06403).
 
     Args:
         X: Morphogen concentration matrix with fidelity column.
@@ -1694,7 +1980,7 @@ def fit_gp_botorch(
             Use ``warm_start=True`` instead.
         kernel_type: Kernel structure. ``"ard"`` (default) uses Matern 5/2 +
             ARD. ``"additive_interaction"`` uses a sum-of-1D additive kernel
-            plus a full ARD interaction kernel (NAIAD, Qin et al. ICML 2025).
+            plus a full ARD interaction kernel.
             ``"shared"`` uses Matern 5/2 with a single shared lengthscale
             (fewest parameters, best for sparse data regimes).
         cat_dims: List of column indices in X that are categorical (integer-
@@ -1719,10 +2005,10 @@ def fit_gp_botorch(
             for SAASBO and LassoBO. (default: 1 = single fit)
         explicit_priors: If True, set explicit priors on GP hyperparameters:
             LogNormal lengthscale prior (Hvarfner et al. ICML 2024) +
-            Gamma(3, 6) noise prior (Cosenza 2022). Applies to MAP paths
-            only (standard, MixedSingleTaskGP, per-type-GP, multi-fidelity).
-            Ignored for SAASBO and LassoBO which have their own priors.
-            (default: False)
+            Gamma(1.1, 0.05) noise prior (pipeline heuristic). Applies to MAP
+            paths only (standard, MixedSingleTaskGP, per-type-GP,
+            multi-fidelity). Ignored for SAASBO and LassoBO which have their
+            own priors. (default: False)
         input_warp: If True, apply Kumaraswamy CDF input warping to all
             continuous input dimensions (Kanda 2022). Learns non-linear
             monotonic transforms per dimension, automatically handling
@@ -2238,6 +2524,11 @@ def recommend_next_experiments(
 ) -> pd.DataFrame:
     """Use acquisition function to recommend next experiments.
 
+    When ``use_multi_objective=True``, uses qLogNoisyExpectedHypervolume
+    Improvement (qLogNEHVI) from Daulton et al. (2020), "Differentiable
+    Expected Hypervolume Improvement for Parallel Multi-Objective Bayesian
+    Optimization", NeurIPS, arXiv:2006.05078.
+
     Args:
         model: Fitted BoTorch GP model.
         train_X: Training X tensor.
@@ -2539,7 +2830,9 @@ def validate_fidelity_correlation(
         - details: str (human-readable explanation)
         - n_overlap: int (number of overlapping conditions)
 
-    3-zone decision gate (Sabanza-Gil 2025, thresholds from config):
+    3-zone decision gate (Sabanza-Gil et al. 2025, Nature Computational
+    Science 5(7):572-581, DOI:10.1038/s43588-025-00822-9; thresholds from
+    config):
         - R² > FIDELITY_R2_THRESHOLDS["skip"]: fidelities redundant, skip MF-BO
         - R² < FIDELITY_R2_THRESHOLDS["drop"]: fidelities too divergent, single-fidelity only
         - in between: MF-BO is appropriate
@@ -2787,7 +3080,13 @@ def compute_convergence_diagnostics(
 ) -> dict:
     """Compute convergence diagnostics for the GP-BO loop.
 
-    Tracks three signals of convergence (Narayanan et al. 2025):
+    Tracks three convergence signals and an adaptive batch sizing rule,
+    all original to this pipeline.  Inspired by convergence monitoring
+    concepts in Narayanan et al. (2025, DOI:10.1038/s41467-025-61113-5),
+    but the specific metrics below are not from that paper.  See also
+    Sabanza-Gil et al. (2025, DOI:10.1038/s43588-025-00822-9) for
+    multi-fidelity convergence considerations.
+
     1. **Mean posterior std**: average posterior standard deviation across
        the design space — drops as the GP gains coverage.
     2. **Max acquisition value**: the peak acquisition function value for
@@ -3359,7 +3658,11 @@ def refine_target_profile(
     original_target: pd.Series,
     learning_rate: float = 0.3,
 ) -> pd.Series:
-    """Refine a target composition profile using observed data (DeMeo 2025).
+    """Refine a target composition profile using observed data.
+
+    Inspired by the lab-in-the-loop signature refinement concept from
+    DeMeo et al. (2025, DOI:10.1126/science.adi8577), but the specific
+    softmax-weighted interpolation algorithm is original to this pipeline.
 
     After Round 1, update the target profile by interpolating between the
     original reference (e.g., Braun fetal brain) and a "learned" profile
@@ -3484,6 +3787,7 @@ def run_gpbo_loop(
     per_fidelity_ard: bool = False,
     zero_passing: bool = False,
     desirability_gate: bool = False,
+    do_cellflow_relevance_check: bool = False,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -3521,7 +3825,7 @@ def run_gpbo_loop(
             0 = keep original, 1 = fully learned. (default: 0.3)
         kernel_type: Kernel structure for the GP. ``"ard"`` (default) uses
             Matern 5/2 + ARD. ``"additive_interaction"`` uses additive +
-            interaction decomposition (NAIAD, Qin et al. ICML 2025).
+            interaction decomposition.
             ``"shared"`` uses Matern 5/2 with shared lengthscale.
         multi_objective: If True, use multi-objective acquisition
             (qLogNoisyExpectedHypervolumeImprovement) instead of scalarized
@@ -3530,7 +3834,7 @@ def run_gpbo_loop(
             noise estimation. The top-scoring new conditions are duplicated.
             Set to 0 to disable. (default: 0)
         adaptive_complexity: If True, auto-select kernel complexity based on
-            the N/d ratio (NAIAD, Qin et al. ICML 2025). Overrides
+            the N/d ratio. Overrides
             ``kernel_type`` and ``use_saasbo``. (default: False)
         timing_windows: If True, append categorical timing window columns
             to the training data and use MixedSingleTaskGP for mixed
@@ -3563,8 +3867,8 @@ def run_gpbo_loop(
             hyperparameters and keeps the fit with the highest MLL.
             Only applies to MAP fitting paths. (default: 1)
         explicit_priors: If True, set explicit priors on GP hyperparameters:
-            LogNormal lengthscale prior + Gamma(3, 6) noise prior
-            (Cosenza 2022). Only applies to MAP fitting paths. (default: False)
+            LogNormal lengthscale prior + Gamma(1.1, 0.05) noise prior
+            (pipeline heuristic). Only applies to MAP fitting paths. (default: False)
         mc_samples: Number of Sobol QMC samples for acquisition function
             evaluation (Cosenza 2022). Higher values reduce variance in
             acquisition estimates. Clamped to [1, 2048]. (default: 512)
@@ -3578,6 +3882,12 @@ def run_gpbo_loop(
             (Cosenza 2022). Generates 2x candidates, penalises antagonist pathway
             conflicts via D(x) = phi(x) * acq(x), and keeps the top N.
             (default: False)
+        do_cellflow_relevance_check: If True, run LOO-CV relevance check
+            after merging CellFlow data. Compares LOO-RMSE on real data
+            with and without CellFlow. If CellFlow worsens predictions,
+            it is excluded and a warning is logged. Follows the rMFBO
+            approach (Mikkola et al. 2023, arXiv:2210.13937). Only runs
+            when CellFlow data (fidelity=0.0) is present. (default: False)
 
         use_alr: If True, use additive log-ratio transform instead of ILR.
             ALR uses the last component as reference: z_j = log(y_j / y_D).
@@ -3671,6 +3981,38 @@ def run_gpbo_loop(
             X, Y = X_real, Y_real
     else:
         X, Y = X_real, Y_real
+
+    # CellFlow LOO-CV relevance check (rMFBO, Mikkola et al. 2023)
+    # After merging, verify that CellFlow data actually helps GP predictions.
+    # If it worsens LOO-RMSE on real data, drop it and fall back to real-only.
+    if (
+        do_cellflow_relevance_check
+        and "fidelity" in X.columns
+        and (X["fidelity"] == 0.0).any()
+    ):
+        logger.info("Running CellFlow relevance check (LOO-CV)...")
+        relevance = cellflow_relevance_check(X, Y, X_real, Y_real)
+        if not relevance["cellflow_helps"]:
+            logger.warning(
+                "CellFlow relevance check FAILED: LOO-RMSE worsened by %.1f%%. "
+                "Excluding CellFlow data and using real + CellRank2 only. "
+                "See Mikkola et al. 2023 (arXiv:2210.13937) for rMFBO rationale.",
+                -relevance["improvement_pct"],
+            )
+            # Remove CellFlow rows (fidelity=0.0) from merged data
+            keep_mask = X["fidelity"] != 0.0
+            X = X.loc[keep_mask].copy()
+            Y = Y.loc[keep_mask].copy()
+            # If only real data remains, drop fidelity column too
+            if X["fidelity"].nunique() == 1:
+                logger.info("Single fidelity remaining after CellFlow removal; "
+                            "dropping fidelity column")
+        else:
+            logger.info(
+                "CellFlow relevance check PASSED: LOO-RMSE improved by %.1f%%. "
+                "Keeping CellFlow data in training set.",
+                relevance["improvement_pct"],
+            )
 
     # Refine target profile using observed data (DeMeo 2025)
     if refine_target and target_profile is not None:
@@ -4081,9 +4423,9 @@ if __name__ == "__main__":
     parser.add_argument("--kernel", type=str, default="ard",
                         choices=["ard", "additive_interaction", "shared"],
                         help="GP kernel structure: 'ard' (Matern 5/2 + ARD, default), "
-                             "'additive_interaction' (NAIAD 2025), or 'shared' (single lengthscale)")
+                             "'additive_interaction', or 'shared' (single lengthscale)")
     parser.add_argument("--adaptive-complexity", action="store_true",
-                        help="Auto-select kernel complexity based on N/d ratio (NAIAD 2025). "
+                        help="Auto-select kernel complexity based on N/d ratio. "
                              "Overrides --kernel and --saasbo.")
     parser.add_argument("--timing-windows", action="store_true",
                         help="Append categorical timing window columns (early/mid/late) to "
@@ -4114,6 +4456,13 @@ if __name__ == "__main__":
                              "Values >1.0 spread predictions away from the mean to "
                              "counteract conservative bias (default: 1.0, no inflation). "
                              "Recommended: 2.0 (CELLFLOW_DEFAULT_VARIANCE_INFLATION).")
+    parser.add_argument("--cellflow-relevance-check", action="store_true",
+                        help="Run LOO-CV relevance check for CellFlow data "
+                             "(rMFBO, Mikkola et al. 2023). Compares LOO-RMSE "
+                             "on real data with and without CellFlow. If "
+                             "CellFlow worsens predictions, it is excluded. "
+                             "Adds compute cost (~N GP fits where N = number "
+                             "of real conditions).")
     parser.add_argument("--mll-restarts", type=int, default=1,
                         help="Number of random restarts for MLL optimisation "
                              "(Kanda 2022, Cosenza 2022). Each restart re-initialises "
@@ -4122,7 +4471,7 @@ if __name__ == "__main__":
     parser.add_argument("--explicit-priors", action="store_true",
                         help="Set explicit priors on GP hyperparameters: "
                              "LogNormal lengthscale prior (Hvarfner 2024) + "
-                             "Gamma(3,6) noise prior (Cosenza 2022). "
+                             "Gamma(1.1, 0.05) noise prior (pipeline heuristic). "
                              "Only applies to MAP paths.")
     parser.add_argument("--mc-samples", type=int, default=512,
                         help="Number of Sobol QMC samples for acquisition "
@@ -4337,6 +4686,7 @@ if __name__ == "__main__":
         per_fidelity_ard=args.per_fidelity_ard,
         zero_passing=args.zero_passing,
         desirability_gate=args.desirability_gate,
+        do_cellflow_relevance_check=args.cellflow_relevance_check,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
