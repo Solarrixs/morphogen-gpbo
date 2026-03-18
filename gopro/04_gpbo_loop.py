@@ -2415,6 +2415,13 @@ def _select_replicate_conditions(
         else:
             cols = active_cols
         X_active = train_X[cols].copy()
+        # Remap fidelity to match the values the MF-GP was trained on (R9-C-1).
+        # The DataFrame still has original fidelity (e.g. 1.0) but the model
+        # was trained with FIDELITY_KERNEL_REMAP values (e.g. 2/3).
+        if "fidelity" in X_active.columns:
+            X_active["fidelity"] = X_active["fidelity"].map(
+                lambda v: FIDELITY_KERNEL_REMAP.get(v, v)
+            )
         X_tensor = torch.tensor(X_active.values, dtype=DTYPE, device=DEVICE)
         with torch.no_grad():
             posterior = model.posterior(X_tensor)
