@@ -54,3 +54,10 @@
 3. **[A-W-007] Hardcoded h5ad path in `generate_report()`** (`visualize_report.py:1081`)
    - `"amin_kelley_mapped.h5ad"` ignored `output_prefix` parameter. UMAP section silently missing for SAG screen reports.
    - Fix: Changed to `f"{output_prefix}_mapped.h5ad"`.
+
+## Bug Hunter Fixes (Round 9 — 2026-03-17)
+
+### Critical Fix
+1. **[BF-R9-C-1] Un-remapped fidelity in `_select_replicate_conditions`** (`04_gpbo_loop.py:2417`)
+   - When MF-GP is active, `_select_replicate_conditions` passed un-remapped fidelity (1.0) to `model.posterior()`, but model was trained with `FIDELITY_KERNEL_REMAP[1.0] = 2/3`. Produced out-of-distribution posterior variance for replicate selection.
+   - Fix: Added `FIDELITY_KERNEL_REMAP` mapping to fidelity column before `model.posterior()` call.
