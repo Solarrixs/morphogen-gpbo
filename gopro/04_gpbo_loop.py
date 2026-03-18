@@ -131,13 +131,13 @@ def _fidelity_to_task_idx(
     """
     unique_fids = sorted(fidelity_values.unique().tolist())
     fidelity_map = {f: i for i, f in enumerate(unique_fids)}
-    task_idx = torch.zeros_like(fidelity_values, dtype=torch.long)
-    for fid_val, idx in fidelity_map.items():
-        mask = torch.isclose(
-            fidelity_values, torch.tensor(fid_val, dtype=fidelity_values.dtype)
-        )
-        task_idx[mask] = idx
-    return task_idx.to(dtype=fidelity_values.dtype), fidelity_map
+    # Direct dict lookup — O(N) and avoids torch.isclose fragility on
+    # exact float constants (0.0, 0.5, 1.0) assigned by merge_multi_fidelity_data.
+    task_idx = torch.tensor(
+        [fidelity_map[f] for f in fidelity_values.tolist()],
+        dtype=fidelity_values.dtype,
+    )
+    return task_idx, fidelity_map
 
 
 def _build_per_fidelity_ard_model(
@@ -1013,9 +1013,12 @@ def _extract_lengthscales(model, n_input_dims: int):
     """
     try:
         # Per-fidelity ARD: return base (shared) lengthscales
-        pf_ls = _extract_per_fidelity_ard_lengthscales(model)
-        if pf_ls is not None:
-            return pf_ls["base"]
+        # Only probe models with AdditiveKernel structure (2 sub-kernels)
+        covar = getattr(model, "covar_module", None)
+        if covar is not None and hasattr(covar, "kernels") and len(covar.kernels) == 2:
+            pf_ls = _extract_per_fidelity_ard_lengthscales(model)
+            if pf_ls is not None:
+                return pf_ls["base"]
 
         # ModelListGP of SAAS models — median across sub-models
         if hasattr(model, 'models'):
@@ -1878,13 +1881,15 @@ def fit_gp_botorch(
 
     # Report kernel parameters
     logger.info("GP Kernel Parameters:")
-    lengthscales = _extract_lengthscales(model, train_X.shape[1])
+    morph_cols = [c for c in X.columns if c != "fidelity"]
+    # Extract per-fidelity ARD lengthscales once (reused for both summary and detail)
+    pf_ls = _extract_per_fidelity_ard_lengthscales(model) if per_fidelity_ard else None
+    lengthscales = pf_ls["base"] if pf_ls is not None else _extract_lengthscales(model, train_X.shape[1])
     if lengthscales is not None:
         importance = 1.0 / np.maximum(lengthscales, 1e-6)
-        # Align lengthscales to column names (per-fidelity ARD may have
-        # fewer dims than X.columns since fidelity is handled by IndexKernel)
+        # Per-fidelity ARD lengthscales cover morphogen dims only (no fidelity col)
+        col_names = morph_cols if per_fidelity_ard else list(X.columns)
         n_ls = len(importance)
-        col_names = [c for c in X.columns if c != "fidelity"] if n_ls < len(X.columns) else list(X.columns)
         morph_importance = pd.Series(importance[:len(col_names)], index=col_names[:n_ls])
         morph_importance = morph_importance.sort_values(ascending=False)
         logger.info("Morphogen importance (1/lengthscale):")
@@ -1894,19 +1899,16 @@ def fit_gp_botorch(
         logger.info("(lengthscales not directly accessible for this model type)")
 
     # Per-fidelity ARD: log both base and residual lengthscales
-    if per_fidelity_ard:
-        pf_ls = _extract_per_fidelity_ard_lengthscales(model)
-        if pf_ls is not None:
-            morph_cols = [c for c in X.columns if c != "fidelity"]
-            for key in ("base", "residual"):
-                if key in pf_ls:
-                    ls_series = pd.Series(
-                        pf_ls[key][:len(morph_cols)], index=morph_cols,
-                    )
-                    imp = (1.0 / ls_series.clip(lower=1e-6)).sort_values(ascending=False)
-                    logger.info("Per-fidelity ARD %s importance:", key)
-                    for m, v in imp.head(6).items():
-                        logger.info("  %s: %.4f", m, v)
+    if pf_ls is not None:
+        for key in ("base", "residual"):
+            if key in pf_ls:
+                ls_series = pd.Series(
+                    pf_ls[key][:len(morph_cols)], index=morph_cols,
+                )
+                imp = (1.0 / ls_series.clip(lower=1e-6)).sort_values(ascending=False)
+                logger.info("Per-fidelity ARD %s importance:", key)
+                for m, v in imp.head(6).items():
+                    logger.info("  %s: %.4f", m, v)
 
     # Per-output lengthscale matrix for per-type GP interpretability
     if per_type_gp and hasattr(model, 'models'):
@@ -3465,6 +3467,13 @@ def run_gpbo_loop(
     else:
         rec_cols = list(X_active.columns)
         rec_bounds = active_bounds
+    # Per-fidelity ARD: fix fidelity to highest task index (not FIDELITY_KERNEL_REMAP).
+    # The model uses IndexKernel with integer task indices, so acquisition must
+    # optimize at the highest-fidelity task index to get real-experiment predictions.
+    if per_fidelity_ard and "fidelity" in rec_bounds:
+        n_fid = int(X["fidelity"].nunique())
+        hf_idx = float(n_fid - 1)
+        rec_bounds["fidelity"] = (hf_idx, hf_idx)
 
     # Reserve wells for replicates if requested
     n_novel = max(1, n_recommendations - n_replicates)
