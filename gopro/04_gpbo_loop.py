@@ -1045,6 +1045,60 @@ def ilr_inverse(Z: np.ndarray, D: int) -> np.ndarray:
     return x / x.sum(axis=1, keepdims=True)
 
 
+def alr_transform(
+    Y: np.ndarray,
+    pseudocount: float | None = None,
+    return_safe: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    """Additive log-ratio transform for compositional data.
+
+    Transforms D-part compositions to (D-1)-dimensional real space using
+    the last component as reference: z_j = log(y_j / y_D).
+
+    Simpler than ILR (no Helmert basis) but introduces asymmetry — the
+    reference component is treated differently. Useful as a comparison
+    baseline for ILR.
+
+    Args:
+        Y: Array of shape (N, D) with rows summing to 1.
+        pseudocount: Replacement value for zeros in multiplicative
+            replacement.  If None, uses the default from
+            ``_multiplicative_replacement`` (~0.65/(D*100)).
+        return_safe: If True, return ``(Z, Y_safe)`` where ``Y_safe`` is
+            the zero-replaced composition array.
+
+    Returns:
+        Array of shape (N, D-1) in ALR space, or ``(Z, Y_safe)`` tuple
+        when *return_safe* is True.
+    """
+    Y_safe = _multiplicative_replacement(Y, delta=pseudocount)
+    # ALR: log(y_j / y_D) for j = 0..D-2, using last column as reference
+    Z = np.log(Y_safe[:, :-1]) - np.log(Y_safe[:, -1:])
+    if return_safe:
+        return Z, Y_safe
+    return Z
+
+
+def alr_inverse(Z: np.ndarray, D: int) -> np.ndarray:
+    """Inverse ALR transform: (D-1) real coordinates → D-part composition.
+
+    Args:
+        Z: Array of shape (N, D-1) in ALR space.
+        D: Number of composition parts.
+
+    Returns:
+        Array of shape (N, D) with rows summing to 1.
+    """
+    # y_j = exp(z_j) / (1 + sum(exp(z))), y_D = 1 / (1 + sum(exp(z)))
+    # Numerically stable via softmax formulation:
+    # Append a 0 for the reference component, then softmax.
+    Z_aug = np.concatenate([Z, np.zeros((Z.shape[0], 1))], axis=1)  # (N, D)
+    Z_aug -= Z_aug.max(axis=1, keepdims=True)
+    exp_z = np.exp(Z_aug)
+    y = exp_z / exp_z.sum(axis=1, keepdims=True)
+    return y
+
+
 def _helmert_basis_torch(D: int) -> torch.Tensor:
     """Construct the Helmert ILR basis matrix as a torch tensor.
 
@@ -1316,6 +1370,7 @@ def fit_tvr_models(
     Y: pd.DataFrame,
     target_cell_types: Optional[list[str]] = None,
     use_ilr: bool = True,
+    use_alr: bool = False,
     pseudocount: float | None = None,
     explicit_priors: bool = False,
 ) -> tuple:
@@ -1357,9 +1412,12 @@ def fit_tvr_models(
         Y_selected = Y
     cell_type_cols = list(Y_selected.columns)
 
-    # Prepare Y values (ILR transform if applicable)
+    # Prepare Y values (ILR/ALR transform if applicable)
     Y_values = Y_selected.values
-    if use_ilr and Y_values.shape[1] > 1:
+    if use_alr and Y_values.shape[1] > 1:
+        logger.info("Applying ALR transform to compositional Y data...")
+        Y_values = alr_transform(Y_values, pseudocount=pseudocount)
+    elif use_ilr and Y_values.shape[1] > 1:
         logger.info("Applying ILR transform to compositional Y data...")
         Y_values = ilr_transform(Y_values, pseudocount=pseudocount)
 
@@ -1584,6 +1642,7 @@ def fit_gp_botorch(
     Y: pd.DataFrame,
     target_cell_types: Optional[list[str]] = None,
     use_ilr: bool = True,
+    use_alr: bool = False,
     use_saasbo: bool = False,
     saasbo_warmup: int = 256,
     saasbo_num_samples: int = 128,
@@ -1612,6 +1671,8 @@ def fit_gp_botorch(
         Y: Cell type fraction matrix.
         target_cell_types: List of cell types to optimize. If None, uses all.
         use_ilr: Whether to apply ILR transform to Y.
+        use_alr: If True, use ALR transform instead of ILR. Mutually
+            exclusive with use_ilr (ALR takes precedence).
         use_saasbo: Use SAASBO (fully Bayesian GP with sparsity prior).
             Ignored when multi-fidelity data is detected.
         saasbo_warmup: NUTS warmup steps for SAASBO.
@@ -1703,7 +1764,13 @@ def fit_gp_botorch(
 
     # Track zero-replaced compositions for delta-method variance propagation
     Y_safe_for_jacobian = None
-    if use_ilr and Y_values.shape[1] > 1:
+    if use_alr and Y_values.shape[1] > 1:
+        logger.info("Applying ALR transform to compositional Y data...")
+        Y_values, Y_safe_for_jacobian = alr_transform(
+            Y_values, pseudocount=pseudocount, return_safe=True
+        )
+        logger.info("ALR-transformed Y shape: %s", Y_values.shape)
+    elif use_ilr and Y_values.shape[1] > 1:
         logger.info("Applying ILR transform to compositional Y data...")
         Y_values, Y_safe_for_jacobian = ilr_transform(
             Y_values, pseudocount=pseudocount, return_safe=True
@@ -1718,18 +1785,30 @@ def fit_gp_botorch(
         # Align columns to selected cell types (index already aligned by caller)
         nv = noise_variance.reindex(columns=Y_selected.columns).fillna(0.0)
         nv_values = nv.values
-        if use_ilr and nv_values.shape[1] > 1:
-            # Delta-method: Var_ilr = J @ diag(var_comp) @ J^T per row,
-            # where J = diag(1/y) @ V is the Jacobian of log(y) @ V.
+        if (use_ilr or use_alr) and nv_values.shape[1] > 1:
+            # Delta-method variance propagation through log-ratio transform.
+            # ALR Jacobian: J = diag(1/y[:-1]) with ref column subtracted.
+            # ILR Jacobian: J = diag(1/y) @ V (Helmert basis).
             D = nv_values.shape[1]
-            V = _helmert_basis(D)  # (D, D-1)
             Y_safe = Y_safe_for_jacobian
-            ilr_var = np.empty((nv_values.shape[0], D - 1))
+            transformed_var = np.empty((nv_values.shape[0], D - 1))
             for i in range(nv_values.shape[0]):
-                J = np.diag(1.0 / Y_safe[i]) @ V  # (D, D-1)
-                cov_ilr = J.T @ np.diag(nv_values[i]) @ J  # (D-1, D-1)
-                ilr_var[i] = np.diag(cov_ilr)
-            nv_values = ilr_var
+                if use_alr:
+                    # ALR: z_j = log(y_j) - log(y_D)
+                    # dz_j/dy_j = 1/y_j, dz_j/dy_D = -1/y_D
+                    # Var(z_j) = var_j/y_j^2 + var_D/y_D^2
+                    y = Y_safe[i]
+                    var = nv_values[i]
+                    for j in range(D - 1):
+                        transformed_var[i, j] = (
+                            var[j] / (y[j] ** 2) + var[-1] / (y[-1] ** 2)
+                        )
+                else:
+                    V = _helmert_basis(D)  # (D, D-1)
+                    J = np.diag(1.0 / Y_safe[i]) @ V  # (D, D-1)
+                    cov_ilr = J.T @ np.diag(nv_values[i]) @ J  # (D-1, D-1)
+                    transformed_var[i] = np.diag(cov_ilr)
+            nv_values = transformed_var
         train_Yvar = torch.tensor(nv_values, dtype=DTYPE, device=DEVICE)
         train_Yvar = torch.clamp(train_Yvar, min=FIXED_NOISE_MIN_VARIANCE)
         logger.info(
@@ -2148,6 +2227,7 @@ def recommend_next_experiments(
     use_multi_objective: bool = False,
     ref_point: Optional[list[float]] = None,
     use_ilr: bool = False,
+    use_alr: bool = False,
     n_composition_parts: int = 0,
     cell_type_cols: Optional[list[str]] = None,
     target_profile: Optional[pd.Series] = None,
@@ -2251,9 +2331,8 @@ def recommend_next_experiments(
         if train_Y.shape[1] > 1:
             from botorch.acquisition.objective import GenericMCObjective
 
-            if use_ilr and n_composition_parts > 1:
+            if (use_ilr or use_alr) and n_composition_parts > 1:
                 D = n_composition_parts
-                V_T = _helmert_basis_torch(D).T  # (D-1, D)
 
                 # Build target weights for composition-space scalarization
                 if target_profile is not None and cell_type_cols is not None:
@@ -2272,22 +2351,33 @@ def recommend_next_experiments(
                     # Equal weights in composition space = maximize mean cell type fraction.
                     comp_weights = torch.ones(D, dtype=DTYPE, device=DEVICE) / D
 
-                def _composition_scalarization(samples, X=None):
-                    # samples: (..., D-1) in ILR space
-                    log_x = samples @ V_T  # (..., D)
-                    log_x = log_x - log_x.max(dim=-1, keepdim=True).values
-                    x = torch.exp(log_x)
-                    comp = x / x.sum(dim=-1, keepdim=True)  # (..., D)
-                    # When target_profile is set, comp_weights is the unit target
-                    # vector so this dot product is (unnormalized) cosine similarity
-                    # since comp is already normalized (sums to 1).
-                    return (comp * comp_weights).sum(dim=-1)
+                if use_alr:
+                    def _composition_scalarization(samples, X=None):
+                        # samples: (..., D-1) in ALR space
+                        # ALR inverse: softmax with implicit reference=0
+                        z_shifted = samples - samples.max(dim=-1, keepdim=True).values.clamp(min=0)
+                        exp_z = torch.exp(z_shifted)
+                        denom = 1.0 + exp_z.sum(dim=-1, keepdim=True)
+                        comp = torch.cat([exp_z / denom, 1.0 / denom], dim=-1)
+                        comp = comp / comp.sum(dim=-1, keepdim=True)
+                        return (comp * comp_weights).sum(dim=-1)
+                else:
+                    V_T = _helmert_basis_torch(D).T  # (D-1, D)
+
+                    def _composition_scalarization(samples, X=None):
+                        # samples: (..., D-1) in ILR space
+                        log_x = samples @ V_T  # (..., D)
+                        log_x = log_x - log_x.max(dim=-1, keepdim=True).values
+                        x = torch.exp(log_x)
+                        comp = x / x.sum(dim=-1, keepdim=True)  # (..., D)
+                        return (comp * comp_weights).sum(dim=-1)
 
                 objective = GenericMCObjective(_composition_scalarization)
 
                 # Compute best_f in composition space from training data
                 train_Y_np = train_Y.cpu().numpy()
-                train_comp = ilr_inverse(train_Y_np, n_composition_parts)
+                inv_fn = alr_inverse if use_alr else ilr_inverse
+                train_comp = inv_fn(train_Y_np, n_composition_parts)
                 comp_weights_np = comp_weights.cpu().numpy()
                 best_f = float((train_comp @ comp_weights_np).max())
             else:
@@ -2384,9 +2474,10 @@ def recommend_next_experiments(
     is_duplicate = [False] * n_unique + [True] * n_duplicates
     recommendations["is_qc_duplicate"] = is_duplicate[:len(recommendations)]
 
-    # Add predictions: convert from ILR space back to composition space if applicable
-    if use_ilr and n_composition_parts > 1 and cell_type_cols is not None:
-        pred_compositions = ilr_inverse(pred_mean, n_composition_parts)
+    # Add predictions: convert from log-ratio space back to composition space if applicable
+    if (use_ilr or use_alr) and n_composition_parts > 1 and cell_type_cols is not None:
+        inv_fn = alr_inverse if use_alr else ilr_inverse
+        pred_compositions = inv_fn(pred_mean, n_composition_parts)
         for i, ct_name in enumerate(cell_type_cols):
             recommendations[f"predicted_{ct_name}"] = pred_compositions[:, i]
         # Note: ILR-space std cannot be meaningfully inverse-transformed to
@@ -2817,6 +2908,7 @@ def compute_ensemble_disagreement(
     Y: pd.DataFrame,
     n_restarts: int = ENSEMBLE_DEFAULT_N_RESTARTS,
     use_ilr: bool = True,
+    use_alr: bool = False,
     kernel_type: Literal["ard", "additive_interaction", "shared"] = "ard",
     cat_dims: Optional[list[int]] = None,
     per_type_gp: bool = False,
@@ -2910,6 +3002,7 @@ def compute_ensemble_disagreement(
                 model_i, _, _, _ = fit_gp_botorch(
                     X, Y,
                     use_ilr=use_ilr,
+                    use_alr=use_alr,
                     kernel_type=kernel_type,
                     cat_dims=cat_dims,
                     per_type_gp=per_type_gp,
@@ -3358,6 +3451,7 @@ def run_gpbo_loop(
     n_recommendations: int = 24,
     round_num: int = 1,
     use_ilr: bool = True,
+    use_alr: bool = False,
     virtual_sources: Optional[list[tuple[Path, Path, float]]] = None,
     use_saasbo: bool = False,
     use_lassobo: bool = False,
@@ -3483,9 +3577,25 @@ def run_gpbo_loop(
             conflicts via D(x) = phi(x) * acq(x), and keeps the top N.
             (default: False)
 
+        use_alr: If True, use additive log-ratio transform instead of ILR.
+            ALR uses the last component as reference: z_j = log(y_j / y_D).
+            Simpler than ILR but introduces asymmetry. Mutually exclusive
+            with use_ilr — when use_alr is True, use_ilr is ignored.
+            (default: False)
+
     Returns:
         DataFrame of recommended next experiments.
     """
+    # Guard: ALR and ILR are mutually exclusive log-ratio transforms
+    if use_alr and not use_ilr:
+        raise ValueError(
+            "--alr and --no-ilr are mutually exclusive: ALR is itself a "
+            "log-ratio transform, so --no-ilr would disable it."
+        )
+    # When ALR is active, suppress ILR (ALR takes precedence)
+    if use_alr:
+        use_ilr = False
+
     logger.info("--- GP-BO ROUND %d ---", round_num)
 
     # Guard: TVR + multi-objective is unsupported — TVRModelEnsemble's
@@ -3688,6 +3798,7 @@ def run_gpbo_loop(
             X_active, Y,
             target_cell_types=target_cell_types,
             use_ilr=use_ilr,
+            use_alr=use_alr,
             pseudocount=pseudocount,
             explicit_priors=explicit_priors,
         )
@@ -3698,6 +3809,7 @@ def run_gpbo_loop(
             X_active, Y,
             target_cell_types=target_cell_types,
             use_ilr=use_ilr,
+            use_alr=use_alr,
             use_saasbo=kernel_spec.use_saasbo,
             use_lassobo=use_lassobo,
             lassobo_alpha=lassobo_alpha,
@@ -3749,6 +3861,7 @@ def run_gpbo_loop(
         n_recommendations=n_novel,
         use_multi_objective=multi_objective,
         use_ilr=use_ilr,
+        use_alr=use_alr,
         n_composition_parts=len(cell_type_cols),
         cell_type_cols=cell_type_cols,
         target_profile=target_profile,
@@ -3872,6 +3985,7 @@ def run_gpbo_loop(
                 X_active, Y,
                 n_restarts=ensemble_restarts,
                 use_ilr=use_ilr,
+                use_alr=use_alr,
                 kernel_type=kernel_spec.kernel_type,
                 cat_dims=timing_cat_dims,
                 per_type_gp=per_type_gp,
@@ -3912,6 +4026,10 @@ if __name__ == "__main__":
                         help="Optimization round number (default: 1)")
     parser.add_argument("--no-ilr", action="store_true",
                         help="Disable ILR transform")
+    parser.add_argument("--alr", action="store_true",
+                        help="Use additive log-ratio (ALR) transform instead of ILR. "
+                             "ALR uses the last component as reference: z_j = log(y_j/y_D). "
+                             "Simpler than ILR but introduces asymmetry.")
     parser.add_argument("--pseudocount", type=float, default=None,
                         help="Zero-replacement value for multiplicative replacement before ILR "
                              "transform (default: 0.65/(D*100) ≈ 3.8e-4 for 17 cell types). "
@@ -4192,6 +4310,7 @@ if __name__ == "__main__":
         n_recommendations=args.n_recommendations,
         round_num=args.round,
         use_ilr=not args.no_ilr,
+        use_alr=args.alr,
         virtual_sources=virtual_sources if virtual_sources else None,
         use_saasbo=args.saasbo,
         use_lassobo=args.lassobo,

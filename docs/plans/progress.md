@@ -1,5 +1,102 @@
 # Progress Log
 
+## Iteration 23 — 2026-03-18
+- Task: TODO-11 — ILR vs ALR comparison (`--alr`) (§1.4 GP Model Improvements)
+- Result: pass
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Added `alr_transform()`, `alr_inverse()` functions; `use_alr` param threaded through `fit_gp_botorch`, `fit_tvr_models`, `recommend_next_experiments`, `compute_ensemble_disagreement`, `run_gpbo_loop`; `--alr` CLI flag; ALR delta-method variance propagation; differentiable ALR inverse for acquisition scalarization; mutual exclusivity guard
+  - `gopro/tests/test_unit.py` — Added `TestALRTransform` class with 7 tests (dimension reduction, roundtrip, zeros, reference component, return_safe, uniform, sums-to-one)
+  - `docs/task_plan.md` — Marked TODO-11 complete, updated test count to 679
+  - `docs/plans/handoff.md`, `docs/plans/progress.md` — updated
+- Tests: 679 passing (was 672)
+- Notes: §1.4 GP Model Improvements: 11/13 done. Remaining: TODO-8 (spike-and-slab, high effort), TODO-10 (Dirichlet).
+
+## Iteration 22 — 2026-03-18T09:08:26Z
+- Task: TODO-7 — Desirability-based feasibility gate (`--desirability-gate`) (§1.4 GP Model Improvements) + simplify pass (redundant compute_desirability call removal, per-pathway debug logging)
+- Result: pass
+- Commits:
+  - `757eb62` [ralph-16] TODO-7: Desirability-based feasibility gate (--desirability-gate)
+  - `8b6c435` [ralph-simplify] Remove redundant compute_desirability call, add per-pathway debug logging
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Added `compute_desirability()`, `ANTAGONIST_PAIRS` constant; `--desirability-gate` CLI flag; generates 2x candidates, scores and keeps top N; simplify pass removed redundant call, added per-pathway debug logging (+18/-1 lines net)
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass removed redundant `compute_desirability` call and added per-pathway debug logging for troubleshooting. 9 files changed, +281/-119 lines.
+- Tests: 672 passing (was 662)
+- Notes: §1.4 GP Model Improvements: 10/13 done (TODO-5, TODO-6, TODO-7, TODO-9, TODO-27, TODO-28, TODO-29, TODO-30, TODO-31, TODO-32). Remaining: TODO-8 (spike-and-slab), TODO-10 (Dirichlet), TODO-11 (ILR vs ALR).
+
+## Iteration 21 — 2026-03-18T08:50:35Z
+- Task: TODO-6 — Zero-passing kernel (`--zero-passing`) (§1.4 GP Model Improvements) + simplify pass (dead code removal)
+- Result: pass
+- Commits:
+  - `4962c7d` [ralph-15] TODO-6: Zero-passing kernel (--zero-passing)
+  - `73e0d42` [ralph-simplify] Remove dead code from ZeroPassingKernel: orphaned _phi and forward methods after return statement
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Added `ZeroPassingKernel` via lazy factory `_get_zero_passing_kernel_class()`; smooth mask `phi(x) = 1 - exp(-||x_conc||^2 / eps)` forces k(0,x)=0 for concentration inputs; `--zero-passing` CLI flag; wired into standard and per-type-GP MAP paths; simplify pass removed orphaned `_phi` and `forward` methods after return statement (-27 lines)
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass removed dead code (orphaned `_phi` and `forward` methods that were unreachable after a return statement in ZeroPassingKernel). 9 files changed, +252/-143 lines.
+- Tests: 662 passing (was 654)
+- Notes: §1.4 GP Model Improvements: 9/13 done (TODO-5, TODO-6, TODO-9, TODO-27, TODO-28, TODO-29, TODO-30, TODO-31, TODO-32). Remaining: TODO-7 (desirability gate), TODO-8 (spike-and-slab), TODO-10 (Dirichlet), TODO-11 (ILR vs ALR).
+
+## Iteration 20 — 2026-03-18T08:31:16Z
+- Task: TODO-5 — Per-fidelity ARD lengthscales (`--per-fidelity-ard`) (§1.4 GP Model Improvements) + simplify pass
+- Result: pass
+- Commits:
+  - `887a0b5` [ralph-14] TODO-5: Per-fidelity ARD lengthscales (--per-fidelity-ard)
+  - `f81dc9b` [ralph-simplify] Fix per-fidelity ARD review issues: acquisition bounds, double extraction, heuristic
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Added `_fidelity_to_task_idx()`, `_build_per_fidelity_ard_model()`, `_extract_per_fidelity_ard_lengthscales()`; `--per-fidelity-ard` CLI flag; simplify pass fixed acquisition bounds, double extraction, heuristic (+63/-48 lines)
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass fixed acquisition bounds for per-fidelity ARD path, removed double lengthscale extraction, improved heuristic. 9 files changed, +274/-143 lines.
+- Tests: 654 passing (was 647)
+- Notes: §1.4 GP Model Improvements: 8/13 done (TODO-5, TODO-9, TODO-27, TODO-28, TODO-29, TODO-30, TODO-31, TODO-32). Remaining: TODO-6 (zero-passing kernel), TODO-7 (desirability gate), TODO-8 (spike-and-slab), TODO-10 (Dirichlet), TODO-11 (ILR vs ALR).
+
+## Iteration 18 — 2026-03-18T08:01:25Z
+- Task: TODO-27 — Kumaraswamy CDF input warping (`--input-warp`) (§1.4 GP Model Improvements) + simplify pass
+- Result: pass
+- Commits:
+  - `f1caa6b` [ralph-13] TODO-27: Kumaraswamy CDF input warping (--input-warp)
+  - `4bcd31d` [ralph-simplify] Fix input_warp review issues: log spam, MixedGP consistency
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Added `_build_input_transform(d, warp, cat_dims)` helper; `--input-warp` CLI flag; Kumaraswamy CDF warp via `ChainedInputTransform(warp=Warp(...), normalize=Normalize(...))` on MAP and per-type-GP paths; simplify pass fixed log spam and MixedGP consistency (+9/-9 lines)
+  - `gopro/tests/test_unit.py` — 5 new tests for input warping
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass fixed log spam (warping skip messages downgraded) and MixedGP consistency (input transform now applied uniformly). 9 files changed, +228/-120 lines.
+- Tests: 647 passing (was 642)
+- Notes: §1.4 GP Model Improvements: 7/13 done (TODO-9, TODO-27, TODO-28, TODO-29, TODO-30, TODO-31, TODO-32). Remaining: TODO-5 (per-fidelity ARD), TODO-6 (zero-passing kernel), TODO-7 (desirability gate), TODO-8 (spike-and-slab), TODO-10 (Dirichlet), TODO-11 (ILR vs ALR).
+
+## Iteration 17 — 2026-03-18T07:43:21Z
+- Task: TODO-32 — Sobol QMC sampler for acquisition functions (§1.4 GP Model Improvements) + simplify pass
+- Result: pass
+- Commits:
+  - `2aa572e` [ralph-12] TODO-32: Sobol QMC sampler for acquisition functions
+  - `09e43d1` [ralph-simplify] Warn on mc_samples clamping, DRY test setup
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Added `SobolQMCNormalSampler` to all 3 acquisition constructors; `--mc-samples N` CLI flag (default 512, max 2048); clamping with warning (+4 lines in simplify)
+  - `gopro/tests/test_unit.py` — 4 new tests for Sobol sampler; DRY'd test setup (+54/-36 lines net)
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass added warning on mc_samples clamping, DRY'd up test setup. 10 files changed, +246/-136 lines.
+- Tests: 642 passing (was 638)
+- Notes: §1.4 GP Model Improvements: 6/13 done (TODO-9, TODO-28, TODO-29, TODO-30, TODO-31, TODO-32). Next: TODO-27 (input warping), TODO-5 (per-fidelity ARD), or TODO-6 (zero-passing kernel).
+
+## Iteration 16 — 2026-03-18T07:25:03Z
+- Task: TODO-31 simplify pass — DRY TestFixedNoise tests, fix argparse % formatting
+- Result: pass
+- Commits:
+  - `1f1caee` [ralph-simplify] DRY TestFixedNoise tests, fix argparse % formatting
+  - `c577b1f` [ralph-11] TODO-31: FixedNoiseGP with heteroscedastic noise
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Fixed argparse % formatting (+10/-10 lines)
+  - `gopro/tests/test_unit.py` — DRY'd TestFixedNoise tests (+100/-100 lines net refactor)
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass DRY'd up TestFixedNoise test class (reduced duplication), fixed argparse metavar % formatting issue. 9 files changed, +228/-192 lines.
+- Notes: §1.4 GP Model Improvements: 5/13 done (TODO-9, TODO-28, TODO-29, TODO-30, TODO-31). Next: TODO-32 (Sobol QMC sampler), TODO-27 (input warping), or TODO-5 (per-fidelity ARD).
+
 ## Iteration 15 — 2026-03-18
 - Task: TODO-31 — FixedNoiseGP with heteroscedastic noise (§1.4)
 - Result: pass

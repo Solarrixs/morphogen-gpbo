@@ -77,6 +77,62 @@ class TestILRTransform:
         np.testing.assert_allclose(Y_safe, Y_recovered, atol=1e-10)
 
 
+class TestALRTransform:
+    """Tests for ALR (additive log-ratio) transform."""
+
+    def test_alr_reduces_dimension(self):
+        Y = np.array([[0.5, 0.3, 0.2], [0.1, 0.8, 0.1]])
+        Z = step04.alr_transform(Y)
+        assert Z.shape == (2, 2)
+
+    def test_alr_inverse_roundtrip(self):
+        Y = np.array([[0.5, 0.3, 0.2], [0.1, 0.8, 0.1], [0.33, 0.33, 0.34]])
+        Z = step04.alr_transform(Y)
+        Y_recovered = step04.alr_inverse(Z, D=3)
+        np.testing.assert_allclose(Y, Y_recovered, atol=1e-3)
+
+    def test_alr_handles_zeros(self):
+        """ALR handles zeros via multiplicative replacement."""
+        Y = np.array([[0.5, 0.5, 0.0]])
+        Z = step04.alr_transform(Y)
+        assert np.all(np.isfinite(Z))
+
+    def test_alr_reference_component(self):
+        """ALR uses last component as reference: z_j = log(y_j / y_D)."""
+        Y = np.array([[0.4, 0.3, 0.3]])  # No zeros → no replacement needed
+        Z = step04.alr_transform(Y)
+        # z_0 = log(0.4 / 0.3) = log(4/3) ≈ 0.288
+        # z_1 = log(0.3 / 0.3) = log(1) = 0
+        np.testing.assert_allclose(Z[0, 0], np.log(0.4 / 0.3), atol=1e-6)
+        np.testing.assert_allclose(Z[0, 1], np.log(0.3 / 0.3), atol=1e-6)
+
+    def test_alr_return_safe(self):
+        """return_safe returns both Z and Y_safe."""
+        Y = np.array([[0.5, 0.5, 0.0]])
+        Z, Y_safe = step04.alr_transform(Y, return_safe=True)
+        assert Z.shape == (1, 2)
+        assert Y_safe.shape == (1, 3)
+        assert np.all(Y_safe > 0)  # No zeros after replacement
+        # Roundtrip: ALR inverse of ALR-transformed safe data recovers it
+        Z_safe = step04.alr_transform(Y_safe)  # No zeros → no replacement
+        Y_recovered = step04.alr_inverse(Z_safe, D=3)
+        np.testing.assert_allclose(Y_safe, Y_recovered, atol=1e-10)
+
+    def test_alr_uniform_near_zero(self):
+        """Uniform composition → ALR coords near zero."""
+        Y = np.array([[0.25, 0.25, 0.25, 0.25]])
+        Z = step04.alr_transform(Y)
+        np.testing.assert_allclose(Z, np.zeros((1, 3)), atol=0.01)
+
+    def test_alr_inverse_sums_to_one(self):
+        """ALR inverse output always sums to 1."""
+        rng = np.random.default_rng(42)
+        Z = rng.standard_normal((10, 4))  # 5 composition parts
+        Y = step04.alr_inverse(Z, D=5)
+        np.testing.assert_allclose(Y.sum(axis=1), np.ones(10), atol=1e-10)
+        assert np.all(Y > 0)
+
+
 class TestMorphogenBounds:
     """Tests for morphogen bounds configuration."""
 
