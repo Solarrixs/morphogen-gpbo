@@ -1334,7 +1334,7 @@ def _build_input_transform(d: int, warp: bool, cat_dims: Optional[list[int]] = N
         logger.warning("Input warping requested but no continuous dims; skipping warp")
         return Normalize(d=d)
 
-    logger.info(
+    logger.debug(
         "Applying Kumaraswamy input warping to %d continuous dimensions", len(cont_indices)
     )
     normalize_kwargs = {"d": d, "indices": cont_indices} if cat_dims else {"d": d}
@@ -1616,6 +1616,8 @@ def fit_gp_botorch(
     elif cat_dims:
         # Mixed continuous+categorical GP (timing window encoding)
         from botorch.models import MixedSingleTaskGP
+        if input_warp:
+            logger.info("input_warp ignored — MixedSingleTaskGP uses its own handling")
         logger.info(
             "Using MixedSingleTaskGP with %d categorical dims at indices %s",
             len(cat_dims), cat_dims,
@@ -1625,9 +1627,8 @@ def fit_gp_botorch(
                 train_X,
                 train_Y,
                 cat_dims=cat_dims,
-                input_transform=Normalize(
-                    d=train_X.shape[1],
-                    indices=[i for i in range(train_X.shape[1]) if i not in cat_dims],
+                input_transform=_build_input_transform(
+                    train_X.shape[1], warp=False, cat_dims=cat_dims,
                 ),
                 outcome_transform=Standardize(m=train_Y.shape[1]),
             )
