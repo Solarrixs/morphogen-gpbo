@@ -2115,6 +2115,7 @@ def compute_desirability(
 
         # Both must exceed threshold to trigger penalty
         both_active = (ag_sum > antagonism_threshold) & (ant_sum > antagonism_threshold)
+        n_conflicts = int(both_active.sum())
 
         # Penalty = ratio of minority side to majority side
         # e.g., WNT agonist=5µM + WNT antagonist=2µM → penalty = 2/5 = 0.4
@@ -2125,6 +2126,12 @@ def compute_desirability(
             min_side / (max_side + 1e-12),
             0.0,
         )
+
+        if n_conflicts > 0:
+            logger.debug(
+                "Desirability: %s pathway — %d/%d candidates with agonist-antagonist conflict",
+                pathway, n_conflicts, n,
+            )
 
         phi *= (1.0 - penalty)
 
@@ -2340,6 +2347,7 @@ def recommend_next_experiments(
 
         # Select top n_unique by desirability-weighted acquisition
         top_indices = weighted_acq.argsort(descending=True)[:n_unique]
+        filtered_phi = phi[top_indices.cpu().numpy()]
         candidates = candidates[top_indices]
         acq_values = weighted_acq[top_indices] if acq_values.dim() > 0 else acq_values
 
@@ -2390,10 +2398,14 @@ def recommend_next_experiments(
 
     recommendations["acquisition_value"] = acq_values.detach().cpu().numpy() if acq_values.dim() > 0 else acq_values.item()
 
-    # Add desirability scores for all candidates (informational even when gate is off)
+    # Add desirability scores (reuse values from filtering, avoid redundant recomputation)
     if desirability_gate:
-        final_phi = compute_desirability(candidates.cpu().numpy(), columns)
-        recommendations["desirability_score"] = final_phi
+        if n_duplicates > 0:
+            dup_phi = filtered_phi[:min(n_duplicates, n_unique)]
+            full_phi = np.concatenate([filtered_phi, dup_phi])
+        else:
+            full_phi = filtered_phi
+        recommendations["desirability_score"] = full_phi
 
     # Add well labels (A1-D6 for 24-well plate)
     wells = [f"{chr(65 + i // 6)}{i % 6 + 1}" for i in range(n_recommendations)]
