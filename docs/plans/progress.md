@@ -1,15 +1,31 @@
 # Progress Log
 
-## Iteration 2 — 2026-03-18
+## Iteration 3 — 2026-03-18
+- Task: TODO-26 — Fix CellFlow dose encoding (§1.2 FINAL)
+- Result: pass
+- Commits: pending
+- Files changed:
+  - `gopro/06_cellflow_virtual.py` — Changed `encode_protocol_cellflow()` concentration from raw `conc` to `math.log1p(conc)`
+  - `gopro/tests/test_phase4_5.py` — 3 new tests: `test_concentration_uses_log1p`, `test_log1p_zero_dose_maps_to_zero`, `test_log1p_preserves_ordering`
+  - `docs/task_plan.md` — Marked TODO-26 complete, updated §1.2 status to COMPLETE
+- Tests: 602 passing (was 599)
+- Notes: All §1.2 critical bugs now resolved (TODO-24, TODO-25, TODO-26). Next: §1.3 CellFlow integration or §1.9 data ingestion.
+
+## Iteration 2 — 2026-03-18T01:39:37Z
 - Task: TODO-25 — R²-based 3-zone fidelity routing
 - Result: pass
-- Changes:
-  - `config.py`: Added `FIDELITY_R2_THRESHOLDS = {"drop": 0.80, "skip": 0.90}` dict; old `FIDELITY_CORRELATION_THRESHOLD`/`FIDELITY_SKIP_MFBO_THRESHOLD` now aliases
-  - `04_gpbo_loop.py`: Added `_compute_r_squared()` helper; rewrote `validate_fidelity_correlation()` to use R² by default with 3-zone routing; imports updated
-  - `visualize_report.py`: Added `FIDELITY_R2_THRESHOLDS` import (legacy aliases still used for hlines)
-  - `tests/test_fidelity_validation.py`: Rewrote test file — 29 tests total (was 19). New classes: `TestComputeRSquared` (4 tests), `TestFidelityR2Thresholds` (5 tests), `TestThreeZoneRouting` (4 tests). Updated existing tests for R² semantics.
-- Tests: 599 passing (was 586). +13 net new tests.
-- Notes: All §1.2 critical bugs except TODO-26 (CellFlow dose encoding) now resolved.
+- Commits:
+  - `7e198ff` [ralph-2] TODO-25: R²-based 3-zone fidelity routing
+  - `faee5b2` [ralph-simplify] Fix method validation, extract metric dispatch, remove dead import
+- Files changed:
+  - `gopro/config.py` — Added `FIDELITY_R2_THRESHOLDS` dict
+  - `gopro/04_gpbo_loop.py` — Added `_compute_r_squared()`, rewrote `validate_fidelity_correlation()` with 3-zone routing (+33/-26 lines)
+  - `gopro/visualize_report.py` — Removed dead import (-1 line)
+  - `gopro/tests/test_fidelity_validation.py` — 29 tests (was 19): new `TestComputeRSquared`, `TestFidelityR2Thresholds`, `TestThreeZoneRouting`
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated for R² semantics
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass extracted metric dispatch, fixed method validation edge case, removed dead `FIDELITY_R2_THRESHOLDS` import from visualize_report.py. No issues found by QA.
+- Notes: All §1.2 critical bugs except TODO-26 (CellFlow dose encoding) now resolved. 599 tests passing.
 
 ## Iteration 1 — 2026-03-18T00:00:44Z
 - Task: TODO-24 — Remap fidelity encodings for MF-GP kernel (§1.2) + /simplify hardening pass

@@ -214,6 +214,34 @@ class TestEncodeProtocol:
         enc = step06.encode_protocol_cellflow(vec)
         assert len(enc["modulators"]) == 0
 
+    def test_concentration_uses_log1p(self):
+        """Dose encoding must use log1p(concentration), not raw concentration."""
+        vec = {"CHIR99021_uM": 3.0, "log_harvest_day": math.log(21)}
+        enc = step06.encode_protocol_cellflow(vec)
+        mod = enc["modulators"][0]
+        assert mod["concentration"] == pytest.approx(math.log1p(3.0)), (
+            f"Expected log1p(3.0)={math.log1p(3.0)}, got {mod['concentration']}"
+        )
+
+    def test_log1p_zero_dose_maps_to_zero(self):
+        """Zero concentration should be excluded (conc <= 0 guard), but log1p(0)=0 for safety."""
+        # Zero-dose morphogens are already excluded by the conc <= 0 guard
+        vec = {"CHIR99021_uM": 0.0, "SAG_uM": 0.5, "log_harvest_day": math.log(21)}
+        enc = step06.encode_protocol_cellflow(vec)
+        # Only SAG should appear (CHIR excluded by zero guard)
+        assert len(enc["modulators"]) == 1
+        assert enc["modulators"][0]["name"] == "SAG"
+        # SAG concentration should be log1p(0.5)
+        assert enc["modulators"][0]["concentration"] == pytest.approx(math.log1p(0.5))
+
+    def test_log1p_preserves_ordering(self):
+        """log1p is monotonic — higher dose should give higher encoded value."""
+        vec_low = {"CHIR99021_uM": 1.0, "log_harvest_day": math.log(21)}
+        vec_high = {"CHIR99021_uM": 10.0, "log_harvest_day": math.log(21)}
+        enc_low = step06.encode_protocol_cellflow(vec_low)
+        enc_high = step06.encode_protocol_cellflow(vec_high)
+        assert enc_high["modulators"][0]["concentration"] > enc_low["modulators"][0]["concentration"]
+
 
 class TestVirtualScreenGrid:
     """Tests for virtual screen grid generation."""

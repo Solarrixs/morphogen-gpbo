@@ -165,7 +165,7 @@ def encode_protocol_cellflow(
         modulator = {
             "name": canonical_name,
             "type": mol_type,
-            "concentration": conc,
+            "concentration": math.log1p(conc),
             "concentration_unit": col.split("_")[-1],
             "timing_start": timing_start,
             "timing_end": timing_end,
