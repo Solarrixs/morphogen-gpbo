@@ -14,3 +14,4 @@
 | 4 | `6625794` | working | ralph/production-readiness-phase2 | [ralph-simplify] Remove unused jnp import, DRY up JAX test mocks |
 | 5 | `d227e73` | working | ralph/production-readiness-phase2 | [ralph-simplify] DRY up OOD warning tests: hoist import, use logger.name, remove noise columns |
 | 6 | `7d753e2` | working | ralph/production-readiness-phase2 | [ralph-simplify] DRY up variance inflation: single canonical implementation, fix double-application risk |
+| 7 | `18ae6e8` | working | ralph/production-readiness-phase2 | [ralph-simplify] DRY up ilr_transform: return_safe option eliminates duplicate _multiplicative_replacement call |
