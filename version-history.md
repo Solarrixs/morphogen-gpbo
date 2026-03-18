@@ -19,3 +19,4 @@
 | 9 | `46fb2c9` | working | ralph/production-readiness-phase2 | [ralph-simplify] Validate n_restarts >= 1 and log HP randomisation failures |
 | 10 | `b9d6bb7` | working | ralph/production-readiness-phase2 | [ralph-simplify] Thread explicit_priors through fit_tvr_models |
 | 11 | `1f1caee` | working | ralph/production-readiness-phase2 | [ralph-simplify] DRY TestFixedNoise tests, fix argparse % formatting |
+| 12 | `09e43d1` | working | ralph/production-readiness-phase2 | [ralph-simplify] Warn on mc_samples clamping, DRY test setup |
