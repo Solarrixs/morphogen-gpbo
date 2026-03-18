@@ -316,6 +316,88 @@ def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
                 )
 
 
+def _fit_mll_with_restarts(
+    model_factory,
+    n_restarts: int = 1,
+) -> Any:
+    """Fit a GP model via MLL with multiple random restarts, keeping the best.
+
+    Each restart creates a fresh model from *model_factory*, randomises the
+    hyperparameters, fits via ``fit_gpytorch_mll``, and evaluates the marginal
+    log-likelihood.  The model with the highest MLL is returned.
+
+    Args:
+        model_factory: Callable returning a *freshly constructed* GP model.
+            Called once per restart so that each fit starts from independent
+            random initialisation.
+        n_restarts: Total number of fits.  When 1 (the default) this is
+            equivalent to a single ``fit_gpytorch_mll`` call.
+
+    Returns:
+        The GP model with the highest marginal log-likelihood.
+    """
+    from botorch.fit import fit_gpytorch_mll
+    from gpytorch.mlls import ExactMarginalLogLikelihood
+
+    best_model = None
+    best_mll_value = float("-inf")
+
+    for i in range(max(1, n_restarts)):
+        # Deterministic seed per restart for reproducibility
+        torch.manual_seed(42 + i * 13)
+
+        try:
+            model_i = model_factory()
+            mll_i = ExactMarginalLogLikelihood(model_i.likelihood, model_i)
+
+            # Randomise hyperparameters for restarts > 0
+            if i > 0:
+                try:
+                    covar = getattr(model_i, "covar_module", None)
+                    base = getattr(covar, "base_kernel", covar) if covar else None
+                    if base is not None and hasattr(base, "lengthscale"):
+                        base.lengthscale = torch.rand_like(base.lengthscale) * 2.0 + 0.1
+                    if hasattr(model_i, "likelihood") and hasattr(model_i.likelihood, "noise"):
+                        model_i.likelihood.noise = (
+                            torch.rand(1, dtype=DTYPE, device=DEVICE) * 0.5 + 0.01
+                        )
+                except Exception:
+                    pass  # Some model structures resist direct HP manipulation
+
+            fit_gpytorch_mll(mll_i)
+        except Exception as exc:
+            logger.warning("MLL restart %d/%d failed: %s", i + 1, n_restarts, exc)
+            continue
+
+        # Evaluate MLL at the fitted parameters
+        model_i.eval()
+        with torch.no_grad():
+            output = model_i(model_i.train_inputs[0])
+            mll_raw = mll_i(output, model_i.train_targets)
+            # Multi-output MLL may return per-output values; sum them
+            mll_val = mll_raw.sum().item()
+
+        logger.debug(
+            "MLL restart %d/%d: %.4f", i + 1, n_restarts, mll_val
+        )
+
+        if mll_val > best_mll_value:
+            best_mll_value = mll_val
+            best_model = model_i
+
+    if best_model is None:
+        raise RuntimeError(
+            f"All {n_restarts} MLL restarts failed — cannot fit GP"
+        )
+
+    if n_restarts > 1:
+        logger.info(
+            "MLL restarts: best=%.4f across %d restarts", best_mll_value, n_restarts
+        )
+
+    return best_model
+
+
 def _fit_lassobo(
     train_X: torch.Tensor,
     train_Y: torch.Tensor,
@@ -1193,6 +1275,7 @@ def fit_gp_botorch(
     noise_variance: Optional[pd.DataFrame] = None,
     save_state: bool = True,
     pseudocount: float | None = None,
+    mll_restarts: int = 1,
 ) -> tuple:
     """Fit a GP using BoTorch (MAP, fully Bayesian SAASBO, LassoBO, or multi-fidelity).
 
@@ -1237,14 +1320,18 @@ def fit_gp_botorch(
             noise modeling.  Aligned to *Y* index/columns automatically.
             Only used on the standard MAP and per-type-GP paths (ignored for
             SAASBO, LassoBO, and multi-fidelity).
+        mll_restarts: Number of random restarts for MLL optimisation
+            (Kanda 2022, Cosenza 2022). Each restart re-initialises
+            hyperparameters and keeps the fit with the highest marginal
+            log-likelihood. Only applies to MAP paths (standard,
+            MixedSingleTaskGP, per-type-GP, multi-fidelity). Ignored
+            for SAASBO and LassoBO. (default: 1 = single fit)
 
     Returns:
         Tuple of (model, train_X_tensor, train_Y_tensor, cell_type_columns).
     """
     from botorch.models import SingleTaskGP
     from botorch.models.transforms import Normalize, Standardize
-    from gpytorch.mlls import ExactMarginalLogLikelihood
-    from botorch.fit import fit_gpytorch_mll
 
     # Select target cell types
     if target_cell_types:
@@ -1347,20 +1434,19 @@ def fit_gp_botorch(
             "Remapped fidelity for MF kernel: %s",
             sorted(train_X[:, fidelity_idx].unique().tolist()),
         )
-        model = SingleTaskMultiFidelityGP(
-            train_X,
-            train_Y,
-            data_fidelities=[fidelity_idx],
-            input_transform=Normalize(d=train_X.shape[1]),
-            outcome_transform=Standardize(m=train_Y.shape[1]),
-        )
-        # Warm-start multi-fidelity GP if requested
-        if warm_start:
-            load_gp_state(model, gp_state_path)
-        # Skip lengthscale prior for multi-fidelity GP — its kernel structure
-        # wraps lengthscales in a way incompatible with register_prior closures
-        mll = ExactMarginalLogLikelihood(model.likelihood, model)
-        fit_gpytorch_mll(mll)
+        def _mf_factory():
+            m = SingleTaskMultiFidelityGP(
+                train_X,
+                train_Y,
+                data_fidelities=[fidelity_idx],
+                input_transform=Normalize(d=train_X.shape[1]),
+                outcome_transform=Standardize(m=train_Y.shape[1]),
+            )
+            if warm_start:
+                load_gp_state(m, gp_state_path)
+            return m
+
+        model = _fit_mll_with_restarts(_mf_factory, n_restarts=mll_restarts)
     elif use_saasbo:
         if cat_dims:
             logger.warning(
@@ -1423,21 +1509,22 @@ def fit_gp_botorch(
             "Using MixedSingleTaskGP with %d categorical dims at indices %s",
             len(cat_dims), cat_dims,
         )
-        model = MixedSingleTaskGP(
-            train_X,
-            train_Y,
-            cat_dims=cat_dims,
-            input_transform=Normalize(
-                d=train_X.shape[1],
-                indices=[i for i in range(train_X.shape[1]) if i not in cat_dims],
-            ),
-            outcome_transform=Standardize(m=train_Y.shape[1]),
-        )
-        # Warm-start if requested
-        if warm_start:
-            load_gp_state(model, gp_state_path)
-        mll = ExactMarginalLogLikelihood(model.likelihood, model)
-        fit_gpytorch_mll(mll)
+        def _mixed_factory():
+            m = MixedSingleTaskGP(
+                train_X,
+                train_Y,
+                cat_dims=cat_dims,
+                input_transform=Normalize(
+                    d=train_X.shape[1],
+                    indices=[i for i in range(train_X.shape[1]) if i not in cat_dims],
+                ),
+                outcome_transform=Standardize(m=train_Y.shape[1]),
+            )
+            if warm_start:
+                load_gp_state(m, gp_state_path)
+            return m
+
+        model = _fit_mll_with_restarts(_mixed_factory, n_restarts=mll_restarts)
     elif per_type_gp and train_Y.shape[1] > 1:
         # Per-cell-type GP models (GPerturb, Xing & Yau 2025):
         # Fit separate SingleTaskGP per output → ModelListGP.
@@ -1448,54 +1535,61 @@ def fit_gp_botorch(
         per_type_models = []
         for i in range(n_outputs):
             yvar_i = train_Yvar[:, i:i+1] if train_Yvar is not None else None
-            m = SingleTaskGP(
-                train_X,
-                train_Y[:, i:i+1],
-                train_Yvar=yvar_i,
-                input_transform=Normalize(d=train_X.shape[1]),
-                outcome_transform=Standardize(m=1),
-            )
-            _set_dim_scaled_lengthscale_prior(m, train_X.shape[1])
-            mll = ExactMarginalLogLikelihood(m.likelihood, m)
-            fit_gpytorch_mll(mll)
+
+            def _per_type_factory(idx=i, yv=yvar_i):
+                m = SingleTaskGP(
+                    train_X,
+                    train_Y[:, idx:idx+1],
+                    train_Yvar=yv,
+                    input_transform=Normalize(d=train_X.shape[1]),
+                    outcome_transform=Standardize(m=1),
+                )
+                _set_dim_scaled_lengthscale_prior(m, train_X.shape[1])
+                return m
+
+            m = _fit_mll_with_restarts(_per_type_factory, n_restarts=mll_restarts)
             per_type_models.append(m)
             logger.info("  Fitted per-type GP %d/%d", i + 1, n_outputs)
         model = ModelListGP(*per_type_models)
     else:
-        # Build kernel based on kernel_type
-        covar_module = None
+        # Log kernel choice once (factory creates fresh kernels per restart)
         if kernel_type == "additive_interaction":
-            covar_module = _build_additive_interaction_kernel(train_X.shape[1])
             logger.info("Using single-task GP with additive+interaction kernel")
         elif kernel_type == "shared":
-            from gpytorch.kernels import MaternKernel, ScaleKernel
-            covar_module = ScaleKernel(MaternKernel(nu=2.5))
             logger.info("Using single-task GP with shared lengthscale (sparse-data mode)")
         else:
             logger.info("Using single-task GP with per-dim ARD")
 
-        model = SingleTaskGP(
-            train_X,
-            train_Y,
-            train_Yvar=train_Yvar,
-            covar_module=covar_module,
-            input_transform=Normalize(d=train_X.shape[1]),
-            outcome_transform=Standardize(m=train_Y.shape[1]),
-        )
-        if covar_module is None:
-            _set_dim_scaled_lengthscale_prior(model, train_X.shape[1])
-        # Warm-start: load hyperparameters from previous round
-        if warm_start:
-            load_gp_state(model, gp_state_path)
-        elif warm_start_state is not None:
-            # Legacy path: dict-based warm-start (deprecated)
-            try:
-                model.load_state_dict(warm_start_state, strict=False)
-                logger.info("Warm-started GP from previous round hyperparameters (legacy)")
-            except Exception as exc:
-                logger.warning("Could not warm-start GP: %s", exc)
-        mll = ExactMarginalLogLikelihood(model.likelihood, model)
-        fit_gpytorch_mll(mll)
+        def _standard_factory():
+            # Build fresh kernel for each restart
+            covar = None
+            if kernel_type == "additive_interaction":
+                covar = _build_additive_interaction_kernel(train_X.shape[1])
+            elif kernel_type == "shared":
+                from gpytorch.kernels import MaternKernel, ScaleKernel
+                covar = ScaleKernel(MaternKernel(nu=2.5))
+
+            m = SingleTaskGP(
+                train_X,
+                train_Y,
+                train_Yvar=train_Yvar,
+                covar_module=covar,
+                input_transform=Normalize(d=train_X.shape[1]),
+                outcome_transform=Standardize(m=train_Y.shape[1]),
+            )
+            if covar is None:
+                _set_dim_scaled_lengthscale_prior(m, train_X.shape[1])
+            if warm_start:
+                load_gp_state(m, gp_state_path)
+            elif warm_start_state is not None:
+                try:
+                    m.load_state_dict(warm_start_state, strict=False)
+                    logger.info("Warm-started GP from previous round hyperparameters (legacy)")
+                except Exception as exc:
+                    logger.warning("Could not warm-start GP: %s", exc)
+            return m
+
+        model = _fit_mll_with_restarts(_standard_factory, n_restarts=mll_restarts)
 
     # Save GP state for warm-starting future rounds
     if save_state:
@@ -2721,6 +2815,7 @@ def run_gpbo_loop(
     cellflow_variance_inflation: float = 1.0,
     pseudocount: float | None = None,
     log_scale: bool = False,
+    mll_restarts: int = 1,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -2788,6 +2883,10 @@ def run_gpbo_loop(
         log_scale: If True, apply log1p transform to concentration columns
             (``LOG_SCALE_COLUMNS``) before GP fitting. Recommendations are
             inverse-transformed (expm1) back to µM. (default: False)
+        mll_restarts: Number of random restarts for MLL optimisation
+            (Kanda 2022, Cosenza 2022). Each restart re-initialises
+            hyperparameters and keeps the fit with the highest MLL.
+            Only applies to MAP fitting paths. (default: 1)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -2989,6 +3088,7 @@ def run_gpbo_loop(
             per_type_gp=per_type_gp,
             noise_variance=noise_var_df,
             pseudocount=pseudocount,
+            mll_restarts=mll_restarts,
         )
 
     # Recommend next experiments (in active dimensions)
@@ -3261,6 +3361,11 @@ if __name__ == "__main__":
                              "Values >1.0 spread predictions away from the mean to "
                              "counteract conservative bias (default: 1.0, no inflation). "
                              "Recommended: 2.0 (CELLFLOW_DEFAULT_VARIANCE_INFLATION).")
+    parser.add_argument("--mll-restarts", type=int, default=1,
+                        help="Number of random restarts for MLL optimisation "
+                             "(Kanda 2022, Cosenza 2022). Each restart re-initialises "
+                             "hyperparameters and keeps the best fit. Only applies to "
+                             "MAP paths (not SAASBO/LassoBO). (default: 1)")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -3437,6 +3542,7 @@ if __name__ == "__main__":
         cellflow_variance_inflation=args.cellflow_variance_inflation,
         pseudocount=args.pseudocount,
         log_scale=args.log_scale,
+        mll_restarts=args.mll_restarts,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

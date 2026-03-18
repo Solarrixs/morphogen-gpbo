@@ -1,5 +1,25 @@
 # Progress Log
 
+## Iteration 11 — 2026-03-18
+- Task: TODO-29 — MLL optimization restarts
+- Result: pass
+- Tests: 627 → 631 (+4 new tests)
+- Changes:
+  - `gopro/04_gpbo_loop.py` — Added `_fit_mll_with_restarts()` helper; added `mll_restarts` param to `fit_gp_botorch` and `run_gpbo_loop`; refactored all MAP fitting paths (standard, MixedSingleTaskGP, per-type-GP, multi-fidelity) to use factory+restarts pattern; added `--mll-restarts` CLI flag
+  - `gopro/tests/test_unit.py` — Added `TestMLLRestarts` class with 4 tests (single restart, multiple restarts, all-fail, integration with fit_gp_botorch)
+
+## Iteration 10 — 2026-03-18T06:09:19Z
+- Task: Simplify pass on TODO-28 (log-scale code cleanup)
+- Result: pass
+- Commits:
+  - `da16394` [ralph-simplify] Remove redundant filter and double column-existence check in log-scale
+- Files changed:
+  - `gopro/config.py` — Removed redundant `and col != "log_harvest_day"` filter (`log_harvest_day` doesn't end in `_uM` anyway)
+  - `gopro/04_gpbo_loop.py` — Moved `log_scaled_cols` computation after `_apply_log_scale()` calls; pass `LOG_SCALE_COLUMNS` directly to helper (which already handles missing columns internally)
+- Quality: Removed double column-existence check — `_apply_log_scale()` already filters to columns present in the DataFrame, so pre-filtering was redundant. Also removed a tautological exclusion in config.
+- Tests: 627 passing (unchanged)
+- Notes: Simplify-only iteration, no new functionality. §1.4 GP Model Improvements: TODO-9 and TODO-28 done. Next: TODO-29 (MLL restarts), TODO-30 (explicit GP priors), or TODO-31 (FixedNoiseGP).
+
 ## Iteration 9 — 2026-03-18
 - Task: TODO-28 — Selective log-scaling for concentration dimensions (§1.4 GP Model Improvements)
 - Result: pass

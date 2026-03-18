@@ -2903,3 +2903,90 @@ class TestLogScale:
         X = pd.DataFrame({"CHIR99021_uM": [1.0, 2.0]})
         result = step04._apply_log_scale(X, ["CHIR99021_uM", "NONEXISTENT_uM"])
         np.testing.assert_allclose(result["CHIR99021_uM"], np.log1p([1.0, 2.0]))
+
+
+class TestMLLRestarts:
+    """Tests for MLL optimisation restarts (_fit_mll_with_restarts)."""
+
+    def _make_simple_data(self, n=20, d=3, seed=42):
+        """Create simple synthetic data with a clear signal."""
+        np.random.seed(seed)
+        X = np.random.rand(n, d)
+        # Y is a function of X with some noise
+        Y = 0.5 + 0.3 * X[:, 0:1] - 0.2 * X[:, 1:2] + 0.05 * np.random.randn(n, 1)
+        return (
+            torch.tensor(X, dtype=torch.float64),
+            torch.tensor(Y, dtype=torch.float64),
+        )
+
+    def test_single_restart_returns_fitted_model(self):
+        """With n_restarts=1, returns a fitted GP model."""
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+
+        train_X, train_Y = self._make_simple_data()
+
+        def factory():
+            return SingleTaskGP(
+                train_X, train_Y,
+                input_transform=Normalize(d=train_X.shape[1]),
+                outcome_transform=Standardize(m=1),
+            )
+
+        model = step04._fit_mll_with_restarts(factory, n_restarts=1)
+        assert model is not None
+        # Model should be in eval mode after fitting
+        assert not model.training
+
+    def test_multiple_restarts_returns_best(self):
+        """With n_restarts > 1, multiple fits run and the best is kept."""
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+
+        train_X, train_Y = self._make_simple_data()
+
+        def factory():
+            return SingleTaskGP(
+                train_X, train_Y,
+                input_transform=Normalize(d=train_X.shape[1]),
+                outcome_transform=Standardize(m=1),
+            )
+
+        model = step04._fit_mll_with_restarts(factory, n_restarts=3)
+        assert model is not None
+        # Model should make predictions without error
+        model.eval()
+        with torch.no_grad():
+            posterior = model.posterior(train_X[:2])
+            assert posterior.mean.shape == (2, 1)
+
+    def test_all_restarts_fail_raises(self):
+        """If every restart raises, RuntimeError is propagated."""
+        call_count = [0]
+
+        def bad_factory():
+            call_count[0] += 1
+            raise RuntimeError("deliberate failure")
+
+        with pytest.raises(RuntimeError, match="All .* MLL restarts failed"):
+            step04._fit_mll_with_restarts(bad_factory, n_restarts=2)
+        assert call_count[0] == 2
+
+    def test_fit_gp_botorch_with_mll_restarts(self, tmp_path, monkeypatch):
+        """fit_gp_botorch accepts mll_restarts and produces a valid model."""
+        monkeypatch.setattr(step04, "GP_STATE_DIR", tmp_path)
+        monkeypatch.setattr(step04, "DATA_DIR", tmp_path)
+        np.random.seed(42)
+
+        X = pd.DataFrame(np.random.rand(15, 3), columns=["a", "b", "c"])
+        Y = pd.DataFrame({
+            "ct_A": 0.4 + 0.2 * np.random.rand(15),
+            "ct_B": 0.6 - 0.2 * np.random.rand(15),
+        })
+
+        model, tX, tY, cols = step04.fit_gp_botorch(
+            X, Y, use_ilr=False, mll_restarts=2,
+        )
+        assert model is not None
+        assert tX.shape[0] == 15
+        assert set(cols) == {"ct_A", "ct_B"}
