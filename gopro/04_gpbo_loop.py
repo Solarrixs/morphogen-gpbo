@@ -1714,6 +1714,12 @@ def validate_fidelity_correlation(
         - "spearman": Spearman rank correlation (legacy)
         - "pearson": Pearson linear correlation (legacy)
     """
+    _VALID_METHODS = {"r_squared", "spearman", "pearson"}
+    if method not in _VALID_METHODS:
+        raise ValueError(
+            f"Unknown method {method!r}. Must be one of {sorted(_VALID_METHODS)}."
+        )
+
     from scipy.stats import spearmanr, pearsonr
 
     drop_threshold = FIDELITY_R2_THRESHOLDS["drop"]
@@ -1752,6 +1758,17 @@ def validate_fidelity_correlation(
     real_overlap = real_fractions.loc[overlap, all_cols]
     virtual_overlap = virtual_fractions.loc[overlap, all_cols]
 
+    def _metric(a: np.ndarray, b: np.ndarray) -> float:
+        """Compute the selected agreement metric between two vectors."""
+        if method == "r_squared":
+            return float(_compute_r_squared(a, b))
+        elif method == "spearman":
+            val, _ = spearmanr(a, b)
+            return float(val)
+        else:
+            val, _ = pearsonr(a, b)
+            return float(val)
+
     # Per-cell-type metric
     per_cell_type = {}
     for col in all_cols:
@@ -1760,13 +1777,7 @@ def validate_fidelity_correlation(
         # Skip constant columns (no variance -> metric undefined)
         if np.std(r_vals) < 1e-12 or np.std(v_vals) < 1e-12:
             continue
-        if method == "r_squared":
-            metric = _compute_r_squared(r_vals, v_vals)
-        elif method == "spearman":
-            metric, _ = spearmanr(r_vals, v_vals)
-        else:
-            metric, _ = pearsonr(r_vals, v_vals)
-        per_cell_type[col] = float(metric)
+        per_cell_type[col] = _metric(r_vals, v_vals)
 
     # Overall metric: flatten all cell types into one vector
     r_flat = real_overlap.values.flatten()
@@ -1775,13 +1786,7 @@ def validate_fidelity_correlation(
     if np.std(r_flat) < 1e-12 or np.std(v_flat) < 1e-12:
         overall_metric = float("nan")
     else:
-        if method == "r_squared":
-            overall_metric = _compute_r_squared(r_flat, v_flat)
-        elif method == "spearman":
-            overall_metric, _ = spearmanr(r_flat, v_flat)
-        else:
-            overall_metric, _ = pearsonr(r_flat, v_flat)
-        overall_metric = float(overall_metric)
+        overall_metric = _metric(r_flat, v_flat)
 
     metric_name = "R²" if method == "r_squared" else method.capitalize()
 
