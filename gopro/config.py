@@ -218,7 +218,7 @@ ENSEMBLE_STABILITY_LOW_THRESHOLD = 0.5  # below this → unstable recommendation
 # (usually constant across conditions → zero-variance → auto-dropped).
 LOG_SCALE_COLUMNS: list[str] = [
     col for col in MORPHOGEN_COLUMNS
-    if col.endswith("_uM") and col != "log_harvest_day"
+    if col.endswith("_uM")
 ]
 
 # --- Gruffi stress-filtering defaults ---

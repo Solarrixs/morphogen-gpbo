@@ -2894,9 +2894,9 @@ def run_gpbo_loop(
     # Apply log1p transform to concentration columns before bounds/GP fitting
     log_scaled_cols: list[str] = []
     if log_scale:
+        X = _apply_log_scale(X, LOG_SCALE_COLUMNS)
+        X_real = _apply_log_scale(X_real, LOG_SCALE_COLUMNS)
         log_scaled_cols = [c for c in LOG_SCALE_COLUMNS if c in X.columns]
-        X = _apply_log_scale(X, log_scaled_cols)
-        X_real = _apply_log_scale(X_real, log_scaled_cols)
 
     # Compute active bounds: use real data for morphogen ranges, but merged X
     # when virtual sources exist so log_harvest_day variance is detected.
