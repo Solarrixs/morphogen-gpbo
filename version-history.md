@@ -20,3 +20,4 @@
 | 10 | `b9d6bb7` | working | ralph/production-readiness-phase2 | [ralph-simplify] Thread explicit_priors through fit_tvr_models |
 | 11 | `1f1caee` | working | ralph/production-readiness-phase2 | [ralph-simplify] DRY TestFixedNoise tests, fix argparse % formatting |
 | 12 | `09e43d1` | working | ralph/production-readiness-phase2 | [ralph-simplify] Warn on mc_samples clamping, DRY test setup |
+| 13 | `4bcd31d` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix input_warp review issues: log spam, MixedGP consistency |
