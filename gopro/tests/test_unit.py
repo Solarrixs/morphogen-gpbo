@@ -988,6 +988,113 @@ class TestMorphogenParserClass:
         assert df.shape == (48, 24)
 
 
+class TestSanchisCallejaParser:
+    """Tests for Sanchis-Calleja et al. 2025 patterning screen parser."""
+
+    def test_condition_count(self):
+        """SanchisCallejaParser should have 98 conditions."""
+        from gopro.morphogen_parser import SanchisCallejaParser
+        parser = SanchisCallejaParser()
+        assert len(parser.conditions) == 98
+
+    def test_build_matrix_shape(self):
+        """build_matrix() should return (98, 24) DataFrame."""
+        from gopro.morphogen_parser import SanchisCallejaParser
+        parser = SanchisCallejaParser()
+        df = parser.build_matrix()
+        assert df.shape == (98, 24)
+        assert (df.values >= 0).all(), "All concentrations must be non-negative"
+
+    def test_known_concentrations(self):
+        """Spot-check concentrations from Supplementary Figure 1."""
+        from gopro.morphogen_parser import SanchisCallejaParser
+        parser = SanchisCallejaParser()
+        # CHIR_E = 1.8 µM
+        assert parser.parse("CHIR_E")["CHIR99021_uM"] == pytest.approx(1.8)
+        # CHIR_A = 0.2 µM
+        assert parser.parse("CHIR_A")["CHIR99021_uM"] == pytest.approx(0.2)
+        # RA_E = 500 nM = 0.5 µM
+        assert parser.parse("RA_E")["RA_uM"] == pytest.approx(0.5)
+        # XAV939_E = 5.0 µM
+        assert parser.parse("XAV939_E")["XAV939_uM"] == pytest.approx(5.0)
+        # CycA_E = 150 nM = 0.15 µM
+        assert parser.parse("CycA_E")["cyclopamine_uM"] == pytest.approx(0.15)
+
+    def test_shh_pairs_with_purmorphamine(self):
+        """SHH conditions should always set purmorphamine_uM."""
+        from gopro.morphogen_parser import SanchisCallejaParser
+        parser = SanchisCallejaParser()
+        # SHH_A: 20 ng/mL SHH + 0.03 µM PM
+        vec = parser.parse("SHH_A")
+        assert vec["SHH_uM"] > 0
+        assert vec["purmorphamine_uM"] == pytest.approx(0.03)
+        # SHH_E: 180 ng/mL SHH + 0.27 µM PM
+        vec = parser.parse("SHH_E")
+        assert vec["purmorphamine_uM"] == pytest.approx(0.27)
+        # Timing: SHH_tA uses fixed dose + PM
+        vec = parser.parse("SHH_tA")
+        assert vec["SHH_uM"] > 0
+        assert vec["purmorphamine_uM"] == pytest.approx(0.30)
+
+    def test_no_base_media(self):
+        """Sanchis-Calleja conditions should NOT have Amin/Kelley base media."""
+        from gopro.morphogen_parser import SanchisCallejaParser
+        parser = SanchisCallejaParser()
+        vec = parser.parse("CHIR_E")
+        assert vec["BDNF_uM"] == 0.0
+        assert vec["NT3_uM"] == 0.0
+        assert vec["cAMP_uM"] == 0.0
+        assert vec["AscorbicAcid_uM"] == 0.0
+
+    def test_harvest_day_21(self):
+        """All Sanchis-Calleja conditions should have log(21) harvest day."""
+        import math
+        from gopro.morphogen_parser import SanchisCallejaParser
+        parser = SanchisCallejaParser()
+        expected = math.log(21)
+        for cond in parser.conditions:
+            vec = parser.parse(cond)
+            assert vec["log_harvest_day"] == pytest.approx(expected), cond
+
+    def test_combination_conditions(self):
+        """Multi-morphogen conditions should set all components."""
+        from gopro.morphogen_parser import SanchisCallejaParser
+        parser = SanchisCallejaParser()
+        # RA_E_SHH_A_FGF8_A: 3-morphogen combination
+        vec = parser.parse("RA_E_SHH_A_FGF8_A")
+        assert vec["RA_uM"] == pytest.approx(0.5)  # 500 nM
+        assert vec["SHH_uM"] > 0
+        assert vec["FGF8_uM"] > 0
+        assert vec["purmorphamine_uM"] == pytest.approx(0.03)  # paired with SHH_A
+
+    def test_gradient_conditions(self):
+        """Gradient conditions should set approximate scalar concentrations."""
+        from gopro.morphogen_parser import SanchisCallejaParser
+        parser = SanchisCallejaParser()
+        vec = parser.parse("XAV939_D-E_SHH_Grad_<A")
+        assert vec["XAV939_uM"] == pytest.approx(4.0)  # D-E midpoint
+        assert vec["SHH_uM"] > 0  # Grad_<A → half of level A
+        assert vec["purmorphamine_uM"] > 0
+
+    def test_unrecognized_condition_raises(self):
+        """Unrecognized condition names should raise ValueError."""
+        from gopro.morphogen_parser import SanchisCallejaParser
+        parser = SanchisCallejaParser()
+        with pytest.raises(ValueError, match="Unrecognized"):
+            parser.parse("NOT_A_REAL_CONDITION")
+
+    def test_all_conditions_parse(self):
+        """Every condition in the canonical list should parse without error."""
+        from gopro.morphogen_parser import SanchisCallejaParser, SANCHIS_CALLEJA_CONDITIONS
+        parser = SanchisCallejaParser()
+        for cond in SANCHIS_CALLEJA_CONDITIONS:
+            vec = parser.parse(cond)
+            # Every condition should set at least one morphogen > 0
+            morphogen_cols = [k for k in vec if k != "log_harvest_day"]
+            nonzero = sum(1 for k in morphogen_cols if vec[k] > 0)
+            assert nonzero >= 1, f"{cond} has no active morphogens"
+
+
 class TestNoHardcodedPaths:
     """Verify no hardcoded absolute paths remain in gopro/ source files."""
 

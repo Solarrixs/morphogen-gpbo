@@ -4,7 +4,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 **Last updated:** 2026-03-17
 **Branch:** ralph/production-readiness-phase2
-**Tests:** 679 passing (gopro) + 53 (literature) = 732 total
+**Tests:** 689 passing (gopro) + 53 (literature) = 742 total
 **§1.1 Status:** COMPLETE (15/15) — all competitive landscape ideas implemented
 **§1.2 Status:** COMPLETE (3/3) — all critical MF-GP bugs fixed
 
@@ -96,7 +96,8 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 
 ### 1.9 Data Integration
 
-- [ ] **Ingest 97 Sanchis-Calleja conditions as fidelity 0.8-0.9** — Write `SanchisCallejaParser`, run step 02, wire into `merge_multi_fidelity_data()`. 3× training data increase. (Competitive landscape Idea #3, HIGH priority.)
+- [x] **Ingest 98 Sanchis-Calleja conditions** — `SanchisCallejaParser` class with regex tokenizer for 98 conditions (dose-response A-E, timing tA-tE, combinations, gradient approximations). 10 new tests. Follow-up: wire into multi-fidelity merge at fidelity 0.85.
+- [ ] **Wire Sanchis-Calleja into multi-fidelity merge** — assign fidelity 0.85, add to `merge_multi_fidelity_data()` auto-discovery. `--sanchis-fractions`/`--sanchis-morphogens` CLI flags. 3× training data increase.
 
 ---
 

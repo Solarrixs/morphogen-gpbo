@@ -1,5 +1,31 @@
 # Progress Log
 
+## Iteration 25 — 2026-03-18
+- Task: §1.9 — Ingest 98 Sanchis-Calleja conditions (SanchisCallejaParser)
+- Result: pass
+- Files changed:
+  - `gopro/morphogen_parser.py` — Added `SanchisCallejaParser` class with regex tokenizer, `SANCHIS_CALLEJA_CONDITIONS` (98), concentration levels A-E, timing doses, SHH+PM pairing, gradient approximations, no base media
+  - `gopro/tests/test_unit.py` — Added `TestSanchisCallejaParser` class with 10 tests
+  - `docs/task_plan.md` — Marked §1.9 parser complete, updated test count to 689
+  - `docs/plans/handoff.md`, `docs/plans/progress.md` — updated
+- Tests: 689 passing (was 679, +10 new)
+- Notes: 98 conditions (not 97 as originally estimated). Follow-up: wire into multi-fidelity merge at fidelity 0.85.
+
+## Iteration 24 — 2026-03-18T09:28:07Z
+- Task: TODO-11 simplify pass — Clean up ALR transform
+- Result: pass
+- Commits:
+  - `f9ebf5d` [ralph-simplify] Clean up ALR transform: remove overly strict guard, vectorize variance loop, fix docstrings
+  - `93c997a` [ralph-meta-17] Version history update
+  - `b39acc4` [ralph-17] TODO-11: ALR transform as alternative to ILR (--alr)
+- Files changed:
+  - `gopro/04_gpbo_loop.py` — Removed overly strict guard, vectorized variance loop, fixed docstrings (+18/-13 lines)
+  - `docs/AUDIT_REPORT.md`, `docs/architecture.md`, `docs/competitive_landscape_ideas_index.md`, `gopro/README.md` — updated docs
+  - `data/convergence_diagnostics.csv`, `data/gp_diagnostics_round1.csv`, `data/gp_recommendations_round1.csv` — regenerated
+- Quality: Simplify pass cleaned up ALR transform — removed overly strict guard that rejected valid inputs, vectorized variance propagation loop, fixed docstrings. 8 files changed, +201/-127 lines.
+- Tests: 679 passing (unchanged)
+- Notes: §1.4 GP Model Improvements: 11/13 done. Remaining: TODO-8 (spike-and-slab, high effort), TODO-10 (Dirichlet). Both are deferred/low priority. Consider moving to §1.5 (acquisition), §1.6 (experimental design), or §1.9 (Sanchis-Calleja data ingestion, HIGH priority).
+
 ## Iteration 23 — 2026-03-18
 - Task: TODO-11 — ILR vs ALR comparison (`--alr`) (§1.4 GP Model Improvements)
 - Result: pass

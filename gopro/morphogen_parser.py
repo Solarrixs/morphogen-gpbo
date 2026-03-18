@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 import numpy as np
@@ -584,6 +585,252 @@ class CombinedParser:
         conditions = conditions or self.conditions
         rows = [self.parse(c) for c in conditions]
         return pd.DataFrame(rows, index=conditions, columns=MORPHOGEN_COLUMNS)
+
+
+# ==============================================================================
+# Sanchis-Calleja et al. 2025 patterning screen
+# (Nature Methods 23:465-478, DOI: 10.1038/s41592-025-02927-5)
+# ==============================================================================
+# 98 morphogen treatment conditions, Day 21 harvest
+# 8 morphogens: CHIR99021, RA, SHH (+purmorphamine), FGF8 (early/late),
+#               BMP4, BMP7, XAV939, Cyclopamine
+# Concentrations from Supplementary Figure 1 and MOESM5/MOESM9
+
+_SC_HARVEST_DAY: int = 21
+_LOG_SC_HARVEST_DAY: float = math.log(_SC_HARVEST_DAY)
+
+# Concentration levels A-E (all converted to µM at module load time)
+_SC_DOSE_LEVELS: dict[str, dict[str, float]] = {
+    # CHIR99021 (µM), Days 0-9
+    "CHIR": {"A": 0.2, "B": 0.6, "C": 1.0, "D": 1.4, "E": 1.8},
+    # Retinoic acid — 100-500 nM → µM
+    "RA": {
+        "A": nM_to_uM(100.0), "B": nM_to_uM(200.0), "C": nM_to_uM(300.0),
+        "D": nM_to_uM(400.0), "E": nM_to_uM(500.0),
+    },
+    # SHH — 20-180 ng/mL → µM (MW 19.6 kDa), Days 3-14
+    "SHH": {
+        k: ng_mL_to_uM(v, PROTEIN_MW_KDA["SHH"])
+        for k, v in {"A": 20.0, "B": 60.0, "C": 100.0, "D": 140.0, "E": 180.0}.items()
+    },
+    # Purmorphamine (µM), paired with SHH, Days 3-14
+    "PM": {"A": 0.03, "B": 0.09, "C": 0.15, "D": 0.21, "E": 0.27},
+    # FGF8 early — 50-250 ng/mL → µM (MW 22.5 kDa), Days 3-14
+    "FGF8_early": {
+        k: ng_mL_to_uM(v, PROTEIN_MW_KDA["FGF8"])
+        for k, v in {"A": 50.0, "B": 100.0, "C": 150.0, "D": 200.0, "E": 250.0}.items()
+    },
+    # FGF8 late — same concentrations, Days 12-20
+    "FGF8_late": {
+        k: ng_mL_to_uM(v, PROTEIN_MW_KDA["FGF8"])
+        for k, v in {"A": 50.0, "B": 100.0, "C": 150.0, "D": 200.0, "E": 250.0}.items()
+    },
+    # BMP4 — 0.5-4.5 nM → µM, Days 12-20
+    "BMP4": {
+        "A": nM_to_uM(0.5), "B": nM_to_uM(1.5), "C": nM_to_uM(2.5),
+        "D": nM_to_uM(3.5), "E": nM_to_uM(4.5),
+    },
+    # BMP7 — 0.5-4.5 nM → µM, Days 12-20
+    "BMP7": {
+        "A": nM_to_uM(0.5), "B": nM_to_uM(1.5), "C": nM_to_uM(2.5),
+        "D": nM_to_uM(3.5), "E": nM_to_uM(4.5),
+    },
+    # XAV939 (µM), Days 0-9 — only A=1.0 and E=5.0 tested in patterning screen
+    "XAV939": {"A": 1.0, "E": 5.0},
+    # Cyclopamine (µM) — only level E tested (150 nM), Days 3-14
+    "CycA": {"E": nM_to_uM(150.0)},
+}
+
+# Fixed doses for timing experiments tA-tE (all in µM)
+_SC_TIMING_DOSES: dict[str, float] = {
+    "RA": nM_to_uM(250.0),                                     # 250 nM
+    "XAV939": nM_to_uM(180.0),                                 # 180 nM
+    "FGF8": ng_mL_to_uM(100.0, PROTEIN_MW_KDA["FGF8"]),       # 100 ng/mL
+    "SHH": ng_mL_to_uM(200.0, PROTEIN_MW_KDA["SHH"]),         # 200 ng/mL
+    "BMP4": nM_to_uM(5.0),                                     # 5 nM
+    "BMP7": nM_to_uM(5.0),                                     # 5 nM
+}
+
+# Purmorphamine dose paired with SHH timing dose (200 ng/mL)
+# Ratio: PM (µM) = 0.0015 × SHH (ng/mL) → 0.0015 × 200 = 0.30 µM
+_SC_PM_TIMING_DOSE: float = 0.30
+
+# XAV939 D-E gradient: midpoint of MiSTR levels D=3.5 and E=4.5 µM
+_SC_XAV939_DE_UM: float = 4.0
+
+# Map Sanchis-Calleja morphogen tokens → MORPHOGEN_COLUMNS keys
+_SC_COL_MAP: dict[str, str] = {
+    "CHIR": "CHIR99021_uM",
+    "RA": "RA_uM",
+    "SHH": "SHH_uM",
+    "FGF8_early": "FGF8_uM",
+    "FGF8_late": "FGF8_uM",
+    "FGF8": "FGF8_uM",
+    "BMP4": "BMP4_uM",
+    "BMP7": "BMP7_uM",
+    "XAV939": "XAV939_uM",
+    "CycA": "cyclopamine_uM",
+    "Cyc": "cyclopamine_uM",
+}
+
+# Regex tokenizer for condition names: extracts (morphogen, level) pairs
+# Morphogens ordered longest-first to avoid partial matches
+_SC_TOKEN_RE = re.compile(
+    r'(FGF8_early|FGF8_late|XAV939|CycA|Cyc|CHIR|BMP4|BMP7|FGF8|SHH|RA)'
+    r'_'
+    r'(D-E|Grad_<[ACE]|Grad_C-E|t_[ABCDE]|t[ABCDE]|[ABCDE])'
+)
+
+# Canonical 98 conditions from MOESM5 (Supplementary Table 5)
+SANCHIS_CALLEJA_CONDITIONS: list[str] = sorted([
+    # BMP4 dose-response (A-E) and timing (tA-tE)
+    "BMP4_A", "BMP4_B", "BMP4_C", "BMP4_D", "BMP4_E",
+    "BMP4_tA", "BMP4_tB", "BMP4_tC", "BMP4_tD", "BMP4_tE",
+    # BMP7 dose-response and timing
+    "BMP7_A", "BMP7_B", "BMP7_C", "BMP7_D", "BMP7_E",
+    "BMP7_tA", "BMP7_tB", "BMP7_tC", "BMP7_tD", "BMP7_tE",
+    # CHIR dose-response
+    "CHIR_A", "CHIR_B", "CHIR_C", "CHIR_D", "CHIR_E",
+    # CHIR combinations
+    "CHIR_E_CycA_E", "CHIR_E_SHH_A", "CHIR_E_SHH_E",
+    # Cyclopamine
+    "CycA_E", "CycA_E_FGF8_A",
+    # FGF8 dose-response (early Days 3-14 and late Days 12-20)
+    "FGF8_early_A", "FGF8_early_B", "FGF8_early_C", "FGF8_early_D", "FGF8_early_E",
+    "FGF8_late_A", "FGF8_late_B", "FGF8_late_C", "FGF8_late_D", "FGF8_late_E",
+    # FGF8 timing
+    "FGF8_tA", "FGF8_tB", "FGF8_tC", "FGF8_tD", "FGF8_tE",
+    # RA dose-response and timing
+    "RA_A", "RA_B", "RA_C", "RA_D", "RA_E",
+    "RA_tA", "RA_tB", "RA_tC", "RA_tD", "RA_tE",
+    # RA combinations
+    "RA_E_CycA_E", "RA_E_CycA_E_FGF8_A", "RA_E_FGF8_A",
+    "RA_E_SHH_A", "RA_E_SHH_A_FGF8_A", "RA_E_SHH_E",
+    # SHH dose-response and timing
+    "SHH_A", "SHH_B", "SHH_C", "SHH_D", "SHH_E",
+    "SHH_tA", "SHH_tB", "SHH_tC", "SHH_tD", "SHH_tE",
+    # XAV939 dose-response and timing
+    "XAV939_A", "XAV939_E",
+    "XAV939_tA", "XAV939_tB", "XAV939_tC", "XAV939_tD", "XAV939_tE",
+    # XAV939_A combinations
+    "XAV939_A_CycA_E", "XAV939_A_SHH_A", "XAV939_A_SHH_E",
+    # XAV939_D-E (microfluidic gradient chip)
+    "XAV939_D-E",
+    "XAV939_D-E_SHH_A", "XAV939_D-E_SHH_E",
+    "XAV939_D-E_SHH_Grad_<A", "XAV939_D-E_SHH_Grad_<C",
+    "XAV939_D-E_SHH_Grad_<E", "XAV939_D-E_SHH_Grad_C-E",
+    "XAV939_D-E_SHH_t_B", "XAV939_D-E_SHH_t_C",
+    "XAV939_D-E_SHH_t_D", "XAV939_D-E_SHH_t_E",
+    # XAV939_E combinations
+    "XAV939_E_CycA_E", "XAV939_E_CycA_E_FGF8_A", "XAV939_E_FGF8_A",
+    "XAV939_E_SHH_A", "XAV939_E_SHH_A_FGF8_A", "XAV939_E_SHH_E",
+])
+"""All 98 Sanchis-Calleja condition names (MOESM5 canonical naming)."""
+
+assert len(SANCHIS_CALLEJA_CONDITIONS) == 98, (
+    f"Expected 98 Sanchis-Calleja conditions, got {len(SANCHIS_CALLEJA_CONDITIONS)}"
+)
+
+
+class SanchisCallejaParser(MorphogenParser):
+    """Parser for Sanchis-Calleja et al. 2025 patterning screen.
+
+    98 conditions, Day 21 harvest. Uses a different base medium than
+    Amin/Kelley — no BDNF, NT3, cAMP, or Ascorbic Acid in the vector.
+
+    SHH is always paired with purmorphamine at proportional doses.
+    Gradient conditions (``XAV939_D-E_SHH_Grad_*``) are microfluidic chip
+    experiments approximated as scalar concentrations.
+    """
+
+    def __init__(self) -> None:
+        parsers = {c: self._handler_factory(c) for c in SANCHIS_CALLEJA_CONDITIONS}
+        super().__init__(parsers, harvest_day=_SC_HARVEST_DAY)
+
+    def parse(self, name: str) -> dict[str, float]:
+        """Parse condition name into 24-D morphogen concentration vector.
+
+        Unlike :class:`AminKelleyParser`, does NOT set base maturation media
+        (BDNF, NT3, cAMP, AscorbicAcid) — Sanchis-Calleja harvests at Day 21
+        before maturation begins.
+        """
+        vec = {col: 0.0 for col in MORPHOGEN_COLUMNS}
+        vec["log_harvest_day"] = self._log_harvest_day
+        if name not in self._parsers:
+            raise ValueError(f"Unrecognized condition: {name!r}")
+        self._parsers[name](vec)
+        return vec
+
+    @classmethod
+    def _handler_factory(cls, cond_name: str):
+        """Create a handler function for a given condition name."""
+        def handler(vec: dict[str, float]) -> None:
+            cls._fill_condition(cond_name, vec)
+        return handler
+
+    @classmethod
+    def _fill_condition(cls, name: str, vec: dict[str, float]) -> None:
+        """Parse morphogen tokens from condition name and set concentrations."""
+        pairs = _SC_TOKEN_RE.findall(name)
+        if not pairs:
+            raise ValueError(f"Cannot parse Sanchis-Calleja condition: {name!r}")
+        for morph_token, level_token in pairs:
+            cls._set_morphogen(vec, morph_token, level_token)
+
+    @classmethod
+    def _set_morphogen(
+        cls, vec: dict[str, float], morph: str, level: str,
+    ) -> None:
+        """Set one morphogen's concentration in the vector."""
+        col = _SC_COL_MAP[morph]
+
+        # Resolve dose-lookup key for morphogens with naming variants
+        lookup = morph
+        if morph == "FGF8":
+            lookup = "FGF8_late"  # Default for timing and combination conditions
+        elif morph == "Cyc":
+            lookup = "CycA"
+
+        if len(level) == 2 and level.startswith("t"):
+            # Timing condition tA-tE: fixed dose, variable window
+            base = lookup.split("_")[0]
+            vec[col] = _SC_TIMING_DOSES[base]
+            if base == "SHH":
+                vec["purmorphamine_uM"] = _SC_PM_TIMING_DOSE
+
+        elif level.startswith("t_"):
+            # Timing in combo context: t_B through t_E
+            base = lookup.split("_")[0]
+            vec[col] = _SC_TIMING_DOSES[base]
+            if base == "SHH":
+                vec["purmorphamine_uM"] = _SC_PM_TIMING_DOSE
+
+        elif level == "D-E":
+            # XAV939 microfluidic gradient D-E
+            vec[col] = _SC_XAV939_DE_UM
+
+        elif level.startswith("Grad_"):
+            # SHH spatial gradient — approximate as scalar
+            if level == "Grad_<A":
+                vec[col] = _SC_DOSE_LEVELS["SHH"]["A"] / 2
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"]["A"] / 2
+            elif level == "Grad_<C":
+                vec[col] = _SC_DOSE_LEVELS["SHH"]["C"] / 2
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"]["C"] / 2
+            elif level == "Grad_<E":
+                vec[col] = _SC_DOSE_LEVELS["SHH"]["E"] / 2
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"]["E"] / 2
+            elif level == "Grad_C-E":
+                # Midpoint of C and E ≈ level D
+                vec[col] = _SC_DOSE_LEVELS["SHH"]["D"]
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"]["D"]
+
+        else:
+            # Standard concentration level A-E
+            vec[col] = _SC_DOSE_LEVELS[lookup][level]
+            # Pair SHH with purmorphamine
+            if lookup == "SHH":
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"][level]
 
 
 # ==============================================================================
