@@ -28,8 +28,8 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from gopro.config import (
-    FIDELITY_CORRELATION_THRESHOLD,
-    FIDELITY_SKIP_MFBO_THRESHOLD,
+    FIDELITY_DROP_R2_THRESHOLD,
+    FIDELITY_SKIP_R2_THRESHOLD,
     get_logger,
 )
 
@@ -769,10 +769,10 @@ def build_fidelity_trend_figure(
         ))
 
     # Threshold lines
-    fig.add_hline(y=FIDELITY_SKIP_MFBO_THRESHOLD, line_dash="dash", line_color="green",
-                  annotation_text=f"Skip MF-BO (>{FIDELITY_SKIP_MFBO_THRESHOLD})")
-    fig.add_hline(y=FIDELITY_CORRELATION_THRESHOLD, line_dash="dash", line_color="red",
-                  annotation_text=f"Drop source (<{FIDELITY_CORRELATION_THRESHOLD})")
+    fig.add_hline(y=FIDELITY_SKIP_R2_THRESHOLD, line_dash="dash", line_color="green",
+                  annotation_text=f"Skip MF-BO (R²>{FIDELITY_SKIP_R2_THRESHOLD})")
+    fig.add_hline(y=FIDELITY_DROP_R2_THRESHOLD, line_dash="dash", line_color="red",
+                  annotation_text=f"Drop source (R²<{FIDELITY_DROP_R2_THRESHOLD})")
 
     fig.update_layout(
         title="Cross-Fidelity Correlation by Round",
@@ -1078,7 +1078,7 @@ def generate_report(
 
     # 4. Cell-space UMAP
     logger.info("Building section: Cell Space UMAP")
-    h5ad_path = data_dir / "amin_kelley_mapped.h5ad"
+    h5ad_path = data_dir / f"{output_prefix}_mapped.h5ad"
     cell_umap_desc = (
         "UMAP of individual cells from the scRNA-seq data, colored by predicted cell type "
         "(transferred from the HNOCA reference atlas via scPoli/KNN). "
@@ -1107,7 +1107,7 @@ def generate_report(
     else:
         sections["Cell Space UMAP"] = (
             cell_umap_desc,
-            _placeholder_figure("amin_kelley_mapped.h5ad not found"),
+            _placeholder_figure(f"{output_prefix}_mapped.h5ad not found"),
         )
 
     # 5. Plate map

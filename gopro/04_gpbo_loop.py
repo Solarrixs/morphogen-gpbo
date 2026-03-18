@@ -2683,6 +2683,17 @@ def run_gpbo_loop(
     """
     logger.info("--- GP-BO ROUND %d ---", round_num)
 
+    # Guard: TVR + multi-objective is unsupported — TVRModelEnsemble's
+    # _TVRPosterior lacks the covariance_matrix/mvn interface required by
+    # qLogNoisyExpectedHypervolumeImprovement.
+    if use_tvr and multi_objective:
+        raise ValueError(
+            "use_tvr is incompatible with multi_objective — TVRModelEnsemble "
+            "does not implement the covariance interface required by qLogNEHVI. "
+            "Use --multi-objective without --tvr, or use --tvr without "
+            "--multi-objective."
+        )
+
     # Build training set (potentially multi-fidelity)
     logger.info("Building training set...")
 

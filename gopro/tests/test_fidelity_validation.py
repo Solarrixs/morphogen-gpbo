@@ -274,15 +274,15 @@ class TestFidelityR2Thresholds:
         for key, val in FIDELITY_R2_THRESHOLDS.items():
             assert 0.0 < val < 1.0, f"{key} threshold {val} out of (0,1)"
 
-    def test_legacy_aliases_match(self):
-        """Legacy constants should match new thresholds dict."""
+    def test_explicit_aliases_match(self):
+        """Explicit R² aliases should match thresholds dict."""
         from gopro.config import (
-            FIDELITY_CORRELATION_THRESHOLD,
+            FIDELITY_DROP_R2_THRESHOLD,
             FIDELITY_R2_THRESHOLDS,
-            FIDELITY_SKIP_MFBO_THRESHOLD,
+            FIDELITY_SKIP_R2_THRESHOLD,
         )
-        assert FIDELITY_CORRELATION_THRESHOLD == FIDELITY_R2_THRESHOLDS["drop"]
-        assert FIDELITY_SKIP_MFBO_THRESHOLD == FIDELITY_R2_THRESHOLDS["skip"]
+        assert FIDELITY_DROP_R2_THRESHOLD == FIDELITY_R2_THRESHOLDS["drop"]
+        assert FIDELITY_SKIP_R2_THRESHOLD == FIDELITY_R2_THRESHOLDS["skip"]
 
 
 class TestThreeZoneRouting:

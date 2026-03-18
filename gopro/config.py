@@ -139,9 +139,9 @@ FIDELITY_R2_THRESHOLDS: dict[str, float] = {
     "skip": 0.90,   # Above this R², MF-BO adds no benefit
 }
 
-# Legacy aliases (backward compatibility for visualize_report and external callers)
-FIDELITY_CORRELATION_THRESHOLD = FIDELITY_R2_THRESHOLDS["drop"]
-FIDELITY_SKIP_MFBO_THRESHOLD = FIDELITY_R2_THRESHOLDS["skip"]
+# Explicit aliases for clarity (R²-based, not Spearman)
+FIDELITY_DROP_R2_THRESHOLD = FIDELITY_R2_THRESHOLDS["drop"]
+FIDELITY_SKIP_R2_THRESHOLD = FIDELITY_R2_THRESHOLDS["skip"]
 
 # Human-readable labels for fidelity levels
 FIDELITY_LABELS: dict[float, str] = {
