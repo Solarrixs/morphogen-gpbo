@@ -167,6 +167,7 @@ def encode_protocol_cellflow(
             "type": mol_type,
             "concentration": math.log1p(conc),
             "concentration_unit": col.split("_")[-1],
+            "concentration_scale": "log1p",
             "timing_start": timing_start,
             "timing_end": timing_end,
             "pathway": pathway,
