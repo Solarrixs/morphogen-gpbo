@@ -1081,6 +1081,7 @@ def fit_tvr_models(
     target_cell_types: Optional[list[str]] = None,
     use_ilr: bool = True,
     pseudocount: float | None = None,
+    explicit_priors: bool = False,
 ) -> tuple:
     """Fit separate GPs per fidelity level for Targeted Variance Reduction.
 
@@ -1093,6 +1094,7 @@ def fit_tvr_models(
         Y: Cell type fraction matrix.
         target_cell_types: Cell types to optimize for. None = all.
         use_ilr: Whether to apply ILR transform to Y.
+        explicit_priors: If True, set explicit lengthscale + noise priors.
 
     Returns:
         Tuple of (tvr_ensemble, train_X_tensor, train_Y_tensor, cell_type_cols)
@@ -1147,7 +1149,10 @@ def fit_tvr_models(
             input_transform=Normalize(d=X_tensor.shape[1]),
             outcome_transform=Standardize(m=Y_tensor.shape[1]),
         )
-        _set_dim_scaled_lengthscale_prior(model, X_tensor.shape[1])
+        if explicit_priors:
+            _set_explicit_priors(model, X_tensor.shape[1])
+        else:
+            _set_dim_scaled_lengthscale_prior(model, X_tensor.shape[1])
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
         fit_gpytorch_mll(mll)
 
@@ -3135,6 +3140,7 @@ def run_gpbo_loop(
             target_cell_types=target_cell_types,
             use_ilr=use_ilr,
             pseudocount=pseudocount,
+            explicit_priors=explicit_priors,
         )
     else:
         if use_tvr:
