@@ -4,6 +4,7 @@ import pytest
 import numpy as np
 import pandas as pd
 import torch
+import unittest.mock
 from pathlib import Path
 import sys
 import plotly.graph_objects as go
@@ -3128,7 +3129,9 @@ class TestExplicitPriors:
 class TestSobolQMCSampler:
     """Tests for Sobol QMC sampler in acquisition (TODO-32)."""
 
-    def _fit_simple_model(self, n=20, d=3):
+    _D = 3  # default dimensionality for test fixtures
+
+    def _fit_simple_model(self, n=20, d=_D):
         """Fit a simple SingleTaskGP for testing acquisition."""
         from botorch.models import SingleTaskGP
         from botorch.models.transforms import Normalize, Standardize
@@ -3149,18 +3152,27 @@ class TestSobolQMCSampler:
         fit_gpytorch_mll(mll)
         return model, train_X, train_Y
 
-    def test_sobol_sampler_used_in_acquisition(self):
-        """recommend_next_experiments creates a Sobol sampler."""
-        model, train_X, train_Y = self._fit_simple_model()
-        bounds = {f"x{i}": (0.0, 1.0) for i in range(3)}
-        columns = [f"x{i}" for i in range(3)]
+    def _make_bounds_and_columns(self, d=_D):
+        """Build unit-cube bounds and column names for d dimensions."""
+        columns = [f"x{i}" for i in range(d)]
+        bounds = {c: (0.0, 1.0) for c in columns}
+        return bounds, columns
 
+    def _recommend(self, mc_samples, n_recommendations=2):
+        """Shared helper: fit model → recommend with given mc_samples."""
+        model, train_X, train_Y = self._fit_simple_model()
+        bounds, columns = self._make_bounds_and_columns()
         recs = step04.recommend_next_experiments(
             model, train_X, train_Y,
             bounds=bounds, columns=columns,
-            n_recommendations=2,
-            mc_samples=64,
+            n_recommendations=n_recommendations,
+            mc_samples=mc_samples,
         )
+        return recs, columns
+
+    def test_sobol_sampler_used_in_acquisition(self):
+        """recommend_next_experiments produces valid results with custom mc_samples."""
+        recs, columns = self._recommend(mc_samples=64)
         assert len(recs) == 2
         # Recommendations should be within bounds
         for col in columns:
@@ -3168,19 +3180,21 @@ class TestSobolQMCSampler:
             assert recs[col].max() <= 1.01
 
     def test_mc_samples_clamped_to_max(self):
-        """mc_samples > 2048 is clamped to 2048."""
-        model, train_X, train_Y = self._fit_simple_model()
-        bounds = {f"x{i}": (0.0, 1.0) for i in range(3)}
-        columns = [f"x{i}" for i in range(3)]
-
-        # Should not raise — internally clamped to 2048
-        recs = step04.recommend_next_experiments(
-            model, train_X, train_Y,
-            bounds=bounds, columns=columns,
-            n_recommendations=2,
-            mc_samples=9999,
-        )
+        """mc_samples > 2048 is clamped to 2048 with a warning."""
+        mock_logger = unittest.mock.MagicMock()
+        original_logger = step04.logger
+        step04.logger = mock_logger
+        try:
+            recs, _ = self._recommend(mc_samples=9999)
+        finally:
+            step04.logger = original_logger
         assert len(recs) == 2
+        # Verify a warning was logged about clamping
+        warning_calls = [
+            c for c in mock_logger.warning.call_args_list
+            if "clamped" in str(c)
+        ]
+        assert len(warning_calls) == 1, "Expected a clamping warning log"
 
     def test_default_mc_samples_is_512(self):
         """Default mc_samples parameter is 512."""

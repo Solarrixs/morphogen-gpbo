@@ -1747,7 +1747,11 @@ def recommend_next_experiments(
     from botorch.sampling import SobolQMCNormalSampler
 
     # Clamp mc_samples to valid range
+    raw_mc_samples = mc_samples
     mc_samples = max(1, min(mc_samples, 2048))
+    if mc_samples != raw_mc_samples:
+        logger.warning("mc_samples=%d clamped to %d (valid range: 1–2048)",
+                        raw_mc_samples, mc_samples)
     sampler = SobolQMCNormalSampler(sample_shape=torch.Size([mc_samples]))
     logger.info("Using Sobol QMC sampler with %d MC samples", mc_samples)
 
