@@ -22,3 +22,4 @@
 | 12 | `09e43d1` | working | ralph/production-readiness-phase2 | [ralph-simplify] Warn on mc_samples clamping, DRY test setup |
 | 13 | `4bcd31d` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix input_warp review issues: log spam, MixedGP consistency |
 | 14 | `f81dc9b` | working | ralph/production-readiness-phase2 | [ralph-simplify] Fix per-fidelity ARD review issues: acquisition bounds, double extraction, heuristic |
+| 15 | `73e0d42` | working | ralph/production-readiness-phase2 | [ralph-simplify] Remove dead code from ZeroPassingKernel: orphaned _phi and forward methods after return statement |
