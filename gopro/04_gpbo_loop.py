@@ -3458,11 +3458,11 @@ if __name__ == "__main__":
                              "(from compute_bootstrap_uncertainty). Enables "
                              "heteroscedastic noise modeling via train_Yvar.")
     parser.add_argument("--fixed-noise", action="store_true",
-                        help="Enable heteroscedastic noise modeling (Cosenza 2022). "
-                             "Auto-discovers bootstrap variance CSV at standard path "
-                             "(data/gp_noise_variance_amin_kelley.csv) or computes "
-                             "uniform noise from Y column variance. Noise clamped "
-                             "at min=%.2g." % FIXED_NOISE_MIN_VARIANCE)
+                        help=f"Enable heteroscedastic noise modeling (Cosenza 2022). "
+                             f"Auto-discovers bootstrap variance CSV at standard path "
+                             f"(data/gp_noise_variance_amin_kelley.csv) or computes "
+                             f"uniform noise from Y column variance. Noise clamped "
+                             f"at min={FIXED_NOISE_MIN_VARIANCE:.2g}.")
     parser.add_argument("--log-scale", action="store_true",
                         help="Apply log1p transform to concentration columns before GP fitting. "
                              "Compresses dynamic range for log-linear dose-response (Kanda 2022). "
