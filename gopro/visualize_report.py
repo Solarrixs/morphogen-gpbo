@@ -777,7 +777,7 @@ def build_fidelity_trend_figure(
     fig.update_layout(
         title="Cross-Fidelity Correlation by Round",
         xaxis_title="Round",
-        yaxis_title="Spearman Correlation",
+        yaxis_title="R² (Coefficient of Determination)",
         yaxis=dict(range=[-0.1, 1.05]),
         xaxis=dict(dtick=1),
         template=PLOTLY_TEMPLATE,
