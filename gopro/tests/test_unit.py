@@ -5303,3 +5303,197 @@ class TestSanchisCallejaMultiFidelity:
 
         assert len(virtual_sources) == 1
         assert virtual_sources[0][2] == 0.65
+
+
+# ── S-5: Additional unit tests for new features ──────────────────────
+
+
+class TestZeroPassingKernelPhiMask:
+    """Additional ZeroPassingKernel tests covering the phi_mask method and edge cases."""
+
+    def test_phi_mask_returns_zero_for_zero_input(self):
+        """phi_mask method should also give k(0, x) ≈ 0."""
+        import torch
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=3))
+        zpk = ZPK(base, concentration_dims=[0, 1, 2], eps=1.0, method="phi_mask")
+
+        x_zero = torch.zeros(1, 3, dtype=torch.double)
+        x_nonzero = torch.rand(1, 3, dtype=torch.double) + 0.1
+
+        cov = zpk(x_zero, x_nonzero)
+        if hasattr(cov, "to_dense"):
+            cov = cov.to_dense()
+        assert torch.allclose(cov, torch.zeros_like(cov), atol=1e-6), (
+            f"phi_mask k(0, x) should be ~0, got {cov.item():.6f}"
+        )
+
+    def test_phi_mask_nonzero_for_nonzero_inputs(self):
+        """phi_mask method returns nonzero for two nonzero inputs."""
+        import torch
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=3))
+        zpk = ZPK(base, concentration_dims=[0, 1, 2], eps=1.0, method="phi_mask")
+
+        x1 = torch.rand(1, 3, dtype=torch.double) + 0.5
+        x2 = torch.rand(1, 3, dtype=torch.double) + 0.5
+
+        cov = zpk(x1, x2)
+        if hasattr(cov, "to_dense"):
+            cov = cov.to_dense()
+        assert cov.item() > 0.01, (
+            f"phi_mask k(x, x') should be nonzero, got {cov.item():.6f}"
+        )
+
+    def test_invalid_method_raises(self):
+        """Unknown method string should raise ValueError."""
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=3))
+        with pytest.raises(ValueError, match="Unknown zero-passing method"):
+            ZPK(base, concentration_dims=[0, 1, 2], method="invalid")
+
+    def test_schur_kernel_symmetry(self):
+        """Schur kernel should be symmetric: k(x1, x2) ≈ k(x2, x1)."""
+        import torch
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=3))
+        zpk = ZPK(base, concentration_dims=[0, 1, 2], method="schur")
+
+        torch.manual_seed(42)
+        x1 = torch.rand(3, 3, dtype=torch.double) + 0.1
+        x2 = torch.rand(4, 3, dtype=torch.double) + 0.1
+
+        k12 = zpk(x1, x2)
+        k21 = zpk(x2, x1)
+        if hasattr(k12, "to_dense"):
+            k12 = k12.to_dense()
+        if hasattr(k21, "to_dense"):
+            k21 = k21.to_dense()
+        torch.testing.assert_close(k12, k21.T, atol=1e-6, rtol=1e-6)
+
+
+class TestTVRPosteriorProperties:
+    """Additional tests for _TVRPosterior properties and TVR edge cases."""
+
+    @pytest.fixture
+    def tvr_posterior(self):
+        """Build a _TVRPosterior for testing."""
+        import torch
+        mean = torch.randn(5, 3, dtype=torch.double)
+        var = torch.rand(5, 3, dtype=torch.double).abs() + 0.01
+        return step04._TVRPosterior(mean, var)
+
+    def test_device_and_dtype(self, tvr_posterior):
+        """_TVRPosterior exposes device and dtype."""
+        assert tvr_posterior.device == torch.device("cpu")
+        assert tvr_posterior.dtype == torch.float64
+
+    def test_batch_shape(self, tvr_posterior):
+        """batch_shape should be all dims except last."""
+        assert tvr_posterior.batch_shape == torch.Size([5])
+
+    def test_base_sample_shape(self, tvr_posterior):
+        """base_sample_shape should be the last dim."""
+        assert tvr_posterior.base_sample_shape == torch.Size([3])
+
+    def test_rsample_with_sample_shape(self, tvr_posterior):
+        """rsample with explicit sample_shape returns correct shape."""
+        samples = tvr_posterior.rsample(torch.Size([7, 2]))
+        assert samples.shape == (7, 2, 5, 3)
+        assert torch.all(torch.isfinite(samples))
+
+    def test_sample_delegates_to_rsample(self, tvr_posterior):
+        """sample() should return same shape as rsample()."""
+        s1 = tvr_posterior.sample(torch.Size([4]))
+        assert s1.shape == (4, 5, 3)
+
+
+class TestConfidenceToNoiseVarianceExtra:
+    """Additional edge-case tests for confidence_to_noise_variance."""
+
+    def test_custom_base_noise(self):
+        """Non-default base_noise scales output proportionally."""
+        conf = pd.Series([1.0, 0.5], index=["a", "b"])
+        nv = step04.confidence_to_noise_variance(conf, base_noise=1.0)
+        assert nv["a"] == pytest.approx(1.0)
+        assert nv["b"] == pytest.approx(4.0)
+
+    def test_monotonicity(self):
+        """Higher confidence should always produce lower noise."""
+        confs = np.linspace(0.05, 1.0, 20)
+        conf_series = pd.Series(confs, index=[f"c{i}" for i in range(20)])
+        nv = step04.confidence_to_noise_variance(conf_series)
+        # noise should be strictly decreasing as confidence increases
+        assert all(nv.iloc[i] > nv.iloc[i + 1] for i in range(len(nv) - 1))
+
+    def test_preserves_index(self):
+        """Output Series should have same index as input."""
+        conf = pd.Series([0.8, 0.3, 0.6], index=["alpha", "beta", "gamma"])
+        nv = step04.confidence_to_noise_variance(conf)
+        assert list(nv.index) == ["alpha", "beta", "gamma"]
+
+
+class TestDesirabilityGateExtra:
+    """Additional edge-case tests for apply_desirability_gate."""
+
+    def test_cost_weight_clamped_above_one(self):
+        """cost_weight > 1.0 is clamped to 1.0."""
+        recs = pd.DataFrame({"SHH_uM": [1.0, 0.0]}, index=["A", "B"])
+        acq = pd.Series([1.0, 1.0], index=["A", "B"])
+        result = step04.apply_desirability_gate(recs, acq, cost_weight=5.0)
+        # With clamped weight=1.0 and normalized cost, the most expensive
+        # should have desirability = acq * (1 - 1.0 * 1.0) = 0
+        max_cost_idx = result["cocktail_cost"].idxmax()
+        assert result.loc[max_cost_idx, "desirability"] == pytest.approx(0.0)
+
+    def test_all_zero_cost(self):
+        """When all cocktails cost 0, desirability equals acquisition."""
+        recs = pd.DataFrame({"fake_uM": [0.0, 0.0]}, index=["A", "B"])
+        acq = pd.Series([0.7, 0.3], index=["A", "B"])
+        result = step04.apply_desirability_gate(
+            recs, acq, cost_dict={"fake_uM": 0.0}, cost_weight=0.5,
+        )
+        np.testing.assert_allclose(result.loc["A", "desirability"], 0.7, atol=1e-9)
+        np.testing.assert_allclose(result.loc["B", "desirability"], 0.3, atol=1e-9)
+
+    def test_output_sorted_descending(self):
+        """Output should be sorted by desirability descending."""
+        recs = pd.DataFrame(
+            {"SHH_uM": [0.0, 1.0, 0.5]}, index=["A", "B", "C"]
+        )
+        acq = pd.Series([0.5, 1.0, 0.8], index=["A", "B", "C"])
+        result = step04.apply_desirability_gate(recs, acq, cost_weight=0.1)
+        desirabilities = result["desirability"].values
+        assert all(desirabilities[i] >= desirabilities[i + 1] for i in range(len(desirabilities) - 1))
+
+
+class TestValidationPlateExtra:
+    """Additional validation plate edge-case tests."""
+
+    def test_well_labels_unique(self):
+        """All well_label values should be unique."""
+        np.random.seed(42)
+        cols = ["WNT_uM", "BMP_uM", "SHH_uM", "RA_uM"]
+        data = np.random.uniform(0.1, 10.0, size=(8, len(cols)))
+        top = pd.DataFrame(data, columns=cols, index=[f"cond_{i}" for i in range(8)])
+        plate = step04.generate_validation_plate(top)
+        assert plate["well_label"].nunique() == len(plate), "well_labels should be unique"
+
+    def test_source_condition_column_present(self):
+        """Output should have source_condition column referencing input index."""
+        np.random.seed(42)
+        cols = ["WNT_uM", "BMP_uM"]
+        data = np.random.uniform(0.1, 10.0, size=(8, len(cols)))
+        top = pd.DataFrame(data, columns=cols, index=[f"cond_{i}" for i in range(8)])
+        plate = step04.generate_validation_plate(top)
+        assert "source_condition" in plate.columns
+        # All source conditions should come from top's index
+        assert set(plate["source_condition"].unique()).issubset(set(top.index))
