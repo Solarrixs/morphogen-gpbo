@@ -30,7 +30,6 @@ from collections import namedtuple
 import numpy as np
 import pandas as pd
 import torch
-import yaml
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -2643,19 +2642,9 @@ def compute_ard_lipschitz(model, columns: list[str]) -> pd.DataFrame:
 # --- Desirability-based feasibility gate (Cosenza 2022) ---
 # Agonist/antagonist groups loaded from gopro/agents/pathway_rules.yaml
 # (single source of truth shared with gopro/agents/scorer.py).
-_PATHWAY_RULES_PATH = Path(__file__).parent / "agents" / "pathway_rules.yaml"
+from gopro.agents.scorer import load_pathway_rules
 
-
-@functools.lru_cache(maxsize=1)
-def _load_antagonist_groups() -> dict[str, dict[str, list[str]]]:
-    """Load agonist_groups from pathway_rules.yaml."""
-    with open(_PATHWAY_RULES_PATH) as f:
-        rules = yaml.safe_load(f)
-    return rules["agonist_groups"]
-
-
-# Module-level alias for backward compatibility (used by tests).
-ANTAGONIST_PAIRS = _load_antagonist_groups()
+ANTAGONIST_PAIRS = load_pathway_rules()["agonist_groups"]
 
 
 def compute_desirability(
