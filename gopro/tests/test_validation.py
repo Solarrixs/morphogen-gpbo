@@ -159,3 +159,63 @@ class TestValidateTrainingCsvs:
 
         warnings = validate_training_csvs(frac_path, morph_path)
         assert any("Unrecognized" in w for w in warnings)
+
+
+class TestValidateFidelityReport:
+    """Tests for validate_fidelity_report."""
+
+    @pytest.fixture
+    def valid_report(self, tmp_path):
+        """Create a valid fidelity report CSV."""
+        report = pd.DataFrame({
+            "composite_fidelity": [0.85, 0.72],
+            "rss_score": [0.9, 0.7],
+            "dominant_region": ["Dorsal telencephalon", "Ventral telencephalon"],
+            "maturity_score": [0.8, 0.6],
+        }, index=["cond_A", "cond_B"])
+        path = tmp_path / "fidelity_report.csv"
+        report.to_csv(path)
+        return path
+
+    def test_valid_report_passes(self, valid_report):
+        warnings = validate_fidelity_report(valid_report)
+        assert isinstance(warnings, list)
+        # No maturity warning since column is present
+        assert not any("maturity_score" in w for w in warnings)
+
+    def test_missing_composite_fidelity_raises(self, tmp_path):
+        report = pd.DataFrame({
+            "rss_score": [0.9],
+            "dominant_region": ["Dorsal"],
+        }, index=["cond_A"])
+        path = tmp_path / "bad_report.csv"
+        report.to_csv(path)
+        with pytest.raises(ValidationError, match="Missing required columns"):
+            validate_fidelity_report(path)
+
+    def test_out_of_range_score_warns(self, tmp_path):
+        report = pd.DataFrame({
+            "composite_fidelity": [1.5],  # out of range
+            "rss_score": [0.9],
+            "dominant_region": ["Dorsal"],
+            "maturity_score": [0.8],
+        }, index=["cond_A"])
+        path = tmp_path / "range_report.csv"
+        report.to_csv(path)
+        warnings = validate_fidelity_report(path)
+        assert any("outside [0, 1]" in w for w in warnings)
+
+    def test_missing_maturity_warns(self, tmp_path):
+        report = pd.DataFrame({
+            "composite_fidelity": [0.85],
+            "rss_score": [0.9],
+            "dominant_region": ["Dorsal"],
+        }, index=["cond_A"])
+        path = tmp_path / "no_maturity.csv"
+        report.to_csv(path)
+        warnings = validate_fidelity_report(path)
+        assert any("maturity_score" in w for w in warnings)
+
+    def test_nonexistent_file_raises(self, tmp_path):
+        with pytest.raises(ValidationError, match="not found"):
+            validate_fidelity_report(tmp_path / "nonexistent.csv")

@@ -291,6 +291,14 @@ def validate_fidelity_report(
                         f"[{vals.min():.4f}, {vals.max():.4f}]"
                     )
 
+    # Check for maturity score column (optional — depends on step 02 KNN distances)
+    if "maturity_score" not in report.columns:
+        warnings.append(
+            "maturity_score column absent — transcriptomic maturity sub-score "
+            "will not be available. Re-run step 02 with updated transfer_labels_knn "
+            "and step 03 to enable."
+        )
+
     if warnings:
         for w in warnings:
             logger.warning(w)

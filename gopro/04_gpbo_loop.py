@@ -3554,6 +3554,31 @@ def merge_multi_fidelity_data(
                     Y[ct_cols], factor=cellflow_variance_inflation,
                 ).values
 
+        # CellRank2 transport quality: inflate noise for unconverged/high-cost transitions
+        if fidelity == 0.5:
+            tq_path = fractions_csv.parent / "cellrank2_transport_quality.csv"
+            if tq_path.exists():
+                tq = pd.read_csv(str(tq_path))
+                if "status" in tq.columns:
+                    # Map worst transition status to a noise multiplier.
+                    # All virtual conditions share the same transport chain,
+                    # so the worst status applies to all points at this fidelity.
+                    status_to_noise = {"OK": 1.0, "HIGH_COST": 10.0, "NOT_CONVERGED": 100.0}
+                    worst_mult = max(
+                        status_to_noise.get(s, 1.0) for s in tq["status"]
+                    )
+                    if worst_mult > 1.0:
+                        noise_val = base_noise * worst_mult
+                        for cond in X.index:
+                            noise_parts[cond] = noise_val
+                        logger.warning(
+                            "CellRank2 transport quality: worst status gives %.0fx noise "
+                            "inflation for %d virtual conditions",
+                            worst_mult, len(X),
+                        )
+                    else:
+                        logger.info("CellRank2 transport quality: all transitions OK")
+
         all_X.append(X)
         all_Y.append(Y)
         logger.info("Loaded %d points at fidelity=%s", len(X), fidelity)
@@ -4034,6 +4059,16 @@ def run_gpbo_loop(
             "does not implement the covariance interface required by qLogNEHVI. "
             "Use --multi-objective without --tvr, or use --tvr without "
             "--multi-objective."
+        )
+
+    # Guard: SAASBO + scalarized multi-output is unsupported — the ModelListGP
+    # of fully Bayesian sub-models lacks the joint posterior interface required
+    # by scalarized qLogEI. Fail early before the expensive NUTS sampler runs.
+    if use_saasbo and not multi_objective and not use_ilr and not use_alr:
+        raise ValueError(
+            "SAASBO with multi-output (no ILR/ALR) requires --multi-objective "
+            "to route through qLogNEHVI. Either enable --multi-objective, or "
+            "use --ilr/--alr to reduce to single-output, or disable --saasbo."
         )
 
     # Build training set (potentially multi-fidelity)

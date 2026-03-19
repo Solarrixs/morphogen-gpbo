@@ -210,6 +210,13 @@ def build_cellrank_kernel(
 ) -> object:
     """Build CellRank 2 RealTimeKernel from moscot transport maps.
 
+    .. deprecated::
+        Not called by the pipeline. The actual projection pathway uses
+        ``project_query_forward()`` with direct transport matrix composition
+        via ``_compose_transport_chain()``, bypassing the CellRank kernel/
+        GPCCA estimator entirely. Retained for potential future use with
+        fate probability-based scoring.
+
     Args:
         adata: Temporal atlas AnnData.
         problem: Solved moscot TemporalProblem.
@@ -243,6 +250,9 @@ def compute_fate_probabilities(
     n_macrostates: int = 12,
 ) -> tuple[object, pd.DataFrame]:
     """Compute cell fate probabilities using GPCCA estimator.
+
+    .. deprecated::
+        Not called by the pipeline. See ``build_cellrank_kernel`` docstring.
 
     Args:
         adata: Temporal atlas AnnData.
@@ -971,7 +981,9 @@ def main() -> None:
     if not virtual_X.empty:
         virtual_Y.to_csv(str(DATA_DIR / "cellrank2_virtual_fractions.csv"))
         virtual_X.to_csv(str(DATA_DIR / "cellrank2_virtual_morphogens.csv"))
-        # TODO: Wire quality scores into step 04 to filter/weight virtual data
+        # Transport quality is read by merge_multi_fidelity_data() in step 04
+        # to inflate noise variance for virtual conditions routed through
+        # HIGH_COST or NOT_CONVERGED transitions.
         quality_report.to_csv(
             str(DATA_DIR / "cellrank2_transport_quality.csv"), index=False
         )

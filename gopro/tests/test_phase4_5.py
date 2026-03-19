@@ -1361,6 +1361,71 @@ class TestConfidenceFiltering:
         assert len(X) == 8  # all points kept
 
 
+class TestCellRank2TransportQuality:
+    """Test that merge_multi_fidelity_data reads CellRank2 transport quality."""
+
+    def test_unconverged_transport_inflates_noise(self, tmp_path):
+        """NOT_CONVERGED status should inflate noise for CellRank2 virtual conditions."""
+        # Real data
+        real_Y = pd.DataFrame({"Neuron": [0.7, 0.6], "Glia": [0.3, 0.4]},
+                              index=["c1", "c2"])
+        real_X = pd.DataFrame({"CHIR99021_uM": [1.5, 3.0]}, index=["c1", "c2"])
+        real_Y.to_csv(tmp_path / "real_fracs.csv")
+        real_X.to_csv(tmp_path / "real_morphs.csv")
+
+        # CellRank2 virtual data
+        cr_Y = pd.DataFrame({"Neuron": [0.5, 0.8], "Glia": [0.5, 0.2]},
+                            index=["v1_day90", "v2_day120"])
+        cr_X = pd.DataFrame({"CHIR99021_uM": [2.0, 4.0]}, index=["v1_day90", "v2_day120"])
+        cr_Y.to_csv(tmp_path / "cr_fracs.csv")
+        cr_X.to_csv(tmp_path / "cr_morphs.csv")
+
+        # Transport quality report with one unconverged transition
+        tq = pd.DataFrame({
+            "transition": ["60 -> 90", "90 -> 120"],
+            "cost": [5.0, 200.0],
+            "converged": [True, False],
+            "status": ["OK", "NOT_CONVERGED"],
+        })
+        tq.to_csv(tmp_path / "cellrank2_transport_quality.csv", index=False)
+
+        sources = [
+            (tmp_path / "real_fracs.csv", tmp_path / "real_morphs.csv", 1.0),
+            (tmp_path / "cr_fracs.csv", tmp_path / "cr_morphs.csv", 0.5),
+        ]
+        X, Y, noise = step04.merge_multi_fidelity_data(sources)
+        assert noise is not None
+        # Virtual conditions should have inflated noise
+        assert noise.loc["v1_day90", "Neuron"] > 1e-3  # base_noise default
+
+    def test_all_ok_transport_no_noise(self, tmp_path):
+        """All-OK transport quality should not inflate noise."""
+        real_Y = pd.DataFrame({"Neuron": [0.7], "Glia": [0.3]}, index=["c1"])
+        real_X = pd.DataFrame({"CHIR99021_uM": [1.5]}, index=["c1"])
+        real_Y.to_csv(tmp_path / "real_fracs.csv")
+        real_X.to_csv(tmp_path / "real_morphs.csv")
+
+        cr_Y = pd.DataFrame({"Neuron": [0.5], "Glia": [0.5]}, index=["v1"])
+        cr_X = pd.DataFrame({"CHIR99021_uM": [2.0]}, index=["v1"])
+        cr_Y.to_csv(tmp_path / "cr_fracs.csv")
+        cr_X.to_csv(tmp_path / "cr_morphs.csv")
+
+        tq = pd.DataFrame({
+            "transition": ["60 -> 90"],
+            "cost": [5.0],
+            "converged": [True],
+            "status": ["OK"],
+        })
+        tq.to_csv(tmp_path / "cellrank2_transport_quality.csv", index=False)
+
+        sources = [
+            (tmp_path / "real_fracs.csv", tmp_path / "real_morphs.csv", 1.0),
+            (tmp_path / "cr_fracs.csv", tmp_path / "cr_morphs.csv", 0.5),
+        ]
+        X, Y, noise = step04.merge_multi_fidelity_data(sources)
+        assert noise is None  # No noise inflation needed
+
+
 class TestConfidenceToNoiseVariance:
     """Test confidence_to_noise_variance helper and merge integration."""
 
