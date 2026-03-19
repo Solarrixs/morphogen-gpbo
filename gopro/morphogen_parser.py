@@ -494,10 +494,12 @@ _TIMING_WINDOW_LOOKUP: dict[str, dict[str, int]] = {
     "SAG-d6-11":         {"SAG": TIMING_EARLY},
     "SAG-d11-16":        {"SAG": TIMING_MID},
     "SAG-d16-21":        {"SAG": TIMING_LATE},
-    "CHIR-SAGd10-21":    {"CHIR99021": TIMING_FULL, "SAG": TIMING_FULL},
+    # NOTE: d10-21 spans mid+late windows. TIMING_FULL (6-21) is the closest
+    # categorical approximation; use _TEMPORAL_APPLICATION_WINDOWS for exact days.
+    "CHIR-SAGd10-21":    {"CHIR99021": TIMING_FULL, "SAG": TIMING_FULL},  # SAG actual: (10,21)
     "CHIR-SAG-d16-21":   {"CHIR99021": TIMING_LATE, "SAG": TIMING_LATE},
     "SAG-CHIR-d16-21":   {"CHIR99021": TIMING_LATE, "SAG": TIMING_FULL},
-    "SAG-CHIRd10-21":    {"CHIR99021": TIMING_LATE, "SAG": TIMING_FULL},
+    "SAG-CHIRd10-21":    {"CHIR99021": TIMING_FULL, "SAG": TIMING_FULL},  # CHIR actual: (10,21)
     # --- BMP4 sub-windows ---
     "BMP4 CHIR d11-16":  {"CHIR99021": TIMING_MID, "BMP4": TIMING_MID},
 }
@@ -890,7 +892,7 @@ _SC_DOSE_LEVELS: dict[str, dict[str, float]] = {
 # Fixed doses for timing experiments tA-tE (all in µM)
 _SC_TIMING_DOSES: dict[str, float] = {
     "RA": nM_to_uM(250.0),                                     # 250 nM
-    "XAV939": nM_to_uM(180.0),                                 # 180 nM
+    "XAV939": 1.8,                                              # 1.8 µM (corrected: 180 nM was likely a unit error; dose-response range is 1-5 µM)
     "FGF8": ng_mL_to_uM(100.0, PROTEIN_MW_KDA["FGF8"]),       # 100 ng/mL
     "SHH": ng_mL_to_uM(200.0, PROTEIN_MW_KDA["SHH"]),         # 200 ng/mL
     "BMP4": nM_to_uM(5.0),                                     # 5 nM

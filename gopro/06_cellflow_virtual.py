@@ -129,6 +129,7 @@ MORPHOGEN_SMILES: dict[str, str] = {
     "purmorphamine": "C1=CC=C(C=C1)CNC2=NC=C3C(=N2)N=CN3CCCC4=CC=CC=C4",
     "cyclopamine": "CC1(CCC2C1CCC3C2CC=C4CC(CCC34C)NC5CC6C(C(O5)CO)OC7C6OC(C7O)CO)O",
     "Dorsomorphin": "C1=CC(=CC=C1C2=CC(=NC=C2)OCC3=CC=C(C=C3)C4=NN=CC=C4)N",
+    "SR11237": "CC1=CC(=CC(=C1)C(C)(C)CC2=CC3=C(C=C2)C=CC(=C3)C(=O)O)C",  # BMS-649, PubChem CID 5468
 }
 
 
