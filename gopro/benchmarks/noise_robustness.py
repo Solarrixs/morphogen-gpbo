@@ -50,11 +50,11 @@ def run_noise_sweep(
 
     for noise in noise_levels:
         for batch_size in batch_sizes:
-            rng = np.random.RandomState(seed)
+            rng = np.random.default_rng(seed)
             fn = ToyMorphogenFunction(noise_std=noise, seed=seed)
 
             # Generate initial random points
-            x_init = rng.rand(n_initial, n_morphogens) * 10.0
+            x_init = rng.random((n_initial, n_morphogens)) * 10.0
             y_init = fn.evaluate(x_init)
             # Neuron fraction is column 0
             neuron_fracs = y_init[:, 0].tolist()
@@ -75,7 +75,7 @@ def run_noise_sweep(
             total_evaluated = n_initial
 
             for rnd in range(1, n_rounds + 1):
-                x_batch = rng.rand(batch_size, n_morphogens) * 10.0
+                x_batch = rng.random((batch_size, n_morphogens)) * 10.0
                 y_batch = fn.evaluate(x_batch)
                 batch_neuron = y_batch[:, 0].tolist()
                 neuron_fracs.extend(batch_neuron)

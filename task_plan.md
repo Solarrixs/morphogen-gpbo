@@ -23,7 +23,7 @@
 - [x] I-3: Add TVR gradient warning docstring + acquisition optimization test | Acceptance: docstring updated, 2 tests added, all pass
 - [x] I-4: Deduplicate antagonist pairs — YAML single source of truth | Acceptance: ANTAGONIST_PAIRS removed from 04, both consumers load YAML
 - [x] I-1: Extract _inflate_cellflow_variance — remove importlib usage | Acceptance: no importlib.util in 04_gpbo_loop.py
-- [ ] S-1: Replace np.random.RandomState with default_rng in benchmarks | Acceptance: no RandomState in benchmarks/
+- [x] S-1: Replace np.random.RandomState with default_rng in benchmarks | Acceptance: no RandomState in benchmarks/
 - [ ] S-2: Optimize score_gene_signatures memory — copy obs not full AnnData | Acceptance: reduced memory
 - [ ] S-3: Rename/document run_noise_sweep | Acceptance: name or docstring clarified
 - [ ] S-4: Fix _fidelity_to_task_idx dtype to torch.long | Acceptance: dtype is torch.long

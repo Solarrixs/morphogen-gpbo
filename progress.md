@@ -2,6 +2,13 @@
 
 ## Iteration Log
 
+## Iteration 4 (ralph-4) — 2026-03-19
+- Task: S-1 — Replace np.random.RandomState with np.random.default_rng in benchmarks
+- Result: pass
+- Files changed: gopro/benchmarks/toy_morphogen_function.py (+1/-1), gopro/benchmarks/noise_robustness.py (+3/-3)
+- Quality: Replaced RandomState with default_rng in both benchmark files. Also updated .rand() → .random() API calls in noise_robustness.py. All 26 benchmark tests pass.
+- Notes: 4 code review items remaining (S-2 through S-5).
+
 ## Iteration 3 (ralph-3) — 2026-03-19
 - Task: I-1 — Extract _inflate_cellflow_variance (remove importlib from 04_gpbo_loop.py)
 - Result: pass
