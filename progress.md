@@ -2,6 +2,13 @@
 
 ## Iteration Log
 
+## Iteration 7 (ralph-7) — 2026-03-19
+- Task: S-4 — Fix _fidelity_to_task_idx dtype to torch.long
+- Result: pass
+- Files changed: gopro/04_gpbo_loop.py (+1/-1), gopro/tests/test_unit.py (+3/-2), task_plan.md (+1/-1)
+- Quality: Changed dtype from fidelity_values.dtype (float64) to torch.long for IndexKernel task indices. Added dtype assertions to both existing fidelity_to_task_idx tests.
+- Notes: 1 code review item remaining (S-5: add 12+ unit tests for new features).
+
 ## Iteration 6 (ralph-6) — 2026-03-19
 - Task: S-3 — Rename run_noise_sweep → run_random_baseline_noise_sweep
 - Result: pass
