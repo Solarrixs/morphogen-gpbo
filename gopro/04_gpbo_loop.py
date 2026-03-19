@@ -91,6 +91,62 @@ def confidence_to_noise_variance(
     return base_noise / (conf_clamped ** 2)
 
 
+def characterize_fidelity_noise(
+    X: pd.DataFrame,
+    Y: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compute empirical noise characteristics per fidelity level.
+
+    For each fidelity level in the training data, computes:
+    - n_points: number of training points
+    - mean_variance: mean per-column variance of Y across conditions
+    - median_variance: median per-column variance
+    - coefficient_of_variation: mean CV across cell types
+
+    This helps diagnose whether low-fidelity data is too noisy to be useful
+    and informs GP noise prior selection.
+
+    Args:
+        X: Training features with 'fidelity' column.
+        Y: Training targets (cell type fractions).
+
+    Returns:
+        DataFrame indexed by fidelity level with noise statistics.
+    """
+    if "fidelity" not in X.columns:
+        raise ValueError("X must contain a 'fidelity' column")
+
+    results = []
+    for fidelity_level, idx in X.groupby("fidelity").groups.items():
+        Y_group = Y.loc[idx]
+        n_points = len(Y_group)
+
+        col_variances = Y_group.var(ddof=1) if n_points > 1 else pd.Series(
+            0.0, index=Y_group.columns,
+        )
+
+        col_means = Y_group.mean()
+        # CV = std / mean; guard against zero-mean columns
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cvs = np.where(
+                col_means.values > 0,
+                np.sqrt(col_variances.values) / col_means.values,
+                0.0,
+            )
+        mean_cv = float(np.mean(cvs))
+
+        results.append({
+            "fidelity": fidelity_level,
+            "n_points": n_points,
+            "mean_variance": float(col_variances.mean()),
+            "median_variance": float(col_variances.median()),
+            "coefficient_of_variation": mean_cv,
+        })
+
+    df = pd.DataFrame(results).set_index("fidelity").sort_index(ascending=False)
+    return df
+
+
 def cellflow_relevance_check(
     X_all: pd.DataFrame,
     Y_all: pd.DataFrame,
@@ -2670,6 +2726,46 @@ def compute_desirability(
     return phi
 
 
+def generate_lhd_fill(
+    bounds: dict[str, tuple[float, float]],
+    n_points: int,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Generate Latin Hypercube Design space-filling points.
+
+    Uses ``scipy.stats.qmc.LatinHypercube`` to create ``n_points`` in the
+    unit hypercube, then scales to the actual bounds.  The ``fidelity``
+    column is excluded if present (LHD should not fill the fidelity
+    dimension).
+
+    Args:
+        bounds: Dict mapping column names to (lo, hi) tuples.
+        n_points: Number of LHD points to generate.
+        seed: RNG seed for reproducibility.
+
+    Returns:
+        DataFrame with ``n_points`` rows and one column per non-fidelity
+        bound dimension.
+    """
+    from scipy.stats.qmc import LatinHypercube
+
+    # Filter out fidelity dimension
+    cols = [c for c in bounds if c != "fidelity"]
+    if not cols:
+        raise ValueError("No non-fidelity dimensions in bounds for LHD fill")
+
+    d = len(cols)
+    sampler = LatinHypercube(d=d, seed=seed)
+    unit_samples = sampler.random(n=n_points)  # (n_points, d) in [0, 1]
+
+    # Scale to actual bounds
+    lower = np.array([bounds[c][0] for c in cols])
+    upper = np.array([bounds[c][1] for c in cols])
+    scaled = unit_samples * (upper - lower) + lower
+
+    return pd.DataFrame(scaled, columns=cols)
+
+
 def recommend_next_experiments(
     model,
     train_X: torch.Tensor,
@@ -2691,6 +2787,8 @@ def recommend_next_experiments(
     train_X_df: Optional[pd.DataFrame] = None,
     train_Y_df: Optional[pd.DataFrame] = None,
     contextual_cols: Optional[list[str]] = None,
+    n_lhd_fill: int = 0,
+    round_num: int = 1,
 ) -> pd.DataFrame:
     """Use acquisition function to recommend next experiments.
 
@@ -2738,10 +2836,17 @@ def recommend_next_experiments(
             log_harvest_day, base media) that cannot vary between wells on
             the same plate. Each is fixed to its training-data mean value.
             Uses BoTorch's native ``fixed_features`` in ``optimize_acqf``.
+        n_lhd_fill: Number of Latin Hypercube Design space-filling points to
+            include in the recommendations. These replace BO-recommended slots
+            and are only active when ``round_num > 1``. (default: 0)
+        round_num: Current optimization round number. LHD fill is skipped for
+            Round 1 (expert-designed literature conditions). (default: 1)
 
     Returns:
         DataFrame with recommended morphogen concentrations and predictions.
         When ``n_controls > 0``, includes an ``is_control`` boolean column.
+        When ``n_lhd_fill > 0`` and ``round_num > 1``, includes an
+        ``is_lhd_fill`` boolean column.
     """
     from botorch.optim import optimize_acqf
     from botorch.acquisition import qLogExpectedImprovement
@@ -2940,8 +3045,22 @@ def recommend_next_experiments(
             f"n_recommendations ({n_recommendations})"
         )
 
+    # LHD space-filling: only active for Round 2+
+    effective_lhd = n_lhd_fill if (n_lhd_fill > 0 and round_num > 1) else 0
+    if effective_lhd >= n_unique:
+        raise ValueError(
+            f"n_lhd_fill ({n_lhd_fill}) must be less than the number of unique "
+            f"BO slots ({n_unique})"
+        )
+    n_bo_unique = n_unique - effective_lhd
+    if effective_lhd > 0:
+        logger.info(
+            "LHD gap-fill: %d slots reserved for space-filling, %d for BO",
+            effective_lhd, n_bo_unique,
+        )
+
     # When desirability gate is active, generate 2x candidates and filter
-    n_generate = n_unique * 2 if desirability_gate else n_unique
+    n_generate = n_bo_unique * 2 if desirability_gate else n_bo_unique
 
     # Optimize acquisition function
     logger.info("Optimizing acquisition function for %d candidates...", n_generate)
@@ -2970,8 +3089,8 @@ def recommend_next_experiments(
             # Joint batch acquisition — use phi as post-hoc filter on candidates
             weighted_acq = phi_tensor
 
-        # Select top n_unique by desirability-weighted acquisition
-        top_indices = weighted_acq.argsort(descending=True)[:n_unique]
+        # Select top n_bo_unique by desirability-weighted acquisition
+        top_indices = weighted_acq.argsort(descending=True)[:n_bo_unique]
         filtered_phi = phi[top_indices.cpu().numpy()]
         candidates = candidates[top_indices]
         acq_values = weighted_acq[top_indices] if acq_values.dim() > 0 else acq_values
@@ -2987,7 +3106,7 @@ def recommend_next_experiments(
     if n_duplicates > 0:
         logger.info("Adding %d QC duplicate(s) for noise estimation", n_duplicates)
         # Top conditions by acquisition value are first in the batch
-        dup_indices = list(range(min(n_duplicates, n_unique)))
+        dup_indices = list(range(min(n_duplicates, n_bo_unique)))
         dup_candidates = candidates[dup_indices]
         candidates = torch.cat([candidates, dup_candidates], dim=0)
         dup_acq = acq_values[dup_indices] if acq_values.dim() > 0 else acq_values
@@ -3006,7 +3125,7 @@ def recommend_next_experiments(
     )
 
     # Mark QC duplicates
-    is_duplicate = [False] * n_unique + [True] * n_duplicates
+    is_duplicate = [False] * n_bo_unique + [True] * n_duplicates
     recommendations["is_qc_duplicate"] = is_duplicate[:len(recommendations)]
 
     # Add predictions: convert from log-ratio space back to composition space if applicable
@@ -3027,11 +3146,28 @@ def recommend_next_experiments(
     # Add desirability scores (reuse values from filtering, avoid redundant recomputation)
     if desirability_gate:
         if n_duplicates > 0:
-            dup_phi = filtered_phi[:min(n_duplicates, n_unique)]
+            dup_phi = filtered_phi[:min(n_duplicates, n_bo_unique)]
             full_phi = np.concatenate([filtered_phi, dup_phi])
         else:
             full_phi = filtered_phi
         recommendations["desirability_score"] = full_phi
+
+    # Append LHD space-filling points (Round 2+ only)
+    recommendations["is_lhd_fill"] = False
+    if effective_lhd > 0:
+        lhd_df = generate_lhd_fill(bounds, n_points=effective_lhd, seed=42)
+        # Align columns: add any missing columns as NaN
+        for col in recommendations.columns:
+            if col not in lhd_df.columns:
+                lhd_df[col] = np.nan
+        lhd_df["is_lhd_fill"] = True
+        lhd_df["is_qc_duplicate"] = False
+        lhd_df["acquisition_value"] = np.nan
+        lhd_df = lhd_df[recommendations.columns]
+        recommendations = pd.concat(
+            [recommendations, lhd_df], ignore_index=True,
+        )
+        logger.info("Appended %d LHD space-filling points", effective_lhd)
 
     # Append carry-forward controls
     recommendations["is_control"] = False
@@ -4119,6 +4255,7 @@ def run_gpbo_loop(
     saasbo_thinning: int = 16,
     n_controls: int = 0,
     contextual_cols: Optional[list[str]] = None,
+    n_lhd_fill: int = 0,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -4327,6 +4464,14 @@ def run_gpbo_loop(
     else:
         X, Y = X_real, Y_real
         confidence_noise = None
+
+    # Fidelity noise characterization (TODO-14)
+    if "fidelity" in X.columns:
+        noise_stats = characterize_fidelity_noise(X, Y)
+        logger.info("Fidelity noise characterization:\n%s", noise_stats.to_string())
+        noise_stats_path = DATA_DIR / f"fidelity_noise_round{round_num}.csv"
+        noise_stats.to_csv(noise_stats_path)
+        logger.info("Saved fidelity noise stats to %s", noise_stats_path)
 
     # CellFlow LOO-CV relevance check (rMFBO, Mikkola et al. 2023)
     # After merging, verify that CellFlow data actually helps GP predictions.
@@ -4576,6 +4721,8 @@ def run_gpbo_loop(
         train_X_df=X_active,
         train_Y_df=Y,
         contextual_cols=contextual_cols,
+        n_lhd_fill=n_lhd_fill,
+        round_num=round_num,
     )
 
     # Inverse log-scale: convert recommendations back to original µM units
@@ -4714,6 +4861,85 @@ def run_gpbo_loop(
     logger.info("Diagnostics saved to %s", diag_path)
 
     return recommendations
+
+
+def generate_validation_plate(
+    top_conditions: pd.DataFrame,
+    n_cocktails: int = 6,
+    n_replicates: int = 6,
+    dose_factors: tuple[float, ...] = (0.3, 1.0, 3.0),
+    replicate_top_n: int = 2,
+) -> pd.DataFrame:
+    """Generate a validation plate map with half-log dose-response.
+
+    Creates a 24-well plate with:
+    - n_cocktails x len(dose_factors) dose-response wells
+    - n_replicates replicate wells for the top replicate_top_n cocktails
+
+    Total wells = n_cocktails * len(dose_factors) + n_replicates
+    Default: 6*3 + 6 = 24 wells
+
+    Args:
+        top_conditions: DataFrame of top-scoring morphogen conditions
+            (from GP recommendations or fidelity report). Index = condition
+            names, columns = morphogen concentrations.
+        n_cocktails: Number of cocktails to test dose-response for.
+        n_replicates: Total replicate wells across top cocktails.
+        dose_factors: Multiplicative dose factors (default: half-log spacing
+            0.3x/1x/3x).
+        replicate_top_n: Number of top cocktails to replicate.
+
+    Returns:
+        DataFrame with columns matching top_conditions plus:
+        - 'source_condition': original condition name
+        - 'dose_factor': which dose factor was applied (1.0 for replicates)
+        - 'is_replicate': True for replicate wells
+        - 'well_label': descriptive label (e.g., "cond_A_0.3x", "cond_A_rep1")
+    """
+    if n_cocktails > len(top_conditions):
+        raise ValueError(
+            f"n_cocktails={n_cocktails} exceeds available conditions "
+            f"({len(top_conditions)})"
+        )
+    if replicate_top_n > n_cocktails:
+        raise ValueError(
+            f"replicate_top_n={replicate_top_n} exceeds n_cocktails={n_cocktails}"
+        )
+
+    cocktails = top_conditions.iloc[:n_cocktails]
+    conc_cols = list(top_conditions.columns)
+    rows: list[dict[str, Any]] = []
+
+    # Dose-response wells
+    for idx, (cond_name, row) in enumerate(cocktails.iterrows()):
+        for df in dose_factors:
+            scaled = (row[conc_cols] * df).clip(lower=0)
+            entry: dict[str, Any] = scaled.to_dict()
+            entry["source_condition"] = cond_name
+            entry["dose_factor"] = df
+            entry["is_replicate"] = False
+            entry["well_label"] = f"{cond_name}_{df}x"
+            rows.append(entry)
+
+    # Replicate wells
+    reps_per_cocktail = n_replicates // replicate_top_n
+    remainder = n_replicates % replicate_top_n
+    for i in range(replicate_top_n):
+        cond_name = cocktails.index[i]
+        row = cocktails.iloc[i]
+        n_reps = reps_per_cocktail + (1 if i < remainder else 0)
+        for r in range(1, n_reps + 1):
+            entry = row[conc_cols].clip(lower=0).to_dict()
+            entry["source_condition"] = cond_name
+            entry["dose_factor"] = 1.0
+            entry["is_replicate"] = True
+            entry["well_label"] = f"{cond_name}_rep{r}"
+            rows.append(entry)
+
+    result = pd.DataFrame(rows)
+    # Ensure concentration columns come first, then metadata
+    col_order = conc_cols + ["source_condition", "dose_factor", "is_replicate", "well_label"]
+    return result[col_order]
 
 
 if __name__ == "__main__":
@@ -4879,6 +5105,10 @@ if __name__ == "__main__":
     parser.add_argument("--contextual-cols", nargs="+", default=None,
                         help="Columns to hold fixed within plates (e.g., log_harvest_day). "
                              "Fixed to training-data mean during acquisition optimization.")
+    parser.add_argument("--n-lhd-fill", type=int, default=0,
+                        help="Number of LHD space-filling points per round (Round 2+ only)")
+    parser.add_argument("--validation", action="store_true",
+                        help="Generate validation plate (6 cocktails x 0.3x/1x/3x + 6 replicates)")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -5074,6 +5304,7 @@ if __name__ == "__main__":
         saasbo_thinning=16,
         n_controls=args.n_controls,
         contextual_cols=args.contextual_cols,
+        n_lhd_fill=args.n_lhd_fill,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
@@ -5082,3 +5313,13 @@ if __name__ == "__main__":
     pred_cols = [c for c in recs.columns if "predicted" in c or "acquisition" in c]
     logger.info("\n%s", recs[nonzero_cols + pred_cols].to_string())
     logger.info("Give this plate map to the wet lab team!")
+
+    if args.validation:
+        logger.info("--- GENERATING VALIDATION PLATE ---")
+        top_conds = recs[morph_cols].copy()
+        val_plate = generate_validation_plate(top_conds)
+        val_path = DATA_DIR / f"validation_plate_round{args.round}.csv"
+        val_plate.to_csv(str(val_path), index=False)
+        logger.info("Validation plate saved to %s (%d wells)", val_path, len(val_plate))
+        val_conc_cols = [c for c in morph_cols if c in val_plate.columns and val_plate[c].abs().sum() > 0.01]
+        logger.info("\n%s", val_plate[val_conc_cols + ["well_label", "dose_factor", "is_replicate"]].to_string())

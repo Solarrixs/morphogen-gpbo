@@ -4518,3 +4518,231 @@ class TestScoreGeneSignatures:
         assert pvalues_df.shape == (3, 1)
         assert (pvalues_df.values >= 0).all()
         assert (pvalues_df.values <= 1).all()
+
+
+class TestCharacterizeFidelityNoise:
+    """Tests for characterize_fidelity_noise (TODO-14)."""
+
+    def test_characterize_fidelity_noise_basic(self):
+        """Two fidelity levels produce correct output shape and columns."""
+        rng = np.random.default_rng(42)
+        n_hi, n_lo = 10, 8
+        X = pd.DataFrame({
+            "m1": rng.random(n_hi + n_lo),
+            "m2": rng.random(n_hi + n_lo),
+            "fidelity": [1.0] * n_hi + [0.5] * n_lo,
+        })
+        Y = pd.DataFrame(
+            rng.dirichlet([1, 1, 1], size=n_hi + n_lo),
+            columns=["ct_A", "ct_B", "ct_C"],
+        )
+        result = step04.characterize_fidelity_noise(X, Y)
+
+        assert result.shape[0] == 2
+        assert result.index.name == "fidelity"
+        assert set(result.columns) == {
+            "n_points", "mean_variance", "median_variance",
+            "coefficient_of_variation",
+        }
+        assert result.loc[1.0, "n_points"] == n_hi
+        assert result.loc[0.5, "n_points"] == n_lo
+        # Variances should be non-negative
+        assert (result["mean_variance"] >= 0).all()
+        assert (result["median_variance"] >= 0).all()
+        assert (result["coefficient_of_variation"] >= 0).all()
+
+    def test_single_fidelity_still_works(self):
+        """With only fidelity=1.0, returns one row."""
+        rng = np.random.default_rng(99)
+        n = 5
+        X = pd.DataFrame({
+            "m1": rng.random(n),
+            "fidelity": [1.0] * n,
+        })
+        Y = pd.DataFrame(
+            rng.dirichlet([2, 3], size=n),
+            columns=["ct_X", "ct_Y"],
+        )
+        result = step04.characterize_fidelity_noise(X, Y)
+
+        assert result.shape[0] == 1
+        assert 1.0 in result.index
+        assert result.loc[1.0, "n_points"] == n
+
+    def test_high_variance_fidelity_detected(self):
+        """Noisy fidelity level has higher mean_variance than clean one."""
+        rng = np.random.default_rng(7)
+        n = 20
+        # Clean high-fidelity data: tight around [0.5, 0.3, 0.2]
+        Y_hi = pd.DataFrame(
+            np.tile([0.5, 0.3, 0.2], (n, 1)) + rng.normal(0, 0.001, (n, 3)),
+            columns=["a", "b", "c"],
+        )
+        # Noisy low-fidelity data: wide scatter
+        Y_lo = pd.DataFrame(
+            rng.dirichlet([0.5, 0.5, 0.5], size=n),
+            columns=["a", "b", "c"],
+        )
+        Y = pd.concat([Y_hi, Y_lo], ignore_index=True)
+        X = pd.DataFrame({
+            "m1": rng.random(2 * n),
+            "fidelity": [1.0] * n + [0.0] * n,
+        })
+
+        result = step04.characterize_fidelity_noise(X, Y)
+
+        assert result.loc[0.0, "mean_variance"] > result.loc[1.0, "mean_variance"]
+
+
+class TestValidationPlate:
+    """Tests for generate_validation_plate multi-dose validation protocol."""
+
+    @staticmethod
+    def _make_top_conditions(n=8):
+        """Create a dummy top_conditions DataFrame with morphogen columns."""
+        np.random.seed(42)
+        cols = ["WNT_uM", "BMP_uM", "SHH_uM", "RA_uM"]
+        data = np.random.uniform(0.1, 10.0, size=(n, len(cols)))
+        return pd.DataFrame(data, columns=cols, index=[f"cond_{i}" for i in range(n)])
+
+    def test_validation_plate_shape(self):
+        """Default params: 6*3 + 6 = 24 rows."""
+        top = self._make_top_conditions(8)
+        plate = step04.generate_validation_plate(top)
+        assert plate.shape[0] == 24, f"Expected 24 rows, got {plate.shape[0]}"
+
+    def test_dose_factors_applied(self):
+        """0.3x row should have 0.3x the 1.0x row values."""
+        top = self._make_top_conditions(8)
+        plate = step04.generate_validation_plate(top)
+        conc_cols = ["WNT_uM", "BMP_uM", "SHH_uM", "RA_uM"]
+        cond = top.index[0]
+        rows_03 = plate[(plate["source_condition"] == cond) & (plate["dose_factor"] == 0.3) & (~plate["is_replicate"])]
+        rows_10 = plate[(plate["source_condition"] == cond) & (plate["dose_factor"] == 1.0) & (~plate["is_replicate"])]
+        assert len(rows_03) == 1
+        assert len(rows_10) == 1
+        np.testing.assert_allclose(
+            rows_03[conc_cols].values,
+            rows_10[conc_cols].values * 0.3,
+            rtol=1e-10,
+        )
+
+    def test_replicates_present(self):
+        """Verify is_replicate=True for replicate wells."""
+        top = self._make_top_conditions(8)
+        plate = step04.generate_validation_plate(top)
+        rep_rows = plate[plate["is_replicate"]]
+        assert len(rep_rows) == 6, f"Expected 6 replicates, got {len(rep_rows)}"
+        assert rep_rows["is_replicate"].all()
+        # All replicates should have dose_factor 1.0
+        assert (rep_rows["dose_factor"] == 1.0).all()
+
+    def test_no_negative_concentrations(self):
+        """All concentration values should be >= 0, even with negative inputs."""
+        top = self._make_top_conditions(8)
+        # Introduce a negative value to test clamping
+        top.iloc[0, 0] = -5.0
+        plate = step04.generate_validation_plate(top)
+        conc_cols = ["WNT_uM", "BMP_uM", "SHH_uM", "RA_uM"]
+        assert (plate[conc_cols].values >= 0).all(), "Found negative concentration values"
+
+    def test_custom_parameters(self):
+        """Test with non-default parameters."""
+        top = self._make_top_conditions(10)
+        plate = step04.generate_validation_plate(
+            top, n_cocktails=4, n_replicates=4,
+            dose_factors=(0.1, 0.5, 1.0, 2.0, 5.0),
+            replicate_top_n=2,
+        )
+        # 4 cocktails * 5 dose factors + 4 replicates = 24
+        assert plate.shape[0] == 24
+
+    def test_insufficient_conditions_raises(self):
+        """Requesting more cocktails than available conditions should raise."""
+        top = self._make_top_conditions(3)
+        with pytest.raises(ValueError, match="n_cocktails.*exceeds"):
+            step04.generate_validation_plate(top, n_cocktails=6)
+
+
+class TestGenerateLhdFill:
+    """Tests for generate_lhd_fill (TODO-38: LHD gap-filling for Round 2+)."""
+
+    def _make_bounds(self, n_dims=5):
+        return {f"dim_{i}": (float(i), float(i + 10)) for i in range(n_dims)}
+
+    def test_generate_lhd_fill_shape(self):
+        """Output should have correct shape (n_points, n_dims)."""
+        bounds = self._make_bounds(5)
+        result = step04.generate_lhd_fill(bounds, n_points=10, seed=42)
+        assert result.shape == (10, 5)
+        assert list(result.columns) == [f"dim_{i}" for i in range(5)]
+
+    def test_generate_lhd_fill_within_bounds(self):
+        """All generated values must lie within specified bounds."""
+        bounds = self._make_bounds(4)
+        result = step04.generate_lhd_fill(bounds, n_points=50, seed=123)
+        for col, (lo, hi) in bounds.items():
+            assert result[col].min() >= lo, f"{col} below lower bound"
+            assert result[col].max() <= hi, f"{col} above upper bound"
+
+    def test_generate_lhd_fill_deterministic(self):
+        """Same seed should produce identical output."""
+        bounds = self._make_bounds(3)
+        r1 = step04.generate_lhd_fill(bounds, n_points=8, seed=99)
+        r2 = step04.generate_lhd_fill(bounds, n_points=8, seed=99)
+        pd.testing.assert_frame_equal(r1, r2)
+
+    def test_generate_lhd_fill_excludes_fidelity(self):
+        """The fidelity column should be excluded from LHD output."""
+        bounds = {"x1": (0.0, 1.0), "fidelity": (0.0, 1.0), "x2": (0.0, 5.0)}
+        result = step04.generate_lhd_fill(bounds, n_points=5, seed=42)
+        assert "fidelity" not in result.columns
+        assert result.shape == (5, 2)
+        assert list(result.columns) == ["x1", "x2"]
+
+    def test_lhd_fill_skipped_round_1(self):
+        """n_lhd_fill should be ignored when round_num=1.
+
+        We verify this by calling recommend_next_experiments with round_num=1
+        and n_lhd_fill>0, and checking that the effective_lhd logic produces
+        zero LHD rows. Uses a mock to bypass the full BO pipeline.
+        """
+        from unittest.mock import MagicMock, patch
+
+        n_recs = 6
+        n_lhd = 4
+        d = 3
+        columns = ["x0", "x1", "x2"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        # Mock model
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_recs, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_recs, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        mock_candidates = torch.rand(n_recs, d, dtype=torch.float64)
+        mock_acq_values = torch.rand(n_recs, dtype=torch.float64)
+
+        # Patch both the acquisition function constructor and optimizer
+        with patch("botorch.optim.optimize_acqf", return_value=(mock_candidates, mock_acq_values)), \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            recs = step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                n_lhd_fill=n_lhd,
+                round_num=1,
+            )
+
+        # No LHD rows should be present in Round 1
+        assert "is_lhd_fill" in recs.columns
+        assert not recs["is_lhd_fill"].any(), "LHD rows should not appear in Round 1"
+        assert len(recs) == n_recs
