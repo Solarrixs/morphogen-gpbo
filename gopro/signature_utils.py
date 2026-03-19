@@ -161,3 +161,172 @@ def score_gene_signatures(
         pvalues_df = pd.DataFrame(pvalues)
 
     return scores_df, pvalues_df
+
+
+def refine_signatures(
+    prior_signatures: dict[str, list[str]],
+    adata,  # sc.AnnData
+    fidelity_report: pd.DataFrame,
+    condition_key: str = "condition",
+    alpha: float = 0.7,
+    top_k: int = 50,
+    score_col: str = "composite_fidelity",
+) -> dict[str, list[str]]:
+    """Refine gene signatures using observed fidelity data.
+
+    For each signature, identifies genes that are differentially expressed
+    between high-fidelity and low-fidelity conditions, then blends the
+    data-derived gene set with the prior signature using EMA interpolation.
+
+    new_sig = alpha * data_derived_genes + (1-alpha) * prior_genes
+
+    Implemented as set interpolation: keep genes that appear in either
+    the top-k data-derived genes OR the prior, weighted by alpha
+    (data-derived genes need rank < top_k * alpha to be included;
+    prior genes are kept if they rank < top_k * (1-alpha) in the prior).
+
+    Args:
+        prior_signatures: Dict of signature_name -> gene list.
+        adata: AnnData with gene expression and condition labels.
+        fidelity_report: Per-condition fidelity scores.
+        condition_key: Column identifying conditions.
+        alpha: Blending weight for data-derived genes (0=all prior, 1=all data).
+        top_k: Number of genes per refined signature.
+        score_col: Column in fidelity_report to rank conditions by.
+
+    Returns:
+        Dict of signature_name -> refined gene list.
+    """
+    if alpha < 0.0 or alpha > 1.0:
+        raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+
+    # Validate inputs
+    if condition_key not in adata.obs.columns:
+        logger.warning(
+            "condition_key '%s' not in adata.obs; returning prior signatures unchanged",
+            condition_key,
+        )
+        return {k: list(v) for k, v in prior_signatures.items()}
+
+    if score_col not in fidelity_report.columns:
+        logger.warning(
+            "score_col '%s' not in fidelity_report; returning prior signatures unchanged",
+            score_col,
+        )
+        return {k: list(v) for k, v in prior_signatures.items()}
+
+    # Get conditions present in both adata and fidelity_report
+    adata_conditions = set(adata.obs[condition_key].unique())
+    report_conditions = set(fidelity_report.index) if fidelity_report.index.name == condition_key else set(
+        fidelity_report[condition_key] if condition_key in fidelity_report.columns else fidelity_report.index
+    )
+    shared_conditions = adata_conditions & report_conditions
+
+    if len(shared_conditions) < 2:
+        logger.warning(
+            "Need at least 2 shared conditions between adata and fidelity_report "
+            "(found %d); returning prior signatures unchanged",
+            len(shared_conditions),
+        )
+        return {k: list(v) for k, v in prior_signatures.items()}
+
+    # Subset adata to shared conditions
+    adata_sub = adata[adata.obs[condition_key].isin(shared_conditions)].copy()
+
+    if adata_sub.n_obs < 10:
+        logger.warning(
+            "Too few cells (%d) after filtering to shared conditions; "
+            "returning prior signatures unchanged",
+            adata_sub.n_obs,
+        )
+        return {k: list(v) for k, v in prior_signatures.items()}
+
+    # Build fidelity ranking and split into high/low
+    if fidelity_report.index.name == condition_key or condition_key not in fidelity_report.columns:
+        scores_series = fidelity_report[score_col]
+    else:
+        scores_series = fidelity_report.set_index(condition_key)[score_col]
+
+    scores_shared = scores_series.loc[scores_series.index.isin(shared_conditions)].sort_values(ascending=False)
+    midpoint = len(scores_shared) // 2
+    high_conditions = set(scores_shared.iloc[:midpoint].index)
+    low_conditions = set(scores_shared.iloc[midpoint:].index)
+
+    # Assign fidelity_bin label
+    adata_sub.obs["fidelity_bin"] = adata_sub.obs[condition_key].map(
+        lambda c: "high" if c in high_conditions else "low"
+    )
+
+    # alpha=0 means return prior unchanged (truncated to top_k)
+    if alpha == 0.0:
+        return {k: list(v[:top_k]) for k, v in prior_signatures.items()}
+
+    # Run differential expression: high vs low fidelity
+    # Use scipy t-test directly to avoid scanpy sparse-utility compatibility issues
+    try:
+        from scipy.stats import ttest_ind
+
+        # Get expression matrices for high and low groups
+        X = adata_sub.X
+        if hasattr(X, "toarray"):
+            X = X.toarray()
+        X = np.asarray(X, dtype=np.float64)
+
+        high_mask = (adata_sub.obs["fidelity_bin"] == "high").values
+        low_mask = ~high_mask
+
+        if high_mask.sum() < 2 or low_mask.sum() < 2:
+            logger.warning(
+                "Too few cells in high (%d) or low (%d) group; "
+                "returning prior signatures unchanged",
+                high_mask.sum(), low_mask.sum(),
+            )
+            return {k: list(v) for k, v in prior_signatures.items()}
+
+        X_high = X[high_mask]
+        X_low = X[low_mask]
+
+        t_stats, p_values = ttest_ind(X_high, X_low, axis=0, equal_var=False)
+        # Replace NaN t-stats with 0 (e.g. zero-variance genes)
+        t_stats = np.nan_to_num(t_stats, nan=0.0)
+
+        # Rank genes by t-statistic (descending = upregulated in high-fidelity)
+        gene_names = list(adata_sub.var_names)
+        gene_order = np.argsort(-t_stats)
+        de_genes = [gene_names[i] for i in gene_order]
+    except Exception as e:
+        logger.warning(
+            "Differential expression failed (%s); returning prior signatures unchanged", e
+        )
+        return {k: list(v) for k, v in prior_signatures.items()}
+
+    # Build refined signatures
+    n_data = int(top_k * alpha)
+    n_prior = top_k - n_data
+
+    refined = {}
+    for sig_name, prior_genes in prior_signatures.items():
+        # Data-derived: top n_data DE genes
+        data_genes = de_genes[:n_data]
+
+        # Prior: keep up to n_prior from prior (excluding those already in data set)
+        data_set = set(data_genes)
+        prior_remaining = [g for g in prior_genes if g not in data_set]
+        prior_keep = prior_remaining[:n_prior]
+
+        # Combine: data-derived first, then prior fill
+        combined = list(data_genes) + list(prior_keep)
+
+        # If we still have fewer than top_k (due to overlap removal), backfill from DE
+        if len(combined) < top_k:
+            combined_set = set(combined)
+            for g in de_genes:
+                if g not in combined_set:
+                    combined.append(g)
+                    combined_set.add(g)
+                    if len(combined) >= top_k:
+                        break
+
+        refined[sig_name] = combined[:top_k]
+
+    return refined

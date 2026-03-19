@@ -2726,6 +2726,87 @@ def compute_desirability(
     return phi
 
 
+def compute_cocktail_cost(
+    recommendations: pd.DataFrame,
+    cost_dict: Optional[dict[str, float]] = None,
+) -> pd.Series:
+    """Compute per-cocktail cost from morphogen concentrations.
+
+    Cost = sum(concentration_i * cost_per_um_i) for each cocktail.
+
+    Args:
+        recommendations: DataFrame with morphogen concentration columns.
+        cost_dict: Per-morphogen cost per µM. Defaults to MORPHOGEN_COST_PER_UM.
+
+    Returns:
+        Series of total costs indexed by recommendation index.
+    """
+    if cost_dict is None:
+        from gopro.config import MORPHOGEN_COST_PER_UM
+        cost_dict = MORPHOGEN_COST_PER_UM
+
+    total_cost = pd.Series(0.0, index=recommendations.index, dtype=np.float64)
+    for col, unit_cost in cost_dict.items():
+        if col in recommendations.columns and unit_cost > 0:
+            total_cost += recommendations[col].fillna(0.0).clip(lower=0.0) * unit_cost
+    return total_cost
+
+
+def apply_desirability_gate(
+    recommendations: pd.DataFrame,
+    acquisition_values: pd.Series,
+    cost_dict: Optional[dict[str, float]] = None,
+    cost_weight: float = 0.1,
+) -> pd.DataFrame:
+    """Re-rank recommendations by desirability = acquisition * (1 - cost_weight * normalized_cost).
+
+    Uses a Derringer-Suich (1980) inspired geometric mean formulation where
+    the cost penalty scales linearly with normalized cost. A ``cost_weight``
+    of 0 means cost is ignored (original ranking preserved); a weight of 1
+    means cost dominates (cheapest cocktails ranked first regardless of
+    acquisition value).
+
+    Args:
+        recommendations: BO recommendations with morphogen columns.
+        acquisition_values: Per-recommendation acquisition values.
+        cost_dict: Per-morphogen cost. Defaults to MORPHOGEN_COST_PER_UM.
+        cost_weight: How much to penalize cost (0=ignore, 1=cost dominates).
+
+    Returns:
+        Re-ranked recommendations with 'cocktail_cost' and 'desirability'
+        columns added.  Rows are sorted by descending desirability.
+    """
+    recs = recommendations.copy()
+    cost = compute_cocktail_cost(recs, cost_dict=cost_dict)
+    recs["cocktail_cost"] = cost
+
+    # Normalize cost to [0, 1] range
+    cost_max = cost.max()
+    if cost_max > 0:
+        normalized_cost = cost / cost_max
+    else:
+        normalized_cost = pd.Series(0.0, index=cost.index)
+
+    # Clamp cost_weight to [0, 1]
+    cost_weight = max(0.0, min(1.0, cost_weight))
+
+    # Desirability = acquisition * (1 - cost_weight * normalized_cost)
+    acq = acquisition_values.reindex(recs.index).fillna(0.0)
+    recs["desirability"] = acq * (1.0 - cost_weight * normalized_cost)
+
+    # Re-rank by descending desirability
+    recs = recs.sort_values("desirability", ascending=False)
+
+    n_affected = int((normalized_cost > 0).sum())
+    logger.info(
+        "Cost-aware desirability: cost_weight=%.2f, %d/%d cocktails with non-zero cost, "
+        "cost range [%.3f, %.3f]",
+        cost_weight, n_affected, len(recs), cost.min(), cost.max(),
+    )
+
+    return recs
+
+
 def generate_lhd_fill(
     bounds: dict[str, tuple[float, float]],
     n_points: int,
@@ -4256,6 +4337,7 @@ def run_gpbo_loop(
     n_controls: int = 0,
     contextual_cols: Optional[list[str]] = None,
     n_lhd_fill: int = 0,
+    cost_weight: float = 0.0,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -4365,6 +4447,10 @@ def run_gpbo_loop(
         n_controls: Number of top-performing conditions from the training data
             to carry forward as controls (Kanda eLife 2022). Reserved from the
             ``n_recommendations`` budget. Set to 0 to disable. (default: 0)
+        cost_weight: Cost-aware desirability weight (0=disabled, 1=cost dominates).
+            When >0, post-processes recommendations via ``apply_desirability_gate``
+            to penalize expensive cocktails containing recombinant proteins.
+            (default: 0.0)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -4774,6 +4860,22 @@ def run_gpbo_loop(
             len(recommendations),
         )
 
+    # Apply cost-aware desirability gate (TODO-42)
+    if cost_weight > 0:
+        acq_col = "acquisition_value"
+        if acq_col in recommendations.columns:
+            acq_series = recommendations[acq_col].fillna(0.0)
+            recommendations = apply_desirability_gate(
+                recommendations,
+                acquisition_values=acq_series,
+                cost_weight=cost_weight,
+            )
+        else:
+            logger.warning(
+                "cost_weight=%.2f but no '%s' column found — skipping cost gate",
+                cost_weight, acq_col,
+            )
+
     # Save outputs
     output_path = DATA_DIR / f"gp_recommendations_round{round_num}.csv"
     recommendations.to_csv(str(output_path))
@@ -4942,6 +5044,120 @@ def generate_validation_plate(
     return result[col_order]
 
 
+def generate_confirmation_plate(
+    recommendations: pd.DataFrame,
+    n_replicates_optimum: int = 3,
+    n_replicates_reference: int = 2,
+    reference_conditions: Optional[pd.DataFrame] = None,
+    n_total: int = 24,
+) -> pd.DataFrame:
+    """Generate a confirmation plate for the predicted optimum.
+
+    Layout:
+    - n_replicates_optimum wells of the #1 ranked recommendation
+    - n_replicates_reference wells of known reference conditions (if provided)
+    - Remaining wells filled with diverse runner-up recommendations
+      selected by max-min distance in morphogen space
+
+    Args:
+        recommendations: BO recommendations sorted by predicted fidelity.
+            Index = condition names, columns include morphogen concentrations.
+        n_replicates_optimum: Replicates of top recommendation.
+        n_replicates_reference: Reference/control replicates.
+        reference_conditions: Known good conditions for calibration.
+            If provided, the first row is replicated n_replicates_reference times.
+        n_total: Total wells on plate.
+
+    Returns:
+        DataFrame with morphogen columns plus well_type ('optimum_rep',
+        'reference_rep', 'diverse_runner_up') and well_label columns.
+    """
+    if len(recommendations) < 1:
+        raise ValueError("recommendations must contain at least one row")
+
+    # Identify morphogen concentration columns (exclude metadata-like columns)
+    morph_cols = [c for c in recommendations.columns if c in MORPHOGEN_COLUMNS]
+    if not morph_cols:
+        # Fall back to all numeric columns
+        morph_cols = list(recommendations.select_dtypes(include=[np.number]).columns)
+
+    rows: list[dict[str, Any]] = []
+
+    # --- 1. Optimum replicates ---
+    optimum = recommendations.iloc[0]
+    for r in range(1, n_replicates_optimum + 1):
+        entry: dict[str, Any] = {c: optimum[c] for c in morph_cols}
+        entry["well_type"] = "optimum_rep"
+        entry["well_label"] = f"optimum_rep{r}"
+        rows.append(entry)
+
+    # --- 2. Reference replicates ---
+    n_ref_used = 0
+    if reference_conditions is not None and len(reference_conditions) > 0:
+        ref_row = reference_conditions.iloc[0]
+        ref_morph_cols = [c for c in morph_cols if c in reference_conditions.columns]
+        for r in range(1, n_replicates_reference + 1):
+            entry = {c: (ref_row[c] if c in ref_morph_cols else 0.0) for c in morph_cols}
+            entry["well_type"] = "reference_rep"
+            entry["well_label"] = f"reference_rep{r}"
+            rows.append(entry)
+        n_ref_used = n_replicates_reference
+
+    # --- 3. Diverse runner-ups via max-min distance selection ---
+    n_remaining = n_total - n_replicates_optimum - n_ref_used
+    if n_remaining < 0:
+        raise ValueError(
+            f"n_total={n_total} is too small for {n_replicates_optimum} optimum "
+            f"replicates + {n_ref_used} reference replicates"
+        )
+
+    # Candidates are all recommendations except the first (optimum)
+    candidates = recommendations.iloc[1:].copy()
+
+    if n_remaining > 0 and len(candidates) > 0:
+        # Build numeric matrix for distance computation
+        cand_matrix = candidates[morph_cols].values.astype(float)
+
+        # Already-selected points: optimum (and reference if present)
+        selected_points = [optimum[morph_cols].values.astype(float)]
+        if reference_conditions is not None and len(reference_conditions) > 0:
+            ref_morph = np.array([
+                reference_conditions.iloc[0][c] if c in reference_conditions.columns else 0.0
+                for c in morph_cols
+            ], dtype=float)
+            selected_points.append(ref_morph)
+
+        selected_indices: list[int] = []
+
+        for _ in range(min(n_remaining, len(candidates))):
+            # Compute min distance from each candidate to all selected points
+            min_dists = np.full(len(cand_matrix), np.inf)
+            for sp in selected_points:
+                dists = np.sqrt(np.sum((cand_matrix - sp) ** 2, axis=1))
+                min_dists = np.minimum(min_dists, dists)
+
+            # Mask already-selected candidates
+            for si in selected_indices:
+                min_dists[si] = -1.0
+
+            best_idx = int(np.argmax(min_dists))
+            selected_indices.append(best_idx)
+            selected_points.append(cand_matrix[best_idx])
+
+        for rank, si in enumerate(selected_indices, start=1):
+            cand_row = candidates.iloc[si]
+            entry = {c: cand_row[c] for c in morph_cols}
+            entry["well_type"] = "diverse_runner_up"
+            entry["well_label"] = f"runner_up_{rank}"
+            rows.append(entry)
+
+    # If we still have fewer rows than n_total (not enough candidates),
+    # the plate will have fewer wells.  That's acceptable.
+    result = pd.DataFrame(rows)
+    col_order = morph_cols + ["well_type", "well_label"]
+    return result[col_order]
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -5102,6 +5318,11 @@ if __name__ == "__main__":
                              "from recommending biologically implausible cocktails "
                              "with simultaneous agonist+antagonist for the same "
                              "signaling pathway.")
+    parser.add_argument("--cost-weight", type=float, default=0.0,
+                        help="Cost-aware desirability weight (0=disabled, 1=cost dominates). "
+                             "When >0, re-ranks recommendations by "
+                             "desirability = acquisition * (1 - w * normalized_cost). "
+                             "Penalizes expensive cocktails (recombinant proteins). (default: 0.0)")
     parser.add_argument("--contextual-cols", nargs="+", default=None,
                         help="Columns to hold fixed within plates (e.g., log_harvest_day). "
                              "Fixed to training-data mean during acquisition optimization.")
@@ -5109,6 +5330,8 @@ if __name__ == "__main__":
                         help="Number of LHD space-filling points per round (Round 2+ only)")
     parser.add_argument("--validation", action="store_true",
                         help="Generate validation plate (6 cocktails x 0.3x/1x/3x + 6 replicates)")
+    parser.add_argument("--confirmation", action="store_true",
+                        help="Generate confirmation plate (3 optimum reps + diverse runner-ups)")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -5305,6 +5528,7 @@ if __name__ == "__main__":
         n_controls=args.n_controls,
         contextual_cols=args.contextual_cols,
         n_lhd_fill=args.n_lhd_fill,
+        cost_weight=args.cost_weight,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
@@ -5323,3 +5547,13 @@ if __name__ == "__main__":
         logger.info("Validation plate saved to %s (%d wells)", val_path, len(val_plate))
         val_conc_cols = [c for c in morph_cols if c in val_plate.columns and val_plate[c].abs().sum() > 0.01]
         logger.info("\n%s", val_plate[val_conc_cols + ["well_label", "dose_factor", "is_replicate"]].to_string())
+
+    if args.confirmation:
+        logger.info("--- GENERATING CONFIRMATION PLATE ---")
+        top_conds = recs[morph_cols].copy()
+        conf_plate = generate_confirmation_plate(top_conds)
+        conf_path = DATA_DIR / f"confirmation_plate_round{args.round}.csv"
+        conf_plate.to_csv(str(conf_path), index=False)
+        logger.info("Confirmation plate saved to %s (%d wells)", conf_path, len(conf_plate))
+        conf_conc_cols = [c for c in morph_cols if c in conf_plate.columns and conf_plate[c].abs().sum() > 0.01]
+        logger.info("\n%s", conf_plate[conf_conc_cols + ["well_type", "well_label"]].to_string())

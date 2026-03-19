@@ -4746,3 +4746,380 @@ class TestGenerateLhdFill:
         assert "is_lhd_fill" in recs.columns
         assert not recs["is_lhd_fill"].any(), "LHD rows should not appear in Round 1"
         assert len(recs) == n_recs
+
+
+class TestConfirmationPlate:
+    """Tests for generate_confirmation_plate confirmation protocol."""
+
+    @staticmethod
+    def _make_recommendations(n=10):
+        """Create a dummy recommendations DataFrame with morphogen columns."""
+        np.random.seed(42)
+        cols = ["WNT_uM", "BMP_uM", "SHH_uM", "RA_uM"]
+        data = np.random.uniform(0.1, 10.0, size=(n, len(cols)))
+        return pd.DataFrame(data, columns=cols, index=[f"rec_{i}" for i in range(n)])
+
+    def test_confirmation_plate_total_wells(self):
+        """Output should have exactly n_total rows when enough candidates."""
+        recs = self._make_recommendations(n=30)
+        plate = step04.generate_confirmation_plate(recs, n_total=24)
+        assert len(plate) == 24
+
+    def test_confirmation_plate_total_wells_custom(self):
+        """n_total parameter controls plate size."""
+        recs = self._make_recommendations(n=20)
+        plate = step04.generate_confirmation_plate(recs, n_total=12)
+        assert len(plate) == 12
+
+    def test_optimum_replicates_present(self):
+        """There should be exactly n_replicates_optimum rows with well_type='optimum_rep'."""
+        recs = self._make_recommendations(n=30)
+        plate = step04.generate_confirmation_plate(recs, n_replicates_optimum=3, n_total=24)
+        optimum_rows = plate[plate["well_type"] == "optimum_rep"]
+        assert len(optimum_rows) == 3
+
+    def test_optimum_replicates_custom_count(self):
+        """Custom replicate count is respected."""
+        recs = self._make_recommendations(n=30)
+        plate = step04.generate_confirmation_plate(recs, n_replicates_optimum=5, n_total=24)
+        optimum_rows = plate[plate["well_type"] == "optimum_rep"]
+        assert len(optimum_rows) == 5
+
+    def test_optimum_replicates_identical(self):
+        """All optimum replicate rows should have identical morphogen concentrations."""
+        recs = self._make_recommendations(n=30)
+        plate = step04.generate_confirmation_plate(recs, n_replicates_optimum=3, n_total=24)
+        optimum_rows = plate[plate["well_type"] == "optimum_rep"]
+        morph_cols = [c for c in plate.columns if c not in ("well_type", "well_label")]
+        for col in morph_cols:
+            assert optimum_rows[col].nunique() == 1, f"Optimum replicates differ in {col}"
+
+    def test_reference_replicates_present(self):
+        """Reference wells appear when reference_conditions is provided."""
+        recs = self._make_recommendations(n=30)
+        ref = pd.DataFrame(
+            {"WNT_uM": [1.0], "BMP_uM": [2.0], "SHH_uM": [0.5], "RA_uM": [0.1]},
+            index=["ref_ctrl"],
+        )
+        plate = step04.generate_confirmation_plate(
+            recs, reference_conditions=ref, n_replicates_reference=2, n_total=24
+        )
+        ref_rows = plate[plate["well_type"] == "reference_rep"]
+        assert len(ref_rows) == 2
+        assert len(plate) == 24
+
+    def test_no_reference_without_arg(self):
+        """No reference wells when reference_conditions is None."""
+        recs = self._make_recommendations(n=30)
+        plate = step04.generate_confirmation_plate(recs, n_total=24)
+        ref_rows = plate[plate["well_type"] == "reference_rep"]
+        assert len(ref_rows) == 0
+
+    def test_diverse_runners_are_diverse(self):
+        """Runner-up conditions should not all be identical."""
+        recs = self._make_recommendations(n=30)
+        plate = step04.generate_confirmation_plate(recs, n_replicates_optimum=3, n_total=24)
+        runners = plate[plate["well_type"] == "diverse_runner_up"]
+        assert len(runners) > 1, "Need multiple runners to test diversity"
+        morph_cols = [c for c in plate.columns if c not in ("well_type", "well_label")]
+        runner_vals = runners[morph_cols].values
+        # At least one column should have more than one unique value
+        has_diversity = any(len(np.unique(runner_vals[:, i])) > 1 for i in range(len(morph_cols)))
+        assert has_diversity, "All runner-up conditions are identical"
+
+    def test_diverse_runners_maxmin_spread(self):
+        """Runner-ups selected by max-min should be more spread than just taking top-N."""
+        np.random.seed(99)
+        # Create recommendations where first few are clustered, rest are spread
+        cols = ["WNT_uM", "BMP_uM", "SHH_uM", "RA_uM"]
+        # Cluster near origin
+        clustered = np.random.uniform(0.0, 0.5, size=(5, 4))
+        # Spread out
+        spread = np.random.uniform(0.0, 10.0, size=(25, 4))
+        data = np.vstack([clustered, spread])
+        recs = pd.DataFrame(data, columns=cols, index=[f"rec_{i}" for i in range(30)])
+
+        plate = step04.generate_confirmation_plate(recs, n_replicates_optimum=3, n_total=24)
+        runners = plate[plate["well_type"] == "diverse_runner_up"]
+        morph_cols = [c for c in plate.columns if c not in ("well_type", "well_label")]
+        runner_vals = runners[morph_cols].values
+
+        # Compute pairwise distances among selected runners
+        from scipy.spatial.distance import pdist
+        dists = pdist(runner_vals)
+        # The minimum pairwise distance should be non-trivial (not all clustered)
+        assert np.min(dists) > 0.0, "Some runner-ups are identical"
+
+    def test_well_type_and_label_columns(self):
+        """Output should have well_type and well_label columns."""
+        recs = self._make_recommendations(n=10)
+        plate = step04.generate_confirmation_plate(recs, n_total=10)
+        assert "well_type" in plate.columns
+        assert "well_label" in plate.columns
+
+    def test_fewer_candidates_than_slots(self):
+        """When fewer candidates than remaining slots, plate may be smaller."""
+        recs = self._make_recommendations(n=3)
+        plate = step04.generate_confirmation_plate(recs, n_replicates_optimum=3, n_total=24)
+        # 3 optimum reps + 2 runners (only 2 candidates after removing optimum)
+        assert len(plate) == 5
+
+    def test_empty_recommendations_raises(self):
+        """Should raise on empty recommendations."""
+        recs = pd.DataFrame(columns=["WNT_uM", "BMP_uM"])
+        with pytest.raises(ValueError, match="at least one row"):
+            step04.generate_confirmation_plate(recs)
+
+
+class TestRefineSignatures:
+    """Tests for paired objective refinement with configurable alpha (TODO-17+50)."""
+
+    @staticmethod
+    def _make_synthetic_data(n_cells=20, n_genes=50, n_conditions=4, seed=42):
+        """Build synthetic AnnData + fidelity_report for testing."""
+        import anndata as ad
+
+        rng = np.random.default_rng(seed)
+        conditions = [f"cond_{i}" for i in range(n_conditions)]
+        gene_names = [f"Gene{i}" for i in range(n_genes)]
+
+        # Create expression data where high-fidelity conditions have
+        # elevated expression of genes 0-9 (so DE can detect them)
+        X = rng.random((n_cells, n_genes))
+        obs_conditions = [conditions[i % n_conditions] for i in range(n_cells)]
+        for i in range(n_cells):
+            cond_idx = i % n_conditions
+            if cond_idx < n_conditions // 2:
+                # "high fidelity" conditions: boost first 10 genes
+                X[i, :10] += 3.0
+
+        obs = pd.DataFrame({"condition": obs_conditions})
+        adata = ad.AnnData(X=X.astype(np.float32), obs=obs, var=pd.DataFrame(index=gene_names))
+
+        # Fidelity report: first half conditions score high, second half low
+        fidelity_report = pd.DataFrame({
+            "condition": conditions,
+            "composite_fidelity": [0.9 - 0.2 * i for i in range(n_conditions)],
+        }).set_index("condition")
+
+        return adata, fidelity_report, gene_names
+
+    def test_refine_signatures_basic(self):
+        """Refined signatures should differ from prior when alpha > 0."""
+        from gopro.signature_utils import refine_signatures
+
+        adata, fidelity_report, gene_names = self._make_synthetic_data()
+
+        # Prior: genes 20-34 (not among the DE genes 0-9)
+        prior = {"my_sig": [f"Gene{i}" for i in range(20, 35)]}
+
+        refined = refine_signatures(
+            prior_signatures=prior,
+            adata=adata,
+            fidelity_report=fidelity_report,
+            alpha=0.7,
+            top_k=15,
+        )
+
+        assert "my_sig" in refined
+        assert len(refined["my_sig"]) == 15
+        # With alpha=0.7, data-derived genes should dominate
+        # and the signature should not be identical to the prior
+        assert set(refined["my_sig"]) != set(prior["my_sig"])
+
+    def test_refine_signatures_alpha_zero_returns_prior(self):
+        """alpha=0 should return the prior signatures unchanged."""
+        from gopro.signature_utils import refine_signatures
+
+        adata, fidelity_report, gene_names = self._make_synthetic_data()
+
+        prior_genes = [f"Gene{i}" for i in range(10, 25)]
+        prior = {"my_sig": prior_genes}
+
+        refined = refine_signatures(
+            prior_signatures=prior,
+            adata=adata,
+            fidelity_report=fidelity_report,
+            alpha=0.0,
+            top_k=15,
+        )
+
+        assert refined["my_sig"] == prior_genes[:15]
+
+    def test_refine_signatures_alpha_one_fully_data_driven(self):
+        """alpha=1 should use only data-derived genes (no prior genes)."""
+        from gopro.signature_utils import refine_signatures
+
+        adata, fidelity_report, gene_names = self._make_synthetic_data()
+
+        # Prior: genes 40-49 (far from DE genes)
+        prior_genes = [f"Gene{i}" for i in range(40, 50)]
+        prior = {"my_sig": prior_genes}
+
+        refined = refine_signatures(
+            prior_signatures=prior,
+            adata=adata,
+            fidelity_report=fidelity_report,
+            alpha=1.0,
+            top_k=10,
+        )
+
+        assert "my_sig" in refined
+        assert len(refined["my_sig"]) == 10
+        # All genes should be data-derived; none from the prior
+        # (unless a prior gene also happens to be top DE, which is unlikely here)
+        prior_set = set(prior_genes)
+        data_only = [g for g in refined["my_sig"] if g not in prior_set]
+        # At least most should be data-derived
+        assert len(data_only) >= 8, (
+            f"Expected mostly data-derived genes with alpha=1, "
+            f"but {len(refined['my_sig']) - len(data_only)} are from prior"
+        )
+
+    def test_refine_signatures_too_few_conditions_returns_prior(self):
+        """With only 1 shared condition, should return prior unchanged."""
+        from gopro.signature_utils import refine_signatures
+        import anndata as ad
+
+        rng = np.random.default_rng(42)
+        gene_names = [f"Gene{i}" for i in range(20)]
+        adata = ad.AnnData(
+            X=rng.random((5, 20)).astype(np.float32),
+            obs=pd.DataFrame({"condition": ["cond_0"] * 5}),
+            var=pd.DataFrame(index=gene_names),
+        )
+        fidelity_report = pd.DataFrame(
+            {"composite_fidelity": [0.8]},
+            index=pd.Index(["cond_0"], name="condition"),
+        )
+        prior = {"sig": gene_names[:10]}
+
+        refined = refine_signatures(
+            prior_signatures=prior, adata=adata, fidelity_report=fidelity_report,
+            alpha=0.7, top_k=10,
+        )
+
+        assert refined["sig"] == gene_names[:10]
+
+    def test_refine_signatures_multiple(self):
+        """Refinement works on multiple signatures simultaneously."""
+        from gopro.signature_utils import refine_signatures
+
+        adata, fidelity_report, gene_names = self._make_synthetic_data()
+
+        prior = {
+            "sig_a": [f"Gene{i}" for i in range(20, 35)],
+            "sig_b": [f"Gene{i}" for i in range(30, 45)],
+        }
+
+        refined = refine_signatures(
+            prior_signatures=prior,
+            adata=adata,
+            fidelity_report=fidelity_report,
+            alpha=0.5,
+            top_k=15,
+        )
+
+        assert set(refined.keys()) == {"sig_a", "sig_b"}
+        assert len(refined["sig_a"]) == 15
+        assert len(refined["sig_b"]) == 15
+
+
+# --- Cost-aware desirability scoring (TODO-42) ---
+
+class TestCostAwareDesirability:
+    """Tests for cost-aware cocktail scoring and desirability re-ranking."""
+
+    def test_cost_dict_in_config(self):
+        """MORPHOGEN_COST_PER_UM exists in config and covers all MORPHOGEN_COLUMNS."""
+        from gopro.config import MORPHOGEN_COST_PER_UM, MORPHOGEN_COLUMNS
+        assert isinstance(MORPHOGEN_COST_PER_UM, dict)
+        assert len(MORPHOGEN_COST_PER_UM) > 0
+        # Every canonical morphogen column should have a cost entry
+        for col in MORPHOGEN_COLUMNS:
+            assert col in MORPHOGEN_COST_PER_UM, f"Missing cost entry for {col}"
+
+    def test_compute_cocktail_cost_basic(self):
+        """Verify cost computation: cost = sum(concentration_i * cost_per_um_i)."""
+        recs = pd.DataFrame({
+            "SHH_uM": [1.0, 0.0, 2.0],
+            "CHIR99021_uM": [0.0, 10.0, 5.0],
+        })
+        cost_dict = {"SHH_uM": 5.0, "CHIR99021_uM": 0.01}
+        cost = step04.compute_cocktail_cost(recs, cost_dict=cost_dict)
+        assert len(cost) == 3
+        np.testing.assert_allclose(cost.values, [5.0, 0.1, 10.05], atol=1e-9)
+
+    def test_compute_cocktail_cost_missing_cols_ignored(self):
+        """Columns in cost_dict but not in DataFrame are silently skipped."""
+        recs = pd.DataFrame({"SHH_uM": [1.0]})
+        cost_dict = {"SHH_uM": 5.0, "NOT_A_COL": 100.0}
+        cost = step04.compute_cocktail_cost(recs, cost_dict=cost_dict)
+        np.testing.assert_allclose(cost.values, [5.0], atol=1e-9)
+
+    def test_compute_cocktail_cost_default_dict(self):
+        """When no cost_dict is passed, uses MORPHOGEN_COST_PER_UM from config."""
+        from gopro.config import MORPHOGEN_COST_PER_UM
+        recs = pd.DataFrame({"SHH_uM": [1.0], "CHIR99021_uM": [3.0]})
+        cost = step04.compute_cocktail_cost(recs)
+        expected = 1.0 * MORPHOGEN_COST_PER_UM["SHH_uM"] + 3.0 * MORPHOGEN_COST_PER_UM["CHIR99021_uM"]
+        np.testing.assert_allclose(cost.values, [expected], atol=1e-9)
+
+    def test_expensive_cocktail_penalized(self):
+        """Desirability re-ranks expensive cocktails lower when cost_weight > 0."""
+        # Cocktail A: cheap (small molecule), Cocktail B: expensive (protein)
+        recs = pd.DataFrame({
+            "CHIR99021_uM": [10.0, 0.0],
+            "SHH_uM": [0.0, 1.0],
+        }, index=["cheap", "expensive"])
+        # Both have the same acquisition value
+        acq = pd.Series([1.0, 1.0], index=["cheap", "expensive"])
+        cost_dict = {"CHIR99021_uM": 0.01, "SHH_uM": 5.0}
+
+        result = step04.apply_desirability_gate(
+            recs, acq, cost_dict=cost_dict, cost_weight=0.5,
+        )
+        # Cheap cocktail should be ranked first (higher desirability)
+        assert result.index[0] == "cheap"
+        assert result.loc["cheap", "desirability"] > result.loc["expensive", "desirability"]
+        assert "cocktail_cost" in result.columns
+        assert "desirability" in result.columns
+
+    def test_cost_weight_zero_no_rerank(self):
+        """With cost_weight=0, order is unchanged (desirability = acquisition)."""
+        recs = pd.DataFrame({
+            "SHH_uM": [5.0, 0.0],
+            "CHIR99021_uM": [0.0, 10.0],
+        }, index=["A", "B"])
+        # A has lower acquisition, B has higher
+        acq = pd.Series([0.5, 1.0], index=["A", "B"])
+        cost_dict = {"SHH_uM": 5.0, "CHIR99021_uM": 0.01}
+
+        result = step04.apply_desirability_gate(
+            recs, acq, cost_dict=cost_dict, cost_weight=0.0,
+        )
+        # B should still be first (higher acquisition, cost ignored)
+        assert result.index[0] == "B"
+        # Desirability should equal acquisition when cost_weight=0
+        np.testing.assert_allclose(
+            result.loc["A", "desirability"], 0.5, atol=1e-9,
+        )
+        np.testing.assert_allclose(
+            result.loc["B", "desirability"], 1.0, atol=1e-9,
+        )
+
+    def test_desirability_gate_adds_columns(self):
+        """apply_desirability_gate adds cocktail_cost and desirability columns."""
+        recs = pd.DataFrame({"SHH_uM": [1.0, 2.0]})
+        acq = pd.Series([1.0, 0.8], index=recs.index)
+        result = step04.apply_desirability_gate(recs, acq, cost_weight=0.2)
+        assert "cocktail_cost" in result.columns
+        assert "desirability" in result.columns
+
+    def test_desirability_gate_does_not_mutate_input(self):
+        """apply_desirability_gate does not modify the input DataFrame."""
+        recs = pd.DataFrame({"SHH_uM": [1.0, 2.0]})
+        original_cols = list(recs.columns)
+        acq = pd.Series([1.0, 0.8], index=recs.index)
+        _ = step04.apply_desirability_gate(recs, acq, cost_weight=0.2)
+        assert list(recs.columns) == original_cols

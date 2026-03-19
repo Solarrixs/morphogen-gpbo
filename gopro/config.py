@@ -69,6 +69,27 @@ PROTEIN_MW_KDA: dict[str, float] = {
 }
 
 
+# Approximate morphogen costs per µM per well (relative scale, not absolute).
+# Recombinant proteins are ~100x more expensive than small molecules.
+# Used by the cost-aware desirability gate to penalize expensive cocktails.
+MORPHOGEN_COST_PER_UM: dict[str, float] = {
+    # Small molecules (cheap: ~$0.01-0.10 per µM per well)
+    "CHIR99021_uM": 0.01, "IWP2_uM": 0.05, "XAV939_uM": 0.05,
+    "SB431542_uM": 0.02, "LDN193189_uM": 0.10, "DAPT_uM": 0.05,
+    "cyclopamine_uM": 0.10, "purmorphamine_uM": 0.05,
+    "SAG_uM": 0.10, "RA_uM": 0.01, "9cisRA_uM": 0.05,
+    "SR11237_uM": 0.05, "Dorsomorphin_uM": 0.05,
+    # Recombinant proteins (expensive: ~$1-10 per µM per well)
+    "SHH_uM": 5.0, "BMP4_uM": 5.0, "BMP7_uM": 5.0,
+    "FGF2_uM": 2.0, "FGF4_uM": 2.0, "FGF8_uM": 3.0, "EGF_uM": 1.0,
+    "ActivinA_uM": 3.0,
+    # Base media (negligible cost)
+    "BDNF_uM": 0.5, "NT3_uM": 0.5, "cAMP_uM": 0.01, "AscorbicAcid_uM": 0.001,
+    # Time (no direct cost)
+    "log_harvest_day": 0.0,
+}
+
+
 def ng_mL_to_uM(ng_per_mL: float, mw_kda: float) -> float:
     """Convert ng/mL to µM using molecular weight.
 
