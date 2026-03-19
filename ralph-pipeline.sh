@@ -723,16 +723,21 @@ ${swarm_block}
 
 ## STEP 1: ORIENT
 
-1. Read handoff.md — notes from the previous iteration
-2. Read task_plan.md — find next [ ] or [~] task
-3. Read findings.md — discoveries so far
-4. Read progress.md — what's been done
-5. Read version-history.md — which iterations worked vs broke
-6. Read questions.md — check if the human answered any previous questions
-7. Run: git log --oneline -10
-8. If iteration 1 and task_plan.md has no real tasks, parse ralph-task.md
-   and populate task_plan.md with formatted tasks:
+1. Read ALL docs/ and planning files for full context:
+   - docs/task_plan.md (canonical TODO list with all project context)
+   - docs/plans/handoff.md, docs/plans/progress.md
+   - ralph-task.md (subtask definitions + acceptance criteria)
+2. Read pipeline tracking files:
+   - task_plan.md — current iteration task status
+   - findings.md — discoveries so far
+   - progress.md — what's been done
+   - version-history.md — which iterations worked vs broke
+   - questions.md — check if the human answered any previous questions
+3. Run: git log --oneline -10
+4. Sync task_plan.md: ensure ALL [ ] tasks from ralph-task.md are present
+   in task_plan.md. If any are missing, add them. Format:
    - [ ] Task N: [description] | Acceptance: [criteria]
+   Mark any already-completed tasks as [x] based on git history.
 
 ## STEP 2: IMPLEMENT (one task only)
 
@@ -874,9 +879,14 @@ build_handoff_prompt() {
 You are a handoff agent. Update planning files for the next iteration.
 
 ## STEP 1: Read current state
-1. Read task_plan.md, progress.md, findings.md, version-history.md
-2. Run: git log --oneline -5
-3. Run: git diff HEAD~1 --stat
+1. Read docs/ and planning files for full project context:
+   - docs/task_plan.md (canonical project TODO list)
+   - docs/plans/handoff.md, docs/plans/progress.md
+2. Read pipeline tracking files:
+   - task_plan.md, progress.md, findings.md, version-history.md
+   - ralph-task.md (subtask definitions)
+3. Run: git log --oneline -5
+4. Run: git diff HEAD~1 --stat
 
 ## STEP 2: Append to progress.md
 
@@ -901,14 +911,9 @@ Write a concise handoff for iteration ${next}:
 ## Key Context: [essential codebase knowledge — keep SHORT]
 ## Remaining: X tasks todo, Y blocked, Z complete
 
-## STEP 4: Check completion
+## STEP 4: Exit
 
-Count tasks in task_plan.md. If ALL tasks are [x] (complete) or [B] (blocked),
-print this exact string to stdout on its own line:
-
-RALPH_PIPELINE_COMPLETE
-
-Otherwise, exit cleanly.
+Exit cleanly. The pipeline script handles completion detection automatically.
 PROMPT
 }
 
@@ -1091,11 +1096,20 @@ main() {
     iter_duration=$((iter_end - iter_start))
     echo -e "  ${CYAN}⏱ Iteration ${i} total: ${iter_duration}s${NC}"
 
-    # ── Check for completion ─────────────────────────────────────────
-    if echo "$handoff_output" | grep -q "RALPH_PIPELINE_COMPLETE"; then
+    # ── Check for completion (bash-level, not dependent on Claude output) ────
+    local done_now remaining_now blocked_now
+    done_now=$(grep -c '\[x\]' task_plan.md 2>/dev/null || echo 0)
+    remaining_now=$(grep -c '\[ \]' task_plan.md 2>/dev/null || echo 0)
+    blocked_now=$(grep -c '\[B\]' task_plan.md 2>/dev/null || echo 0)
+    echo -e "  ${CYAN}Tasks: ${done_now} done, ${remaining_now} remaining, ${blocked_now} blocked${NC}"
+
+    # Must have 0 remaining AND at least 5 completed to trigger bug-hunter
+    # This prevents premature completion from empty/unpopulated task_plan.md
+    local min_tasks_for_completion=5
+    if [[ "$remaining_now" -eq 0 ]] && [[ "$done_now" -ge "$min_tasks_for_completion" ]]; then
       echo ""
       echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
-      echo -e "${GREEN}  ✅ ALL TASKS COMPLETE — Iteration ${i}${NC}"
+      echo -e "${GREEN}  ALL TASKS COMPLETE — Iteration ${i} (${done_now} tasks done)${NC}"
       echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
 
       # ── Final: BUG HUNTER + VERIFICATION ─────────────────────────

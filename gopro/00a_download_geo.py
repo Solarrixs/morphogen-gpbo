@@ -23,13 +23,12 @@ Usage:
 """
 
 import gzip
-import hashlib
 import shutil
 import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from gopro.config import DATA_DIR, get_logger
+from gopro.config import DATA_DIR, get_logger, md5_file
 
 logger = get_logger(__name__)
 
@@ -37,15 +36,29 @@ GEO_FTP_BASE = (
     "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE233nnn/GSE233574/suppl/"
 )
 
-# Files to download with their MD5 checksums (of the .gz files).
-# Checksums obtained from GEO supplementary file listings.
-FILES = [
-    "GSE233574_OrganoidScreen_counts.mtx.gz",
-    "GSE233574_OrganoidScreen_cellMetaData.csv.gz",
-    "GSE233574_OrganoidScreen_geneInfo.csv.gz",
-    "GSE233574_Organoid.SAG.secondaryScreen_counts.mtx.gz",
-    "GSE233574_Organoid.SAG.secondaryScreen_cellMetaData.csv.gz",
-    "GSE233574_Organoid.SAG.secondaryScreen_geneInfo.csv.gz",
+# Files to download with their MD5 checksums.
+# "md5" = checksum of the .gz file (verified after download, before gunzip).
+# "md5_plain" = checksum of the decompressed file (verified after gunzip).
+# Use --compute-checksums to regenerate from your local files.
+FILES: list[dict[str, str | None]] = [
+    {"name": "GSE233574_OrganoidScreen_counts.mtx.gz",
+     "md5": None,
+     "md5_plain": "0459ec163dac3ff25f80ce38323dd02e"},
+    {"name": "GSE233574_OrganoidScreen_cellMetaData.csv.gz",
+     "md5": None,
+     "md5_plain": "2240a0c891a26b4395f3a79e9b149d58"},
+    {"name": "GSE233574_OrganoidScreen_geneInfo.csv.gz",
+     "md5": None,
+     "md5_plain": "e7cffcea5b6998f605c9cbfc14d5df18"},
+    {"name": "GSE233574_Organoid.SAG.secondaryScreen_counts.mtx.gz",
+     "md5": None,
+     "md5_plain": "2349840436585d49cd96a1413791f11a"},
+    {"name": "GSE233574_Organoid.SAG.secondaryScreen_cellMetaData.csv.gz",
+     "md5": None,
+     "md5_plain": "ebf37b7655116ad8de4bcf9417f6281b"},
+    {"name": "GSE233574_Organoid.SAG.secondaryScreen_geneInfo.csv.gz",
+     "md5": None,
+     "md5_plain": "e4ac29d48e8d15eda28528733dab6c49"},
 ]
 
 
@@ -58,13 +71,7 @@ def format_size(nbytes: int) -> str:
     return f"{nbytes:.1f} PB"
 
 
-def md5_file(filepath: Path) -> str:
-    """Compute MD5 checksum without loading entire file into memory."""
-    h = hashlib.md5()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+# md5_file imported from gopro.config
 
 
 def get_remote_size(url: str) -> int | None:
@@ -81,7 +88,8 @@ def get_remote_size(url: str) -> int | None:
 def list_files():
     """Show files that would be downloaded."""
     logger.info("GEO GSE233574 — %d files:\n", len(FILES))
-    for filename in FILES:
+    for entry in FILES:
+        filename = entry["name"]
         url = GEO_FTP_BASE + filename
         size = get_remote_size(url)
         size_str = format_size(size) if size else "unknown"
@@ -143,9 +151,80 @@ def gunzip_file(gz_path: Path):
     logger.info("  -> %s (%s)", out_path.name, format_size(out_path.stat().st_size))
 
 
+def compute_checksums():
+    """Compute and print MD5 checksums for all present GEO files."""
+    logger.info("Computing MD5 checksums for local GEO files...\n")
+    for entry in FILES:
+        filename = entry["name"]
+        gz_path = DATA_DIR / filename
+        plain_path = gz_path.with_suffix("")
+
+        if gz_path.exists():
+            h = md5_file(gz_path)
+            logger.info("  %s  md5=%s", filename, h)
+        if plain_path.exists():
+            h = md5_file(plain_path)
+            logger.info("  %s  md5_plain=%s", plain_path.name, h)
+        if not gz_path.exists() and not plain_path.exists():
+            logger.warning("  %s  NOT FOUND", filename)
+
+
+def verify_checksums() -> bool:
+    """Verify MD5 checksums of all present GEO files. Returns True if all OK."""
+    all_ok = True
+    for entry in FILES:
+        filename = entry["name"]
+        expected_md5 = entry.get("md5")
+        expected_md5_plain = entry.get("md5_plain")
+        gz_path = DATA_DIR / filename
+        plain_path = gz_path.with_suffix("")
+
+        gz_exists = gz_path.exists()
+        plain_exists = plain_path.exists()
+
+        if not (gz_exists or plain_exists):
+            logger.error("  [!!] %s  MISSING", filename)
+            all_ok = False
+            continue
+
+        if expected_md5 and gz_exists:
+            actual_md5 = md5_file(gz_path)
+            if actual_md5 != expected_md5:
+                logger.error(
+                    "  [!!] %s  MD5 MISMATCH (expected %s, got %s)",
+                    filename, expected_md5, actual_md5,
+                )
+                all_ok = False
+                continue
+            logger.info("  [OK] %s  (MD5 verified)", filename)
+        elif expected_md5_plain and plain_exists:
+            actual_md5 = md5_file(plain_path)
+            if actual_md5 != expected_md5_plain:
+                logger.error(
+                    "  [!!] %s  MD5 MISMATCH (expected %s, got %s)",
+                    plain_path.name, expected_md5_plain, actual_md5,
+                )
+                all_ok = False
+                continue
+            logger.info("  [OK] %s  (MD5 verified)", plain_path.name)
+        elif gz_exists and plain_exists:
+            logger.info("  [OK] %s  (gz + decompressed, no MD5 defined)", plain_path.name)
+        elif plain_exists:
+            logger.info("  [OK] %s  (decompressed only, no MD5 defined)", plain_path.name)
+        elif gz_exists:
+            logger.warning("  [!!] %s  (gz only, not decompressed)", gz_path.name)
+            all_ok = False
+
+    return all_ok
+
+
 def main():
     if "--list" in sys.argv:
         list_files()
+        return
+
+    if "--compute-checksums" in sys.argv:
+        compute_checksums()
         return
 
     logger.info("=" * 60)
@@ -159,7 +238,8 @@ def main():
     # Download phase
     logger.info("\nDownloading %d files to %s ...\n", len(FILES), DATA_DIR)
 
-    for i, filename in enumerate(FILES, 1):
+    for i, entry in enumerate(FILES, 1):
+        filename = entry["name"]
         url = GEO_FTP_BASE + filename
         filepath = DATA_DIR / filename
 
@@ -183,7 +263,8 @@ def main():
     logger.info("DECOMPRESSING")
     logger.info("=" * 60)
 
-    for filename in FILES:
+    for entry in FILES:
+        filename = entry["name"]
         gz_path = DATA_DIR / filename
         if gz_path.exists():
             gunzip_file(gz_path)
@@ -195,24 +276,7 @@ def main():
     logger.info("VERIFICATION")
     logger.info("=" * 60)
 
-    all_ok = True
-    for filename in FILES:
-        gz_path = DATA_DIR / filename
-        plain_path = gz_path.with_suffix("")  # strip .gz
-
-        gz_exists = gz_path.exists()
-        plain_exists = plain_path.exists()
-
-        if gz_exists and plain_exists:
-            logger.info("  [OK] %s  (gz + decompressed)", plain_path.name)
-        elif plain_exists:
-            logger.info("  [OK] %s  (decompressed only)", plain_path.name)
-        elif gz_exists:
-            logger.warning("  [!!] %s  (gz only, not decompressed)", gz_path.name)
-            all_ok = False
-        else:
-            logger.error("  [!!] %s  MISSING", filename)
-            all_ok = False
+    all_ok = verify_checksums()
 
     if not all_ok:
         logger.error("\nSome files are missing or incomplete — re-run to retry")

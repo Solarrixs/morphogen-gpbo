@@ -102,7 +102,7 @@ if __name__ == "__main__":
         logger.warning("Run: bash download_zenodo.sh")
         logger.warning("to download the HNOCA and Braun fetal brain references.")
 
-    # 2. Convert Amin/Kelley primary screen (46 conditions, Day 72-74)
+    # 2. Convert Amin/Kelley primary screen (46 conditions, Day 72)
     convert_geo_to_anndata(
         counts_path=DATA_DIR / "GSE233574_OrganoidScreen_counts.mtx",
         metadata_path=DATA_DIR / "GSE233574_OrganoidScreen_cellMetaData.csv",

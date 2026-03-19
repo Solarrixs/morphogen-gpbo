@@ -1,0 +1,102 @@
+# Dataset registry for the GP-BO brain organoid pipeline.
+#
+# Each entry defines a dataset that can be mapped, scored, and fed into
+# the GP-BO optimization loop. Adding a new dataset requires only a new
+# entry here — no code changes needed.
+#
+# Fields:
+#   name            — Unique identifier (used as output prefix and dict key)
+#   description     — Human-readable description
+#   source          — Download source type: "geo", "zenodo", or "local"
+#   source_id       — GEO accession or Zenodo record ID
+#   input_file      — Filename of h5ad in DATA_DIR (after download/conversion)
+#   condition_key   — obs column identifying experimental conditions
+#   batch_key       — obs column identifying batch/sample for scPoli
+#   filter_criteria — How to filter quality cells (see filter_quality_cells())
+#   fidelity        — GP fidelity level: 1.0 (real), 0.5 (CellRank2), 0.0 (CellFlow)
+#   harvest_day     — Harvest day for all conditions in this dataset
+#   morphogen_parser_class — Python class name from morphogen_parser.py
+#   fractions_file  — Output fractions CSV filename (in DATA_DIR)
+#   morphogens_file — Output morphogen matrix CSV filename (in DATA_DIR)
+#   enabled         — Whether to include this dataset in pipeline runs (default: true)
+
+datasets:
+
+  amin_kelley:
+    description: "Amin & Kelley 2024 primary morphogen screen (46 conditions, Day 72)"
+    source: geo
+    source_id: GSE233574
+    input_file: amin_kelley_2024.h5ad
+    condition_key: condition
+    batch_key: sample
+    filter_criteria:
+      column: quality
+      keep_value: "keep"
+    fidelity: 1.0
+    harvest_day: 72
+    morphogen_parser_class: AminKelleyParser
+    fractions_file: gp_training_labels_amin_kelley.csv
+    morphogens_file: morphogen_matrix_amin_kelley.csv
+    enabled: true
+
+  sag_screen:
+    description: "Amin & Kelley 2024 SAG secondary screen (2 conditions, Day 70)"
+    source: geo
+    source_id: GSE233574
+    input_file: amin_kelley_sag_screen.h5ad
+    condition_key: condition
+    batch_key: sample
+    filter_criteria:
+      column: ClusterLabel
+      exclude_value: "filtered"
+    fidelity: 1.0
+    harvest_day: 70
+    morphogen_parser_class: SAGSecondaryParser
+    fractions_file: gp_training_labels_sag_screen.csv
+    morphogens_file: morphogen_matrix_sag_screen.csv
+    enabled: true
+
+  patterning_screen:
+    description: "Sanchis-Calleja/Azbukina organoid patterning screen (temporal atlas)"
+    source: zenodo
+    source_id: "17225179"
+    input_file: patterning_screen/temporal_atlas.h5ad
+    condition_key: condition
+    batch_key: batch
+    filter_criteria: null
+    fidelity: 1.0
+    harvest_day: null
+    morphogen_parser_class: null
+    fractions_file: null
+    morphogens_file: null
+    enabled: false
+
+  cellrank2_virtual:
+    description: "CellRank 2 temporal projection virtual data (medium fidelity)"
+    source: local
+    source_id: null
+    input_file: null
+    condition_key: condition
+    batch_key: null
+    filter_criteria: null
+    fidelity: 0.5
+    harvest_day: null
+    morphogen_parser_class: null
+    fractions_file: cellrank2_virtual_fractions.csv
+    morphogens_file: cellrank2_virtual_morphogens.csv
+    enabled: true
+
+  cellflow_virtual:
+    description: "CellFlow virtual protocol screening (low fidelity)"
+    source: local
+    source_id: null
+    input_file: null
+    condition_key: condition
+    batch_key: null
+    filter_criteria: null
+    fidelity: 0.0
+    harvest_day: null
+    morphogen_parser_class: null
+    fractions_file: cellflow_virtual_fractions_200.csv
+    morphogens_file: cellflow_virtual_morphogens_200.csv
+    enabled: true

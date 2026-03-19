@@ -27,7 +27,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from gopro.config import get_logger
+from gopro.config import (
+    FIDELITY_DROP_R2_THRESHOLD,
+    FIDELITY_SKIP_R2_THRESHOLD,
+    get_logger,
+)
 
 logger = get_logger(__name__)
 
@@ -143,7 +147,7 @@ def generate_summary_text(
 
     lengthscales = diagnostics.get("lengthscales")
     if lengthscales:
-        importance = {k: 1.0 / v for k, v in lengthscales.items() if v > 0}
+        importance = {k: 1.0 / v for k, v in lengthscales.items() if v >= 1e-6}
         top3 = sorted(importance, key=importance.get, reverse=True)[:3]
         top3_str = ", ".join(top3)
         parts.append(f"Top morphogens by GP importance: {top3_str}.")
@@ -171,8 +175,9 @@ def compute_morphogen_pca_with_recommendations(
         morphogen_cols: Columns to use from both DataFrames.
 
     Returns:
-        Tuple of (training_coords, rec_coords, loadings, variance_explained_pct).
-        loadings has shape (n_components, n_features) with feature names in morphogen_cols.
+        Tuple of (training_coords, rec_coords, loadings, variance_explained_pct, active_cols).
+        loadings has shape (n_components, n_features); active_cols lists the non-zero-variance
+        column names used.
     """
     from sklearn.decomposition import PCA
     from sklearn.preprocessing import StandardScaler
@@ -552,7 +557,7 @@ def build_importance_figure(
         importance = {
             k: 1.0 / v
             for k, v in lengthscales.items()
-            if v > 0 and k not in _EXCLUDE_COLS
+            if v >= 1e-6 and k not in _EXCLUDE_COLS
         }
         sorted_items = sorted(importance.items(), key=lambda x: x[1], reverse=True)
         names = [x[0] for x in sorted_items]
@@ -736,6 +741,113 @@ def build_convergence_figure(
     return fig
 
 
+def build_fidelity_trend_figure(
+    monitoring_df: pd.DataFrame,
+) -> go.Figure:
+    """Build fidelity correlation trend line chart across rounds.
+
+    Args:
+        monitoring_df: DataFrame with columns ``round``, ``fidelity_label``,
+            ``overall_correlation``, ``recommendation``.
+
+    Returns:
+        Plotly Figure with one trace per fidelity source.
+    """
+    fig = go.Figure()
+
+    colors = {"CellRank2": "darkorange", "CellFlow": "mediumpurple"}
+    for label in monitoring_df["fidelity_label"].unique():
+        sub = monitoring_df[monitoring_df["fidelity_label"] == label].sort_values("round")
+        color = colors.get(label, "gray")
+        fig.add_trace(go.Scatter(
+            x=sub["round"].tolist(),
+            y=sub["overall_correlation"].tolist(),
+            mode="lines+markers",
+            name=label,
+            marker=dict(size=8, color=color),
+            line=dict(width=2, color=color),
+        ))
+
+    # Threshold lines
+    fig.add_hline(y=FIDELITY_SKIP_R2_THRESHOLD, line_dash="dash", line_color="green",
+                  annotation_text=f"Skip MF-BO (R²>{FIDELITY_SKIP_R2_THRESHOLD})")
+    fig.add_hline(y=FIDELITY_DROP_R2_THRESHOLD, line_dash="dash", line_color="red",
+                  annotation_text=f"Drop source (R²<{FIDELITY_DROP_R2_THRESHOLD})")
+
+    fig.update_layout(
+        title="Cross-Fidelity Correlation by Round",
+        xaxis_title="Round",
+        yaxis_title="R² (Coefficient of Determination)",
+        yaxis=dict(range=[-0.1, 1.05]),
+        xaxis=dict(dtick=1),
+        template=PLOTLY_TEMPLATE,
+        legend=dict(yanchor="bottom", y=0.02, xanchor="right", x=0.98),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Convergence diagnostics chart
+# ---------------------------------------------------------------------------
+
+def build_convergence_diagnostics_figure(
+    conv_df: pd.DataFrame,
+) -> go.Figure:
+    """Build convergence diagnostics multi-panel figure.
+
+    Plots three convergence metrics across rounds on a shared x-axis:
+    mean posterior std, max acquisition value, and recommendation spread.
+
+    Args:
+        conv_df: DataFrame with columns ``round``, ``mean_posterior_std``,
+            ``max_acquisition_value``, ``recommendation_spread``.
+
+    Returns:
+        Plotly Figure with three y-axes.
+    """
+    from plotly.subplots import make_subplots
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        subplot_titles=(
+            "Mean Posterior Std",
+            "Max Acquisition Value",
+            "Recommendation Spread",
+        ),
+        vertical_spacing=0.08,
+    )
+
+    conv_df = conv_df.sort_values("round")
+    rounds = conv_df["round"].tolist()
+
+    metrics = [
+        ("mean_posterior_std", "steelblue", "Posterior Std"),
+        ("max_acquisition_value", "darkorange", "Max Acq Value"),
+        ("recommendation_spread", "mediumseagreen", "Rec Spread"),
+    ]
+    for row_idx, (col, color, name) in enumerate(metrics, start=1):
+        if col in conv_df.columns:
+            fig.add_trace(go.Scatter(
+                x=rounds,
+                y=conv_df[col].tolist(),
+                mode="lines+markers",
+                marker=dict(size=8, color=color),
+                line=dict(width=2, color=color),
+                name=name,
+            ), row=row_idx, col=1)
+
+    fig.update_layout(
+        title="Convergence Diagnostics",
+        height=600,
+        showlegend=False,
+        template=PLOTLY_TEMPLATE,
+    )
+    fig.update_xaxes(title_text="Round", dtick=1, row=3, col=1)
+
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Placeholder for missing data
 # ---------------------------------------------------------------------------
@@ -835,6 +947,7 @@ def assemble_html_report(
 def generate_report(
     data_dir: Path,
     output_path: Path | None = None,
+    output_prefix: str = "amin_kelley",
 ) -> Path:
     """Generate the full GP-BO visualization report.
 
@@ -843,6 +956,7 @@ def generate_report(
     Args:
         data_dir: Directory containing pipeline outputs.
         output_path: Override for output HTML path. Default: data_dir/report_round{N}.html.
+        output_prefix: Dataset prefix for CSV filenames (default: "amin_kelley").
 
     Returns:
         Path to the generated HTML report.
@@ -862,15 +976,15 @@ def generate_report(
     # Load data
     logger.info("Loading pipeline data files")
     fidelity_df = load_fidelity_report(data_dir / "fidelity_report.csv")
-    morphogen_df = load_morphogen_matrix(data_dir / "morphogen_matrix_amin_kelley.csv")
+    morphogen_df = load_morphogen_matrix(data_dir / f"morphogen_matrix_{output_prefix}.csv")
     recs = load_recommendations(data_dir / f"gp_recommendations_round{current_round}.csv")
     diagnostics = load_diagnostics(data_dir / f"gp_diagnostics_round{current_round}.csv")
 
     # Load cell type fractions
-    labels_path = data_dir / "gp_training_labels_amin_kelley.csv"
+    labels_path = data_dir / f"gp_training_labels_{output_prefix}.csv"
     labels_df = load_cell_type_fractions(labels_path) if labels_path.exists() else None
 
-    regions_path = data_dir / "gp_training_regions_amin_kelley.csv"
+    regions_path = data_dir / f"gp_training_regions_{output_prefix}.csv"
     regions_df = load_cell_type_fractions(regions_path) if regions_path.exists() else None
 
     # Sections: dict of name -> (description, content)
@@ -904,6 +1018,23 @@ def generate_report(
         "With only round 1 data, this shows a single point; the trend emerges as more rounds are run.",
         build_convergence_figure(best_per_round),
     )
+
+    # 2b. Fidelity monitoring trend (if multi-fidelity history exists)
+    fidelity_monitor_path = data_dir / "fidelity_monitoring.csv"
+    if fidelity_monitor_path.exists():
+        logger.info("Building section: Fidelity Monitoring")
+        try:
+            monitor_df = pd.read_csv(fidelity_monitor_path)
+            if len(monitor_df) > 0:
+                sections["Fidelity Monitoring"] = (
+                    "Cross-fidelity correlation between real and virtual data sources "
+                    "across optimization rounds. Sustained decline triggers auto-fallback "
+                    "to single-fidelity GP. Green dashed line: correlation too high for "
+                    "MF-BO benefit. Red dashed line: correlation too low — source dropped.",
+                    build_fidelity_trend_figure(monitor_df),
+                )
+        except Exception as e:
+            logger.warning("Fidelity monitoring section failed: %s", e, exc_info=True)
 
     # 3. Morphogen-space PCA — use all 20 training dimensions,
     #    zero-pad recommendations for missing columns
@@ -947,7 +1078,7 @@ def generate_report(
 
     # 4. Cell-space UMAP
     logger.info("Building section: Cell Space UMAP")
-    h5ad_path = data_dir / "amin_kelley_mapped.h5ad"
+    h5ad_path = data_dir / f"{output_prefix}_mapped.h5ad"
     cell_umap_desc = (
         "UMAP of individual cells from the scRNA-seq data, colored by predicted cell type "
         "(transferred from the HNOCA reference atlas via scPoli/KNN). "
@@ -976,7 +1107,7 @@ def generate_report(
     else:
         sections["Cell Space UMAP"] = (
             cell_umap_desc,
-            _placeholder_figure("amin_kelley_mapped.h5ad not found"),
+            _placeholder_figure(f"{output_prefix}_mapped.h5ad not found"),
         )
 
     # 5. Plate map

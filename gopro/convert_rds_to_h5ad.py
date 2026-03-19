@@ -34,6 +34,23 @@ if RSCRIPT is None:
     RSCRIPT = Path("Rscript")
 
 
+def _sanitize_path_for_r(path: Path) -> str:
+    """Sanitize a file path for safe interpolation into R code strings.
+
+    Prevents R code injection via crafted filenames (e.g., containing
+    double quotes or backslashes that could break out of R strings).
+    """
+    s = str(path.resolve())
+    # Reject any characters that could break R string interpolation
+    import re
+    if not re.match(r'^[a-zA-Z0-9_./ \-]+$', s):
+        raise ValueError(
+            f"Path contains unsafe characters for R interpolation: {s!r}. "
+            "Rename to use only alphanumeric, dots, dashes, and slashes."
+        )
+    return s
+
+
 def _run_r(script: str, timeout: int = 3600) -> str:
     """Run an R script via Rscript and return stdout.
 
@@ -139,8 +156,9 @@ def inspect_rds(rds_path: Path) -> str:
     Returns:
         String summary of the object's metadata.
     """
+    safe_rds = _sanitize_path_for_r(rds_path)
     script = f"""
-    obj <- readRDS("{rds_path}")
+    obj <- readRDS("{safe_rds}")
     cat("Class:", class(obj), "\\n")
     if (inherits(obj, "Seurat")) {{
         cat("Cells:", ncol(obj), "\\n")
@@ -179,13 +197,16 @@ def convert_rds_to_h5ad(rds_path: Path, h5ad_path: Path) -> Path:
         Path to the created h5ad file.
     """
     h5seurat_path = h5ad_path.with_suffix(".h5seurat")
+    safe_rds = _sanitize_path_for_r(rds_path)
+    safe_h5s = _sanitize_path_for_r(h5seurat_path)
+    safe_h5ad = _sanitize_path_for_r(h5ad_path)
 
     script = f"""
     library(Seurat)
     library(SeuratDisk)
 
-    cat("Loading RDS:", "{rds_path}", "\\n")
-    obj <- readRDS("{rds_path}")
+    cat("Loading RDS:", "{safe_rds}", "\\n")
+    obj <- readRDS("{safe_rds}")
     cat("Loaded:", ncol(obj), "cells x", nrow(obj), "genes\\n")
 
     # Ensure default assay has counts
@@ -195,12 +216,12 @@ def convert_rds_to_h5ad(rds_path: Path, h5ad_path: Path) -> Path:
     }}
 
     # Save as h5seurat (intermediate format)
-    cat("Saving h5Seurat to:", "{h5seurat_path}", "\\n")
-    SaveH5Seurat(obj, filename = "{h5seurat_path}", overwrite = TRUE)
+    cat("Saving h5Seurat to:", "{safe_h5s}", "\\n")
+    SaveH5Seurat(obj, filename = "{safe_h5s}", overwrite = TRUE)
 
     # Convert h5seurat to h5ad
-    cat("Converting to h5ad:", "{h5ad_path}", "\\n")
-    Convert("{h5seurat_path}", dest = "h5ad", overwrite = TRUE)
+    cat("Converting to h5ad:", "{safe_h5ad}", "\\n")
+    Convert("{safe_h5s}", dest = "h5ad", overwrite = TRUE)
 
     cat("CONVERSION_COMPLETE\\n")
     """

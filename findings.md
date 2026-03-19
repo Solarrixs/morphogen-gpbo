@@ -1,0 +1,63 @@
+# Findings & Discoveries
+> Survives context resets. Updated by every phase.
+
+## Codebase Patterns
+- KernelSpec namedtuple at module level controls kernel selection — avoids twin-variable bugs
+- `_helmert_basis` is cached (computed once) — torch ILR delegates to numpy for correctness
+- Sobol seed=42 used for reproducible convergence diagnostics
+
+## Gotchas
+- fidelity=1.0 collapses MF-GP inter-fidelity kernel (TODO-24, unfixed)
+- CellFlow dose encoding uses raw dose×onehot instead of log1p (TODO-26, unfixed)
+- Fidelity correlation threshold now R²-based 3-zone routing (TODO-25, fixed)
+
+## Quality Issues Found
+- Bug-hunter iteration 4: 76 findings (6 critical, 38 warning, 32 info). See `.bug-hunter/SUMMARY.md`
+- 5 remaining criticals are test coverage gaps in `02_map_to_hnoca.py` and `05_cellrank2_virtual.py`, not code bugs
+
+## Bug Hunter Fixes (Round 7 — 2026-03-17)
+
+### Critical Fixes
+1. **[A-C-NEW-1] PCA index corruption in `_embed_query_in_atlas_pca`** (`05_cellrank2_virtual.py:303`)
+   - `gene_idx` was computed relative to `hvg_genes` but used to index `pca_loadings` (indexed by full `var_names`). All CellRank2 virtual projections were silently corrupted.
+   - Fix: `list(hvg_genes).index(g)` → `list(atlas_adata.var_names).index(g)`
+
+2. **[A-C-001] Ensemble restarts overwrite warm-start checkpoint** (`04_gpbo_loop.py:1418`)
+   - `compute_ensemble_disagreement` called `fit_gp_botorch(round_num=1)` which unconditionally saved state, overwriting the main model's checkpoint.
+   - Fix: Added `save_state: bool = True` parameter; ensemble calls pass `save_state=False`.
+
+3. **[A-C-004] `generate_report` hardcodes `amin_kelley` prefix** (`visualize_report.py:977-986`)
+   - Three file paths hardcoded to `amin_kelley`. Any non-default `--output-prefix` caused `FileNotFoundError`.
+   - Fix: Added `output_prefix` parameter, threaded through CLI.
+
+4. **[A-C-003] Confusing error for small plate sizes** (`04_gpbo_loop.py:2840`)
+   - `n_duplicates >= n_novel` produced error referencing internal variable names.
+   - Fix: Early validation with user-facing message referencing original CLI arguments.
+
+### Warning Fix
+5. **[A-W-NEW-2] Zero-division guard in `compute_soft_cell_type_fractions`** (`02_map_to_hnoca.py:436`)
+   - `row_sums` could be zero for edge-case conditions. NaN would propagate to GP training.
+   - Fix: `row_sums.replace(0, 1)` with warning log.
+
+## Bug Hunter Fixes (Round 8 — 2026-03-17)
+
+### Critical Fixes
+1. **[A-C-005] TVR + multi-objective crash** (`04_gpbo_loop.py:2684`)
+   - `--tvr --multi-objective` causes `AttributeError` because `_TVRPosterior` lacks `covariance_matrix`/`mvn` required by `qLogNEHVI`. Crashes after GP fitting, wasting compute.
+   - Fix: Added `ValueError` guard at top of `run_gpbo_loop()`.
+
+2. **[RF-A-C-001] Silent threshold semantic break** (`config.py:143`)
+   - Legacy alias `FIDELITY_CORRELATION_THRESHOLD` silently changed from Spearman 0.3 to R² 0.80 (2.7x stricter, different metric). `visualize_report.py` chart annotations showed wrong threshold.
+   - Fix: Renamed to `FIDELITY_DROP_R2_THRESHOLD` / `FIDELITY_SKIP_R2_THRESHOLD`; updated all consumers.
+
+### Warning Fix
+3. **[A-W-007] Hardcoded h5ad path in `generate_report()`** (`visualize_report.py:1081`)
+   - `"amin_kelley_mapped.h5ad"` ignored `output_prefix` parameter. UMAP section silently missing for SAG screen reports.
+   - Fix: Changed to `f"{output_prefix}_mapped.h5ad"`.
+
+## Bug Hunter Fixes (Round 9 — 2026-03-17)
+
+### Critical Fix
+1. **[BF-R9-C-1] Un-remapped fidelity in `_select_replicate_conditions`** (`04_gpbo_loop.py:2417`)
+   - When MF-GP is active, `_select_replicate_conditions` passed un-remapped fidelity (1.0) to `model.posterior()`, but model was trained with `FIDELITY_KERNEL_REMAP[1.0] = 2/3`. Produced out-of-distribution posterior variance for replicate selection.
+   - Fix: Added `FIDELITY_KERNEL_REMAP` mapping to fidelity column before `model.posterior()` call.

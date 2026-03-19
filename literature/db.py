@@ -1,59 +1,63 @@
-"""Database engine, session factory, and initialization helpers."""
+"""Database initialization and session management."""
 
 from __future__ import annotations
-
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Generator
 
-from sqlalchemy import create_engine, Engine
-from sqlalchemy.orm import Session
+import yaml
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from literature.models import Base
 
-_DEFAULT_DB_PATH = str(Path(__file__).parent / "papers.db")
+
+def load_config(config_path: Path = None) -> dict:
+    """Load config from YAML, with env var overrides."""
+    if config_path is None:
+        config_path = Path(__file__).parent / "config.yaml"
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    # Env var overrides
+    if os.environ.get("LITERATURE_DB_URL"):
+        config["database"]["url"] = os.environ["LITERATURE_DB_URL"]
+    if os.environ.get("NCBI_API_KEY"):
+        config["pubmed"]["api_key"] = os.environ["NCBI_API_KEY"]
+    if os.environ.get("NCBI_EMAIL"):
+        config["pubmed"]["email"] = os.environ["NCBI_EMAIL"]
+
+    return config
 
 
-def get_engine(db_path: Optional[str] = None) -> Engine:
-    """Return a SQLAlchemy engine.
-
-    Args:
-        db_path: Path to the SQLite database file.  Defaults to
-            ``literature/papers.db`` relative to this package.
-
-    Returns:
-        A configured SQLAlchemy :class:`Engine`.
-    """
-    path = db_path or _DEFAULT_DB_PATH
-    url = f"sqlite:///{path}"
-    return create_engine(url, echo=False, future=True)
+def get_engine(db_url: str = None):
+    """Create SQLAlchemy engine."""
+    if db_url is None:
+        config = load_config()
+        db_url = config["database"]["url"]
+    return create_engine(db_url, echo=False)
 
 
-def init_db(db_path: Optional[str] = None) -> Engine:
-    """Create all tables and return the engine.
-
-    Args:
-        db_path: Path to the SQLite database file (see :func:`get_engine`).
-
-    Returns:
-        The engine used to create the tables.
-    """
-    engine = get_engine(db_path)
+def init_db(engine=None):
+    """Create all tables."""
+    if engine is None:
+        engine = get_engine()
     Base.metadata.create_all(engine)
     return engine
 
 
-def get_session(db_path: Optional[str] = None) -> Session:
-    """Return a new SQLAlchemy :class:`Session`.
-
-    The caller is responsible for committing/rolling back and closing the
-    session.
-
-    Args:
-        db_path: Path to the SQLite database file (see :func:`get_engine`).
-
-    Returns:
-        A new :class:`Session` bound to the database.
-    """
-    engine = init_db(db_path)
-    return Session(engine)
+def get_session(engine=None) -> Generator[Session, None, None]:
+    """Yield a database session."""
+    if engine is None:
+        engine = get_engine()
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

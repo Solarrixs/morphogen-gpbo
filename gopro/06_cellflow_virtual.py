@@ -1,13 +1,15 @@
 """
 Step 6: CellFlow Virtual Protocol Screening.
 
-Uses CellFlow (Klein et al., bioRxiv 2025) — a flow-matching generative model
-trained on 176 conditions from Sanchis-Calleja + Azbukina — to predict
-single-cell distributions from novel protocol encodings.
+Uses CellFlow (Klein et al. 2025, bioRxiv, DOI:10.1101/2025.04.11.648220)
+— a flow-matching generative model trained on 176 conditions from
+Sanchis-Calleja + Azbukina — to predict single-cell distributions from
+novel protocol encodings.
 
 CellFlow encodes protocols using:
   1. Molecular fingerprints (small molecules via RDKit)
-  2. ESM2 protein embeddings (growth factors)
+  2. ESM2 protein embeddings (Lin et al. 2023, Science 379:1123-1130,
+     DOI:10.1126/science.ade2574) for growth factors
   3. Concentration, timing window, pathway annotations
   4. Base protocol / dataset label
 
@@ -28,27 +30,34 @@ from __future__ import annotations
 
 import itertools
 import math
-import warnings
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-warnings.filterwarnings("ignore")
-
 from gopro.config import (
+    CELLFLOW_DEFAULT_VARIANCE_INFLATION,
+    CELLFLOW_MAX_TRAINING_DAY,
     DATA_DIR,
     PROTEIN_MW_KDA as MW,
     get_logger,
     nM_to_uM,
     ng_mL_to_uM,
 )
+from gopro.morphogen_parser import _BASE_MEDIA
 
 logger = get_logger(__name__)
 
 # Low fidelity level for CellFlow virtual data
 FIDELITY_LEVEL = 0.0
+
+# Candidate paths for pre-trained CellFlow model
+CELLFLOW_MODEL_PATHS = [
+    DATA_DIR / "cellflow_model",
+    DATA_DIR / "cellflow_model.pt",
+    DATA_DIR / "patterning_screen" / "cellflow_model",
+]
 
 # Morphogen identity mapping for protocol encoding
 # Maps morphogen column names to (molecule_type, canonical_name) pairs
@@ -76,6 +85,7 @@ MORPHOGEN_IDENTITIES: dict[str, tuple[str, str]] = {
     "NT3_uM": ("protein", "NT3"),
     "cAMP_uM": ("small_molecule", "dibutyryl_cAMP"),
     "AscorbicAcid_uM": ("small_molecule", "ascorbic_acid_2_phosphate"),
+    "SR11237_uM": ("small_molecule", "SR11237"),  # RXR agonist (distinct from RA/RAR)
 }
 
 # Signaling pathway annotations for morphogens
@@ -103,6 +113,7 @@ MORPHOGEN_PATHWAYS: dict[str, str] = {
     "NT3_uM": "neurotrophin",
     "cAMP_uM": "unknown",
     "AscorbicAcid_uM": "unknown",
+    "SR11237_uM": "RXR",  # RXR agonist — distinct from RA/RAR pathway
 }
 
 # SMILES strings for small molecule morphogens (for RDKit fingerprints)
@@ -118,6 +129,7 @@ MORPHOGEN_SMILES: dict[str, str] = {
     "purmorphamine": "C1=CC=C(C=C1)CNC2=NC=C3C(=N2)N=CN3CCCC4=CC=CC=C4",
     "cyclopamine": "CC1(CCC2C1CCC3C2CC=C4CC(CCC34C)NC5CC6C(C(O5)CO)OC7C6OC(C7O)CO)O",
     "Dorsomorphin": "C1=CC(=CC=C1C2=CC(=NC=C2)OCC3=CC=C(C=C3)C4=NN=CC=C4)N",
+    "SR11237": "CC1=CC(=CC(=C1)C(C)(C)CC2=CC3=C(C=C2)C=CC(=C3)C(=O)O)C",  # BMS-649, PubChem CID 5468
 }
 
 
@@ -160,8 +172,9 @@ def encode_protocol_cellflow(
         modulator = {
             "name": canonical_name,
             "type": mol_type,
-            "concentration": conc,
+            "concentration": math.log1p(conc),
             "concentration_unit": col.split("_")[-1],
+            "concentration_scale": "log1p",
             "timing_start": timing_start,
             "timing_end": timing_end,
             "pathway": pathway,
@@ -214,7 +227,7 @@ def generate_virtual_screen_grid(
         elif col in morphogen_ranges:
             grid_dims[col] = morphogen_ranges[col]
         else:
-            grid_dims[col] = [0.0]  # Not varied
+            grid_dims[col] = [_BASE_MEDIA.get(col, 0.0)]  # Use base media defaults
 
     # Generate combinations
     keys = list(grid_dims.keys())
@@ -249,27 +262,62 @@ def generate_virtual_screen_grid(
     return grid
 
 
+def discover_cellflow_model() -> Optional[Path]:
+    """Search candidate paths for a pre-trained CellFlow model.
+
+    Checks ``CELLFLOW_MODEL_PATHS`` in order and returns the first
+    path that exists, or ``None`` if no model is found.
+
+    Returns:
+        Path to CellFlow model directory/file, or None.
+    """
+    for candidate in CELLFLOW_MODEL_PATHS:
+        if candidate.exists():
+            logger.info("Found pre-trained CellFlow model at %s", candidate)
+            return candidate
+    return None
+
+
 def predict_cellflow(
     protocols: pd.DataFrame,
     model_path: Optional[Path] = None,
     batch_size: int = 256,
     n_cells_per_condition: int = 500,
     real_fractions_csv: Optional[Path] = None,
-) -> pd.DataFrame:
+    allow_fallback: bool = False,
+) -> Optional[pd.DataFrame]:
     """Run CellFlow predictions for a batch of protocols.
 
     Uses the CellFlow generative model to predict single-cell
     distributions, then aggregates to cell type fractions.
+
+    If ``model_path`` is None, automatically searches
+    ``CELLFLOW_MODEL_PATHS`` for a pre-trained model.
 
     Args:
         protocols: DataFrame of morphogen concentration vectors.
         model_path: Path to pre-trained CellFlow model.
         batch_size: Number of protocols to predict at once.
         n_cells_per_condition: Number of virtual cells to generate.
+        real_fractions_csv: Path to real training fractions CSV for
+            cell type vocabulary alignment (used by heuristic fallback).
+        allow_fallback: If True, use the heuristic baseline predictor
+            when CellFlow is unavailable. Default False — the heuristic
+            uses hand-tuned effect magnitudes with no literature basis
+            and is harvest-day-blind, so it should only be enabled
+            explicitly.
 
     Returns:
-        DataFrame with predicted cell type fractions per protocol.
+        DataFrame with predicted cell type fractions per protocol,
+        or None if CellFlow is unavailable and allow_fallback is False.
     """
+    # Warn about out-of-distribution harvest days
+    _warn_ood_harvest_days(protocols)
+
+    # Auto-discover model if not explicitly provided
+    if model_path is None:
+        model_path = discover_cellflow_model()
+
     try:
         import cellflow
         HAS_CELLFLOW = True
@@ -277,12 +325,117 @@ def predict_cellflow(
         HAS_CELLFLOW = False
 
     if HAS_CELLFLOW and model_path is not None and model_path.exists():
-        return _predict_with_cellflow(
+        result = _predict_with_cellflow(
             protocols, model_path, batch_size, n_cells_per_condition
         )
     else:
-        logger.info("CellFlow not available or no model found. Using baseline prediction.")
-        return _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
+        if not HAS_CELLFLOW:
+            reason = "CellFlow package not installed."
+        elif model_path is None:
+            reason = (
+                f"No pre-trained CellFlow model found. "
+                f"Searched: {[str(p) for p in CELLFLOW_MODEL_PATHS]}."
+            )
+        else:
+            reason = f"CellFlow model path does not exist: {model_path}."
+
+        if allow_fallback:
+            logger.warning(
+                "%s Using heuristic fallback (--use-cellflow-fallback). "
+                "Predictions use hand-tuned priors with no literature basis.",
+                reason,
+            )
+            result = _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
+        else:
+            logger.warning(
+                "%s Skipping CellFlow virtual screening. "
+                "Pass --use-cellflow-fallback to enable the heuristic predictor.",
+                reason,
+            )
+            return None
+
+    return result
+
+
+def _warn_ood_harvest_days(protocols: pd.DataFrame) -> None:
+    """Log a warning if any protocols have harvest days beyond CellFlow's training range.
+
+    CellFlow was trained on days 1-36 (Sanchis-Calleja + Azbukina).
+    Predictions for later harvest days are out-of-distribution extrapolations.
+    """
+    if "log_harvest_day" not in protocols.columns:
+        return
+
+    harvest_days = np.exp(protocols["log_harvest_day"].values)
+    ood_mask = harvest_days > CELLFLOW_MAX_TRAINING_DAY
+    if ood_mask.any():
+        ood_days = sorted(set(int(round(d)) for d in harvest_days[ood_mask]))
+        logger.warning(
+            "CellFlow OOD: %d/%d protocols have harvest_day > %d "
+            "(max training day). OOD days: %s. Predictions are "
+            "extrapolations and may be unreliable.",
+            int(ood_mask.sum()),
+            len(protocols),
+            CELLFLOW_MAX_TRAINING_DAY,
+            ood_days,
+        )
+
+
+def inflate_cellflow_variance(
+    fractions: pd.DataFrame,
+    factor: float = CELLFLOW_DEFAULT_VARIANCE_INFLATION,
+) -> pd.DataFrame:
+    """Inflate CellFlow prediction variance to counteract conservative bias.
+
+    CellFlow predictions tend to cluster near the mean composition. This
+    amplifies each condition's deviation from the global mean by ``factor``,
+    then re-normalises to valid fractions.
+
+    ``inflated = mean + factor * (original - mean)``
+
+    .. warning::
+        CellFlow (Klein et al. 2025, DOI:10.1101/2025.04.11.648220) was
+        trained on Day 1-36 data from Sanchis-Calleja et al. 2025
+        (DOI:10.1038/s41592-025-02927-5). Predictions for harvest days
+        beyond Day 36 (e.g. Day 70-72 used in the Amin/Kelley pipeline)
+        are out-of-distribution temporal extrapolations. The default
+        ``factor=2.0`` is a heuristic, not calibrated against ground truth.
+        Use ``--cellflow-relevance-check`` to validate whether CellFlow
+        data actually helps GP predictions (Mikkola et al. 2023,
+        arXiv:2210.13937).
+
+    Args:
+        fractions: Predicted cell type fractions (rows sum to ~1).
+        factor: Inflation multiplier (>1 spreads predictions, 1.0 = no-op).
+            Default 2.0 is a heuristic for OOD extrapolation regime.
+
+    Returns:
+        DataFrame with inflated fractions, same shape as input.
+    """
+    if factor == 1.0 or len(fractions) == 0:
+        return fractions
+
+    mean_composition = fractions.values.mean(axis=0, keepdims=True)
+    inflated = mean_composition + factor * (fractions.values - mean_composition)
+
+    # Clamp to non-negative, then re-normalise rows to sum to 1
+    inflated = np.maximum(inflated, 0.0)
+    row_sums = inflated.sum(axis=1, keepdims=True)
+    # Replace all-zero rows with mean composition (can happen with extreme
+    # factors when all values clamp to zero — avoids downstream ILR NaNs)
+    zero_rows = (row_sums == 0).ravel()
+    if zero_rows.any():
+        inflated[zero_rows] = mean_composition
+        row_sums[zero_rows] = mean_composition.sum()
+    inflated = inflated / row_sums
+
+    result = pd.DataFrame(inflated, index=fractions.index, columns=fractions.columns)
+    logger.info(
+        "Applied variance inflation (factor=%.1f) to %d CellFlow predictions",
+        factor,
+        len(result),
+    )
+    return result
 
 
 def _predict_with_cellflow(
@@ -292,6 +445,12 @@ def _predict_with_cellflow(
     n_cells_per_condition: int,
 ) -> pd.DataFrame:
     """Run predictions using actual CellFlow model.
+
+    CellFlow (Klein et al. 2025, bioRxiv, DOI:10.1101/2025.04.11.648220)
+    is built on JAX/Flax, not PyTorch.
+    This function uses CellFlow's JAX-based API: jnp arrays for inputs,
+    and no explicit gradient context manager (JAX does not track gradients
+    by default — only ``jax.grad`` triggers differentiation).
 
     Args:
         protocols: Morphogen concentration vectors.
@@ -303,13 +462,16 @@ def _predict_with_cellflow(
         Predicted cell type fractions.
     """
     import cellflow
-    import torch
+    import jax
 
     logger.info("Loading CellFlow model from %s...", model_path)
     model = cellflow.CellFlowModel.load(str(model_path))
 
     all_fractions = []
     n_batches = (len(protocols) + batch_size - 1) // batch_size
+
+    # Use a fixed PRNG key for reproducibility; split per batch
+    rng_key = jax.random.PRNGKey(42)
 
     for batch_idx in range(n_batches):
         start = batch_idx * batch_size
@@ -326,17 +488,17 @@ def _predict_with_cellflow(
             enc = encode_protocol_cellflow(row.to_dict())
             encodings.append(enc)
 
-        # Generate virtual cells
-        with torch.no_grad():
-            predictions = model.predict(
-                encodings,
-                n_cells=n_cells_per_condition,
-            )
+        # Generate virtual cells — JAX does not track gradients by default,
+        # so no torch.no_grad() equivalent is needed.
+        rng_key, subkey = jax.random.split(rng_key)
+        predictions = model.predict(
+            encodings,
+            n_cells=n_cells_per_condition,
+            rng_key=subkey,
+        )
 
         # Aggregate to cell type fractions
-        for i, (cond_name, pred) in enumerate(
-            zip(batch.index, predictions)
-        ):
+        for cond_name, pred in zip(batch.index, predictions):
             if hasattr(pred, "obs") and "cell_type" in pred.obs.columns:
                 fracs = pred.obs["cell_type"].value_counts(normalize=True)
                 frac_dict = fracs.to_dict()
@@ -362,25 +524,263 @@ def _predict_with_cellflow(
     return result
 
 
+def sigmoid_response(concentration: float, ec50: float, hill_coeff: float = 1.0) -> float:
+    """Compute sigmoid (Hill) dose-response curve.
+
+    Models the saturating effect of a morphogen at increasing concentration.
+    Returns a value in [0, 1] where 0 = no effect, 1 = maximal effect.
+
+    Args:
+        concentration: Morphogen concentration (same units as ec50).
+        ec50: Half-maximal effective concentration.
+        hill_coeff: Hill coefficient controlling steepness (default 1.0).
+
+    Returns:
+        Fractional response in [0, 1].
+    """
+    if concentration <= 0 or ec50 <= 0:
+        return 0.0
+    return float(
+        concentration ** hill_coeff
+        / (ec50 ** hill_coeff + concentration ** hill_coeff)
+    )
+
+
+# Morphogen-pathway lookup table mapping each morphogen to its signaling
+# pathway, agonist/antagonist direction, EC50 (µM), Hill coefficient,
+# and expected effects on cell type composition.
+#
+# Approximate phenotypic EC50 values for organoid differentiation outcomes
+# (not biochemical IC50s).
+# References for key values:
+# - CHIR99021: cellular Wnt activation EC50 ~1-3 µM
+#   (Law & Zheng 2022, DOI:10.1016/j.isci.2022.104159)
+# - BMP4: effective range 1-50 ng/mL
+#   (Heemskerk et al. 2019, DOI:10.7554/eLife.40526)
+# - SAG: biochemical EC50 ~3 nM
+#   (Chen et al. 2002, DOI:10.1073/pnas.212323999);
+#   0.5 µM here is a conservative phenotypic estimate, may be too high
+# NOTE: These are approximate. Effect magnitudes below are hand-tuned
+# priors with NO literature basis.
+MORPHOGEN_PATHWAY_MAP: dict[str, dict] = {
+    "CHIR99021_uM": {
+        "pathway": "WNT", "direction": "agonist", "ec50": 3.0, "hill": 1.5,
+        "effects": {  # HEURISTIC: hand-tuned directional guesses, no literature basis. Low impact: feeds fidelity=0.0 virtual data.
+            "Neuron": +0.15, "NPC": -0.05, "IP": +0.05,
+            "Neuroepithelium": -0.10, "Glioblast": +0.03,
+        },
+    },
+    "IWP2_uM": {
+        "pathway": "WNT", "direction": "antagonist", "ec50": 0.5, "hill": 1.0,  # Phenotypic; biochem IC50=27nM (Chen 2009, DOI:10.1038/nchembio.137)
+        "effects": {
+            "NPC": +0.15, "Neuroepithelium": +0.10, "Neuron": -0.05,
+        },
+    },
+    "XAV939_uM": {
+        "pathway": "WNT", "direction": "antagonist", "ec50": 5.0, "hill": 1.0,
+        "effects": {
+            "NPC": +0.10, "Neuroepithelium": +0.08, "Neuron": -0.03,
+        },
+    },
+    "BMP4_uM": {
+        "pathway": "BMP", "direction": "agonist", "ec50": 0.001, "hill": 1.2,
+        "effects": {
+            "CP": +0.15, "MC": +0.05, "Neuroepithelium": -0.05, "NPC": -0.05,
+        },
+    },
+    "BMP7_uM": {
+        "pathway": "BMP", "direction": "agonist", "ec50": 0.002, "hill": 1.0,
+        "effects": {
+            "CP": +0.10, "MC": +0.03, "NPC": -0.03,
+        },
+    },
+    "LDN193189_uM": {
+        "pathway": "BMP", "direction": "antagonist", "ec50": 0.1, "hill": 1.5,
+        "effects": {
+            "Neuroepithelium": +0.12, "NPC": +0.05, "PSC": -0.03, "MC": -0.05,
+        },
+    },
+    "Dorsomorphin_uM": {
+        "pathway": "BMP", "direction": "antagonist", "ec50": 2.0, "hill": 1.0,
+        "effects": {
+            "Neuroepithelium": +0.08, "MC": -0.03,
+        },
+    },
+    "SHH_uM": {
+        "pathway": "SHH", "direction": "agonist", "ec50": 0.005, "hill": 1.2,
+        "effects": {
+            "Neuron": +0.10, "IP": +0.05, "NPC": +0.03,
+        },
+    },
+    "SAG_uM": {
+        "pathway": "SHH", "direction": "agonist", "ec50": 0.1, "hill": 1.0,  # Phenotypic EC50; biochem EC50=3nM (Chen 2002)
+        "effects": {
+            "Neuron": +0.10, "IP": +0.05, "NPC": +0.03,
+        },
+    },
+    "purmorphamine_uM": {
+        "pathway": "SHH", "direction": "agonist", "ec50": 1.0, "hill": 1.0,
+        "effects": {
+            "Neuron": +0.08, "IP": +0.04,
+        },
+    },
+    "cyclopamine_uM": {
+        "pathway": "SHH", "direction": "antagonist", "ec50": 5.0, "hill": 1.0,
+        "effects": {
+            "Neuron": -0.05, "IP": -0.03, "NPC": +0.03,
+        },
+    },
+    "RA_uM": {
+        "pathway": "RA", "direction": "agonist", "ec50": 0.1, "hill": 1.0,
+        "effects": {
+            "Neuron": +0.10, "IP": +0.05, "NPC": -0.03,
+        },
+    },
+    "FGF2_uM": {
+        "pathway": "FGF", "direction": "agonist", "ec50": 0.001, "hill": 1.0,
+        "effects": {
+            "NPC": +0.05, "Glioblast": +0.08, "Astrocyte": +0.03,
+        },
+    },
+    "FGF4_uM": {
+        "pathway": "FGF", "direction": "agonist", "ec50": 0.002, "hill": 1.0,
+        "effects": {
+            "NPC": +0.05, "Glioblast": +0.06,
+        },
+    },
+    "FGF8_uM": {
+        "pathway": "FGF", "direction": "agonist", "ec50": 0.003, "hill": 1.2,
+        "effects": {
+            "Glioblast": +0.08, "NPC": +0.05, "Neuron": +0.03,
+        },
+    },
+    "SB431542_uM": {
+        "pathway": "TGFb", "direction": "antagonist", "ec50": 5.0, "hill": 1.5,
+        "effects": {
+            "Neuroepithelium": +0.12, "NPC": +0.05, "PSC": -0.03, "MC": -0.03,
+        },
+    },
+    "ActivinA_uM": {
+        "pathway": "TGFb", "direction": "agonist", "ec50": 0.001, "hill": 1.0,
+        "effects": {
+            "PSC": +0.05, "MC": +0.03, "Neuroepithelium": -0.05,
+        },
+    },
+    "DAPT_uM": {
+        "pathway": "Notch", "direction": "antagonist", "ec50": 5.0, "hill": 1.0,
+        "effects": {
+            "Neuron": +0.15, "NPC": -0.08, "IP": +0.05,
+        },
+    },
+    "EGF_uM": {
+        "pathway": "EGF", "direction": "agonist", "ec50": 0.003, "hill": 1.0,
+        "effects": {
+            "NPC": +0.05, "Glioblast": +0.05, "OPC": +0.03,
+        },
+    },
+}
+
+
+def _compute_pathway_antagonism(
+    row: pd.Series,
+) -> dict[str, float]:
+    """Compute net agonist/antagonist balance per pathway.
+
+    When both an agonist and antagonist for the same pathway are present,
+    their effects partially cancel. Returns a per-pathway scaling factor
+    in [0, 1] where 0 = fully cancelled, 1 = no antagonism.
+
+    Args:
+        row: A single protocol's morphogen concentrations.
+
+    Returns:
+        Dict mapping pathway name to net scaling factor.
+    """
+    # Accumulate agonist and antagonist sigmoid responses per pathway
+    pathway_agonist: dict[str, float] = {}
+    pathway_antagonist: dict[str, float] = {}
+
+    for morph_col, info in MORPHOGEN_PATHWAY_MAP.items():
+        conc = float(row.get(morph_col, 0.0))
+        if conc <= 0:
+            continue
+        response = sigmoid_response(conc, info["ec50"], info.get("hill", 1.0))
+        pathway = info["pathway"]
+        if info["direction"] == "agonist":
+            pathway_agonist[pathway] = pathway_agonist.get(pathway, 0.0) + response
+        else:
+            pathway_antagonist[pathway] = pathway_antagonist.get(pathway, 0.0) + response
+
+    # Compute net scaling: agonist signal is reduced by antagonist presence
+    all_pathways = set(pathway_agonist.keys()) | set(pathway_antagonist.keys())
+    scaling = {}
+    for pw in all_pathways:
+        ago = pathway_agonist.get(pw, 0.0)
+        ant = pathway_antagonist.get(pw, 0.0)
+        if ago + ant > 0:
+            # Net effect: agonist fraction minus antagonist cancellation
+            # Both agonists and antagonists are kept but with reduced magnitude
+            scaling[pw] = max(0.0, (ago - ant) / (ago + ant))
+        else:
+            scaling[pw] = 1.0
+    return scaling
+
+
+def _load_dirichlet_prior(
+    real_fractions_csv: Optional[Path],
+    cell_types: list[str],
+) -> np.ndarray:
+    """Load a Dirichlet prior from real training data.
+
+    If real training fractions are available, the mean composition across
+    all conditions is used as the prior (more informative than uniform).
+    Otherwise falls back to a uniform prior.
+
+    Args:
+        real_fractions_csv: Path to real training fractions CSV.
+        cell_types: List of cell type names to align to.
+
+    Returns:
+        1-D array of shape (len(cell_types),) summing to 1.0.
+    """
+    if real_fractions_csv is not None and real_fractions_csv.exists():
+        real_Y = pd.read_csv(str(real_fractions_csv), index_col=0)
+        # Compute mean composition across all real conditions
+        prior = np.zeros(len(cell_types))
+        for i, ct in enumerate(cell_types):
+            if ct in real_Y.columns:
+                prior[i] = float(real_Y[ct].mean())
+            else:
+                prior[i] = 0.01  # small pseudo-count for unseen types
+        # Ensure positive and normalized
+        prior = np.maximum(prior, 0.01)
+        prior = prior / prior.sum()
+        return prior
+    else:
+        # Uniform Dirichlet prior
+        return np.ones(len(cell_types)) / len(cell_types)
+
+
 def _predict_baseline(
     protocols: pd.DataFrame,
     real_fractions_csv: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Baseline prediction when CellFlow is not available.
 
-    Uses a heuristic model based on known morphogen-to-fate mappings
-    from literature. This is a placeholder that produces reasonable
-    but approximate cell type fractions.
+    Uses a heuristic model based on:
+    1. Dirichlet prior from real training data (or uniform fallback)
+    2. Morphogen-pathway lookup table with sigmoid dose-response curves
+    3. Pathway antagonism (agonist + inhibitor partially cancel)
 
     Args:
         protocols: Morphogen concentration vectors.
         real_fractions_csv: Path to real training fractions CSV. If provided,
-            cell type vocabulary is loaded from its columns to match real data.
+            cell type vocabulary and Dirichlet prior are loaded from it.
 
     Returns:
         Predicted cell type fractions (heuristic).
     """
-    logger.info("Using heuristic baseline predictor...")
+    logger.info("Using heuristic baseline predictor (sigmoid dose-response)...")
 
     # Load cell type vocabulary from real training data if available
     if real_fractions_csv is not None and real_fractions_csv.exists():
@@ -395,81 +795,47 @@ def _predict_baseline(
         ]
         logger.warning("No real training data — using level-1 fallback cell types")
 
+    # Load Dirichlet prior
+    prior = _load_dirichlet_prior(real_fractions_csv, CELL_TYPES)
+
     results = []
     for cond_name, row in protocols.iterrows():
-        # Start with a base composition
-        frac_dict = {ct: 0.05 for ct in CELL_TYPES}
+        # Start with prior composition (data-driven or uniform)
+        frac_arr = prior.copy()
 
-        # WNT signaling (CHIR) -> caudalizes; IWP2 -> anteriorizes
-        chir = row.get("CHIR99021_uM", 0)
-        iwp2 = row.get("IWP2_uM", 0)
-        if chir > 2.0:
-            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.2
-        if iwp2 > 0:
-            if "NPC" in frac_dict:
-                frac_dict["NPC"] += 0.15
-            elif len(CELL_TYPES) > 1:
-                frac_dict[CELL_TYPES[1]] = frac_dict.get(CELL_TYPES[1], 0.05) + 0.15
-            if "Neuroepithelium" in frac_dict:
-                frac_dict["Neuroepithelium"] += 0.1
-            elif len(CELL_TYPES) > 3:
-                frac_dict[CELL_TYPES[3]] = frac_dict.get(CELL_TYPES[3], 0.05) + 0.1
+        # Compute pathway antagonism scaling
+        pw_scaling = _compute_pathway_antagonism(row)
 
-        # SHH pathway -> ventral fates
-        shh = row.get("SHH_uM", 0) + row.get("SAG_uM", 0)
-        if shh > 0:
-            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.1 * min(shh / 0.05, 1)
-            if "IP" in frac_dict:
-                frac_dict["IP"] += 0.05
-            elif len(CELL_TYPES) > 2:
-                frac_dict[CELL_TYPES[2]] = frac_dict.get(CELL_TYPES[2], 0.05) + 0.05
+        # Apply morphogen effects via sigmoid dose-response
+        for morph_col, info in MORPHOGEN_PATHWAY_MAP.items():
+            conc = float(row.get(morph_col, 0.0))
+            if conc <= 0:
+                continue
 
-        # BMP -> dorsal / choroid plexus
-        bmp = row.get("BMP4_uM", 0) + row.get("BMP7_uM", 0)
-        if bmp > 0:
-            if "CP" in frac_dict:
-                frac_dict["CP"] += 0.15 * min(bmp / 0.003, 1)
-            if "MC" in frac_dict:
-                frac_dict["MC"] += 0.05
+            response = sigmoid_response(conc, info["ec50"], info.get("hill", 1.0))
 
-        # FGF -> proliferation / gliogenesis
-        fgf = (row.get("FGF2_uM", 0) + row.get("FGF4_uM", 0)
-               + row.get("FGF8_uM", 0))
-        if fgf > 0:
-            if "Glioblast" in frac_dict:
-                frac_dict["Glioblast"] += 0.1 * min(fgf / 0.005, 1)
-            if "NPC" in frac_dict:
-                frac_dict["NPC"] += 0.05
+            # Scale by pathway antagonism
+            pathway = info["pathway"]
+            pw_scale = pw_scaling.get(pathway, 1.0)
 
-        # LDN/SB -> dual SMAD inhibition -> neural induction
-        ldn = row.get("LDN193189_uM", 0)
-        sb = row.get("SB431542_uM", 0)
-        if ldn > 0 or sb > 0:
-            if "Neuroepithelium" in frac_dict:
-                frac_dict["Neuroepithelium"] += 0.15
-            if "PSC" in frac_dict:
-                frac_dict["PSC"] = max(frac_dict["PSC"] - 0.03, 0.01)
-            if "MC" in frac_dict:
-                frac_dict["MC"] = max(frac_dict["MC"] - 0.03, 0.01)
+            # For antagonists, the antagonism scaling represents how much
+            # the antagonist "wins" — invert for antagonist-specific effects
+            if info["direction"] == "antagonist":
+                effective_response = response * (1.0 - pw_scale)
+            else:
+                effective_response = response * pw_scale
 
-        # RA -> caudal / hindbrain
-        ra = row.get("RA_uM", 0)
-        if ra > 0:
-            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.1 * min(ra / 0.5, 1)
-            if "IP" in frac_dict:
-                frac_dict["IP"] += 0.05
+            # Apply per-cell-type effects
+            for ct, effect_magnitude in info["effects"].items():
+                if ct in CELL_TYPES:
+                    idx = CELL_TYPES.index(ct)
+                    frac_arr[idx] += effect_magnitude * effective_response
 
-        # DAPT -> Notch inhibition -> neuronal differentiation
-        dapt = row.get("DAPT_uM", 0)
-        if dapt > 0:
-            frac_dict[CELL_TYPES[0]] = frac_dict.get(CELL_TYPES[0], 0.05) + 0.15
-            if "NPC" in frac_dict:
-                frac_dict["NPC"] = max(frac_dict["NPC"] - 0.05, 0.01)
-
-        # Normalize
-        fracs = np.array([max(frac_dict[ct], 0.01) for ct in CELL_TYPES])
-        fracs = fracs / fracs.sum()
-        results.append(dict(zip(CELL_TYPES, fracs)))
+        # Ensure all values positive (floor at 0.01)
+        frac_arr = np.maximum(frac_arr, 0.01)
+        # Normalize to sum to 1
+        frac_arr = frac_arr / frac_arr.sum()
+        results.append(dict(zip(CELL_TYPES, frac_arr)))
 
     result = pd.DataFrame(results, index=protocols.index)
     return result
@@ -538,7 +904,8 @@ def run_virtual_screen(
     max_combinations: int = 5000,
     model_path: Optional[Path] = None,
     real_fractions_csv: Optional[Path] = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    allow_fallback: bool = False,
+) -> Optional[tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
     """Run full CellFlow virtual screen.
 
     Args:
@@ -549,10 +916,18 @@ def run_virtual_screen(
         model_path: Path to CellFlow model (optional).
         real_fractions_csv: Path to real training fractions CSV for
             cell type vocabulary alignment.
+        allow_fallback: If True, use heuristic baseline when CellFlow
+            is unavailable. Default False.
 
     Returns:
-        Tuple of (virtual_morphogens, virtual_fractions, quality_report).
+        Tuple of (virtual_morphogens, virtual_fractions, quality_report),
+        or None if CellFlow is unavailable and allow_fallback is False.
     """
+    # Validate real fractions CSV if provided
+    if real_fractions_csv is not None and real_fractions_csv.exists():
+        from gopro.validation import validate_training_csvs
+        validate_training_csvs(real_fractions_csv, real_morphogen_csv)
+
     # Generate protocol grid
     protocols = generate_virtual_screen_grid(
         morphogen_ranges,
@@ -565,7 +940,11 @@ def run_virtual_screen(
         protocols,
         model_path=model_path,
         real_fractions_csv=real_fractions_csv,
+        allow_fallback=allow_fallback,
     )
+
+    if predictions is None:
+        return None
 
     # Compute confidence scores
     real_morphogens = pd.read_csv(str(real_morphogen_csv), index_col=0)
@@ -585,7 +964,17 @@ def run_virtual_screen(
 
 def main() -> None:
     """Run the full CellFlow virtual screening pipeline."""
+    import argparse
     import time
+
+    parser = argparse.ArgumentParser(description="CellFlow virtual screening")
+    parser.add_argument(
+        "--use-cellflow-fallback", action="store_true",
+        help="Enable heuristic fallback when CellFlow model is unavailable. "
+             "WARNING: uses hand-tuned priors with no literature basis.",
+    )
+    args = parser.parse_args()
+
     start = time.time()
 
     logger.info("=" * 60)
@@ -616,21 +1005,27 @@ def main() -> None:
         logger.info("  %s: %s", morph, vals)
 
     # Run virtual screen
-    virtual_X, virtual_Y, quality = run_virtual_screen(
+    result = run_virtual_screen(
         morphogen_ranges=morphogen_ranges,
         real_morphogen_csv=morphogen_path,
         harvest_days=[21, 45, 72],
         max_combinations=5000,
         model_path=DATA_DIR / "cellflow_model",
         real_fractions_csv=DATA_DIR / "gp_training_labels_amin_kelley.csv",
+        allow_fallback=args.use_cellflow_fallback,
     )
+
+    if result is None:
+        logger.info("No CellFlow predictions generated. Exiting.")
+        return
+
+    virtual_X, virtual_Y, quality = result
 
     # Save outputs
     logger.info("Saving virtual screening data")
 
     virtual_Y.to_csv(str(DATA_DIR / "cellflow_virtual_fractions.csv"))
     virtual_X.to_csv(str(DATA_DIR / "cellflow_virtual_morphogens.csv"))
-    # TODO: Wire confidence scores into merge_multi_fidelity_data() to filter low-confidence predictions
     quality.to_csv(str(DATA_DIR / "cellflow_screening_report.csv"), index=False)
 
     logger.info("Virtual fractions  -> data/cellflow_virtual_fractions.csv")

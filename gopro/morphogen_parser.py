@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 import numpy as np
@@ -22,7 +23,19 @@ import pandas as pd
 
 from gopro.config import (
     MORPHOGEN_COLUMNS,
+    MORPHOGEN_COLUMNS_TEMPORAL,
     PROTEIN_MW_KDA,
+    TEMPORAL_BIN_COLUMNS,
+    TEMPORAL_BIN_EDGES,
+    TEMPORAL_BIN_MORPHOGENS,
+    TEMPORAL_BIN_NAMES,
+    TIMING_WINDOW_MORPHOGENS,
+    TIMING_WINDOW_COLUMNS,
+    TIMING_NOT_APPLIED,
+    TIMING_EARLY,
+    TIMING_MID,
+    TIMING_LATE,
+    TIMING_FULL,
     nM_to_uM,
     ng_mL_to_uM,
     get_logger,
@@ -270,11 +283,22 @@ def _fgf8(v: dict[str, float]) -> None:
     v["FGF8_uM"] = _DEFAULTS["FGF8_uM"]
 
 def _i_activin_dapt_sr11(v: dict[str, float]) -> None:
-    """I/Activin/DAPT/SR11 = IWP2 + Activin A + DAPT + SR11237 (retinoid)."""
+    """I/Activin/DAPT/SR11 = IWP2 + Activin A + DAPT + SR11237 (RXR agonist).
+
+    SR11237 is an RXR-selective agonist, NOT equivalent to retinoic acid (RAR agonist).
+    Literature basis for separate encoding:
+      - Gendimenico et al. 1994 (DOI:10.1111/1523-1747.ep12374092):
+        SR11237 inactive in F9 differentiation where RA was potent.
+      - Lammi et al. 2008 (DOI:10.1016/j.abb.2008.02.003):
+        RXR-RAR heterodimers are non-permissive; RXR ligand alone
+        does not activate the classical retinoid transcriptional program.
+      - Galindo-Albarran et al. 2025 (DOI:10.1093/narmme/ugaf018):
+        RAR-specific agonists drive neural tissue formation, not RXR agonists.
+    """
     v["IWP2_uM"] = _IWP2
     v["ActivinA_uM"] = _DEFAULTS["ActivinA_uM"]
     v["DAPT_uM"] = _DAPT
-    v["RA_uM"] = _DEFAULTS["RA_uM"]  # SR11237 treated as RA equivalent
+    v["SR11237_uM"] = nM_to_uM(100.0)  # 100 nM SR11237 (RXR agonist, distinct from RA)
 
 def _iwp2(v: dict[str, float]) -> None:
     v["IWP2_uM"] = _IWP2
@@ -412,17 +436,29 @@ assert len(_CONDITION_PARSERS) == 48, (
 # Public API
 # ==============================================================================
 
-def build_morphogen_matrix(conditions: list[str]) -> pd.DataFrame:
+def build_morphogen_matrix(
+    conditions: list[str],
+    *,
+    temporal_bins: bool = False,
+) -> pd.DataFrame:
     """Build a morphogen concentration matrix for a list of condition names.
 
     Args:
         conditions: List of condition name strings from the Amin/Kelley dataset.
+        temporal_bins: If True, replace each temporally-varying morphogen
+            column (CHIR99021, SAG, IWP2, BMP4) with 3 bin columns
+            (early/mid/late). This preserves temporal position information
+            that the default time-fraction encoding discards.
+            See :func:`build_morphogen_matrix_with_temporal_bins` for details.
 
     Returns:
-        DataFrame of shape (len(conditions), len(MORPHOGEN_COLUMNS)) with
-        condition names as the index and morphogen concentrations as columns.
-        Morphogens not present in a condition are 0.0.
+        DataFrame with condition names as the index and morphogen
+        concentrations as columns. When ``temporal_bins=False`` (default),
+        columns are ``MORPHOGEN_COLUMNS``; when ``True``, columns are
+        ``MORPHOGEN_COLUMNS_TEMPORAL``.
     """
+    if temporal_bins:
+        return build_morphogen_matrix_with_temporal_bins(conditions)
     rows = [parse_condition_name(c) for c in conditions]
     df = pd.DataFrame(rows, index=conditions, columns=MORPHOGEN_COLUMNS)
     return df
@@ -433,6 +469,268 @@ ALL_CONDITIONS: list[str] = sorted(_CONDITION_PARSERS.keys())
 
 SAG_SECONDARY_CONDITIONS: list[str] = ["SAG_50nM", "SAG_2uM"]
 """SAG secondary screen conditions (non-duplicate only)."""
+
+
+# ==============================================================================
+# Timing window encoding (Sanchis-Calleja et al. 2025)
+# ==============================================================================
+# Maps condition names to categorical timing windows for morphogens with
+# temporal variation. Window categories are defined in config.py:
+#   0=not applied, 1=early (D6-11), 2=mid (D11-16), 3=late (D16-21), 4=full (D6-21)
+#
+# Only morphogens with observed timing variation get columns:
+#   CHIR99021, SAG, BMP4
+
+# Sparse lookup: only specify non-default windows (default = TIMING_NOT_APPLIED).
+# compute_timing_windows() fills in TIMING_NOT_APPLIED for unspecified morphogens.
+_TIMING_WINDOW_LOOKUP: dict[str, dict[str, int]] = {
+    # --- Conditions with CHIR sub-windows ---
+    "CHIR-d6-11":        {"CHIR99021": TIMING_EARLY},
+    "CHIR-d11-16":       {"CHIR99021": TIMING_MID},
+    "CHIR-d16-21":       {"CHIR99021": TIMING_LATE},
+    "CHIR switch IWP2":  {"CHIR99021": TIMING_EARLY},
+    "IWP2 switch CHIR":  {"CHIR99021": TIMING_LATE},
+    # --- Conditions with SAG sub-windows ---
+    "SAG-d6-11":         {"SAG": TIMING_EARLY},
+    "SAG-d11-16":        {"SAG": TIMING_MID},
+    "SAG-d16-21":        {"SAG": TIMING_LATE},
+    # NOTE: d10-21 spans mid+late windows. TIMING_FULL (6-21) is the closest
+    # categorical approximation; use _TEMPORAL_APPLICATION_WINDOWS for exact days.
+    "CHIR-SAGd10-21":    {"CHIR99021": TIMING_FULL, "SAG": TIMING_FULL},  # SAG actual: (10,21)
+    "CHIR-SAG-d16-21":   {"CHIR99021": TIMING_LATE, "SAG": TIMING_LATE},
+    "SAG-CHIR-d16-21":   {"CHIR99021": TIMING_LATE, "SAG": TIMING_FULL},
+    "SAG-CHIRd10-21":    {"CHIR99021": TIMING_FULL, "SAG": TIMING_FULL},  # CHIR actual: (10,21)
+    # --- BMP4 sub-windows ---
+    "BMP4 CHIR d11-16":  {"CHIR99021": TIMING_MID, "BMP4": TIMING_MID},
+}
+
+
+def compute_timing_windows(conditions: list[str]) -> pd.DataFrame:
+    """Compute categorical timing window encoding for a list of conditions.
+
+    For each condition and each timing-variable morphogen, assigns a
+    categorical value indicating during which temporal window the
+    morphogen is applied. This enables the GP to distinguish protocols
+    that differ only in timing (Sanchis-Calleja et al. 2025).
+
+    Args:
+        conditions: List of condition name strings.
+
+    Returns:
+        DataFrame of shape (len(conditions), len(TIMING_WINDOW_COLUMNS))
+        with integer-coded categorical values.
+    """
+    rows = []
+    for cond in conditions:
+        if cond in _TIMING_WINDOW_LOOKUP:
+            # Sparse lookup: fill in TIMING_NOT_APPLIED for unspecified morphogens
+            tw = {morph: TIMING_NOT_APPLIED for morph in TIMING_WINDOW_MORPHOGENS}
+            tw.update(_TIMING_WINDOW_LOOKUP[cond])
+        else:
+            # Infer from concentration: if morphogen is active, assign FULL;
+            # if zero, assign NOT_APPLIED.
+            vec = parse_condition_name(cond)
+            tw = {}
+            for morph in TIMING_WINDOW_MORPHOGENS:
+                conc_col = f"{morph}_uM"
+                tw[morph] = TIMING_FULL if vec.get(conc_col, 0.0) > 0 else TIMING_NOT_APPLIED
+        rows.append({
+            f"{morph}_window": tw[morph]
+            for morph in TIMING_WINDOW_MORPHOGENS
+        })
+    return pd.DataFrame(rows, index=conditions, columns=TIMING_WINDOW_COLUMNS)
+
+
+# ==============================================================================
+# Temporal bin encoding (alternative to time-fraction scaling)
+# ==============================================================================
+# Instead of collapsing concentration x time-fraction into a single scalar,
+# represent each temporally-varying morphogen as 3 bins (early/mid/late).
+# Each bin holds the FULL concentration if the morphogen was applied during
+# that window, or 0 if not.
+#
+# This preserves temporal position information that time-fraction discards:
+#   - CHIR 1.5uM days 11-16 -> time-fraction: 0.5uM (same as CHIR 0.5uM
+#     full window). Temporal bins: [0, 1.5, 0] — unambiguously mid-only.
+#   - Sorre et al. 2014 (DOI:10.1016/j.devcel.2014.05.022): TGF-beta
+#     response depends on speed of concentration change, not just AUC
+#   - Sasai, Kutejova & Briscoe 2014 (DOI:10.1371/journal.pbio.1001907):
+#     competence windows are non-interchangeable
+#   - Amin & Kelley 2024 (DOI:10.1016/j.stem.2024.10.016): narrow critical
+#     timing windows
+#
+# For windows that partially overlap a bin (e.g. days 6-13 overlaps early
+# fully and mid partially), the morphogen is marked present in every bin
+# that has ANY overlap. The GP learns the effective signal from outcomes.
+
+# Application windows for each (condition, morphogen) pair.
+# Only entries that differ from "full window" or "not applied" are listed.
+# Conditions absent from this lookup get inferred treatment: if the morphogen
+# concentration is >0 in the standard encoding, all bins get the full
+# concentration; if 0, all bins get 0.
+# Format: {condition_name: {morphogen_stem: (start_day, end_day)}}
+_TEMPORAL_APPLICATION_WINDOWS: dict[str, dict[str, tuple[int, int]]] = {
+    # --- CHIR sub-window conditions ---
+    "CHIR-d6-11":         {"CHIR99021": (6, 11)},
+    "CHIR-d11-16":        {"CHIR99021": (11, 16)},
+    "CHIR-d16-21":        {"CHIR99021": (16, 21)},
+    "BMP4 CHIR d11-16":   {"CHIR99021": (11, 16), "BMP4": (11, 16)},
+    "CHIR switch IWP2":   {"CHIR99021": (6, 13), "IWP2": (13, 21)},
+    "IWP2 switch CHIR":   {"IWP2": (6, 13), "CHIR99021": (13, 21)},
+    # --- SAG sub-window conditions ---
+    "SAG-d6-11":          {"SAG": (6, 11)},
+    "SAG-d11-16":         {"SAG": (11, 16)},
+    "SAG-d16-21":         {"SAG": (16, 21)},
+    "CHIR-SAGd10-21":     {"SAG": (10, 21)},   # CHIR is full window
+    "CHIR-SAG-d16-21":    {"CHIR99021": (16, 21), "SAG": (16, 21)},
+    "SAG-CHIR-d16-21":    {"CHIR99021": (16, 21)},  # SAG is full window
+    "SAG-CHIRd10-21":     {"CHIR99021": (10, 21)},  # SAG is full window
+}
+
+
+def _window_overlaps_bin(
+    app_start: int, app_end: int, bin_start: int, bin_end: int,
+) -> bool:
+    """Return True if the application window [app_start, app_end) overlaps
+    the bin [bin_start, bin_end) by at least one day."""
+    return app_start < bin_end and app_end > bin_start
+
+
+def _get_full_concentration(condition: str, morphogen: str) -> float:
+    """Get the full (un-scaled) concentration for a morphogen in a condition.
+
+    When the standard encoding uses time-fraction scaling, the vec value is
+    ``conc * fraction``. This function returns the un-scaled concentration
+    so that the bin encoding can use it directly.
+
+    Args:
+        condition: Condition name string.
+        morphogen: Morphogen stem (e.g. ``"CHIR99021"``).
+
+    Returns:
+        Full concentration in uM, or 0.0 if the morphogen is not used.
+    """
+    conc_col = f"{morphogen}_uM"
+
+    # Non-default concentrations for specific conditions
+    _CONC_OVERRIDES: dict[str, dict[str, float]] = {
+        # CHIR at 3.0 uM instead of default 1.5
+        "CHIR3":            {"CHIR99021": 3.0},
+        "CHIR3-SAG1000":    {"CHIR99021": 3.0, "SAG": nM_to_uM(1000.0)},
+        "CHIR3-SAG250":     {"CHIR99021": 3.0, "SAG": nM_to_uM(250.0)},
+        # SAG at non-default concentrations
+        "CHIR1.5-SAG1000":  {"SAG": nM_to_uM(1000.0)},
+        "CHIR1.5-SAG250":   {"SAG": nM_to_uM(250.0)},
+        "SAG250":           {"SAG": nM_to_uM(250.0)},
+        "SAG1000":          {"SAG": nM_to_uM(1000.0)},
+        # SAG secondary screen
+        "SAG_50nM":         {"SAG": nM_to_uM(50.0)},
+        "SAG_2uM":          {"SAG": 2.0},
+    }
+
+    overrides = _CONC_OVERRIDES.get(condition, {})
+    if morphogen in overrides:
+        return overrides[morphogen]
+
+    # Check if morphogen has a default concentration
+    if conc_col in _DEFAULTS:
+        # Parse the condition to check if this morphogen is used at all.
+        # We check the standard vec -- even if time-fraction-scaled, it will
+        # be >0 if the morphogen is present.
+        vec = parse_condition_name(condition)
+        if vec.get(conc_col, 0.0) > 0:
+            return _DEFAULTS[conc_col]
+        return 0.0
+
+    return 0.0
+
+
+def compute_temporal_bins(conditions: list[str]) -> pd.DataFrame:
+    """Compute temporal bin encoding for a list of conditions.
+
+    For each condition, temporally-varying morphogens (CHIR99021, SAG, IWP2,
+    BMP4) are expanded into 3 bins: early (D6-11), mid (D11-16), late (D16-21).
+    Each bin holds the full concentration if the morphogen was applied during
+    that window, or 0 if not.
+
+    Non-temporally-varying morphogens are NOT included in this DataFrame;
+    they remain as single columns in the standard morphogen matrix. The caller
+    is responsible for combining this with the non-binned morphogen columns.
+
+    Args:
+        conditions: List of condition name strings.
+
+    Returns:
+        DataFrame of shape (len(conditions), len(TEMPORAL_BIN_COLUMNS))
+        with condition names as the index. Columns are named like
+        ``CHIR99021_early_uM``, ``CHIR99021_mid_uM``, ``CHIR99021_late_uM``.
+    """
+    rows = []
+    for cond in conditions:
+        vec = parse_condition_name(cond)
+        row: dict[str, float] = {}
+        explicit_windows = _TEMPORAL_APPLICATION_WINDOWS.get(cond, {})
+
+        for morph in TEMPORAL_BIN_MORPHOGENS:
+            conc_col = f"{morph}_uM"
+            full_conc = _get_full_concentration(cond, morph)
+
+            if morph in explicit_windows:
+                # Explicit sub-window: mark bins that overlap
+                app_start, app_end = explicit_windows[morph]
+                for (bin_start, bin_end), bin_name in zip(
+                    TEMPORAL_BIN_EDGES, TEMPORAL_BIN_NAMES,
+                ):
+                    col_name = f"{morph}_{bin_name}_uM"
+                    if _window_overlaps_bin(app_start, app_end, bin_start, bin_end):
+                        row[col_name] = full_conc
+                    else:
+                        row[col_name] = 0.0
+            else:
+                # No explicit sub-window: infer from concentration.
+                # Present morphogen -> full window (all bins get concentration).
+                # Absent morphogen -> all bins get 0.
+                is_present = vec.get(conc_col, 0.0) > 0
+                for bin_name in TEMPORAL_BIN_NAMES:
+                    col_name = f"{morph}_{bin_name}_uM"
+                    row[col_name] = full_conc if is_present else 0.0
+
+        rows.append(row)
+
+    return pd.DataFrame(rows, index=conditions, columns=TEMPORAL_BIN_COLUMNS)
+
+
+def build_morphogen_matrix_with_temporal_bins(
+    conditions: list[str],
+) -> pd.DataFrame:
+    """Build morphogen matrix using temporal bin encoding for varying morphogens.
+
+    Replaces the single time-fraction-scaled column for each temporally-varying
+    morphogen (CHIR99021, SAG, IWP2, BMP4) with 3 bin columns (early/mid/late).
+    Non-varying morphogens retain their single column.
+
+    The resulting feature vector has more dimensions than the standard encoding
+    but preserves temporal position information that the time-fraction encoding
+    loses (Sorre et al. 2014; Sasai, Kutejova & Briscoe 2014).
+
+    Args:
+        conditions: List of condition name strings.
+
+    Returns:
+        DataFrame with condition names as the index. Columns are the standard
+        MORPHOGEN_COLUMNS minus the binned morphogens, plus the temporal bin
+        columns. Column order: non-binned morphogen columns first, then
+        temporal bin columns.
+    """
+    standard = build_morphogen_matrix(conditions)
+    bins = compute_temporal_bins(conditions)
+
+    # Drop the single-column versions of binned morphogens
+    binned_cols = [f"{morph}_uM" for morph in TEMPORAL_BIN_MORPHOGENS]
+    remaining_cols = [c for c in standard.columns if c not in binned_cols]
+    result = pd.concat([standard[remaining_cols], bins], axis=1)
+
+    return result
 
 
 # ==============================================================================
@@ -459,8 +757,23 @@ class MorphogenParser:
         self._parsers[name](vec)
         return vec
 
-    def build_matrix(self, conditions: list[str] | None = None) -> pd.DataFrame:
+    def build_matrix(
+        self,
+        conditions: list[str] | None = None,
+        *,
+        temporal_bins: bool = False,
+    ) -> pd.DataFrame:
+        """Build morphogen matrix for this parser's conditions.
+
+        Args:
+            conditions: Subset of conditions to include (default: all).
+            temporal_bins: If True, expand temporally-varying morphogens
+                into early/mid/late bin columns. See
+                :func:`build_morphogen_matrix` for details.
+        """
         conditions = conditions or self.conditions
+        if temporal_bins:
+            return build_morphogen_matrix_with_temporal_bins(conditions)
         rows = [self.parse(c) for c in conditions]
         return pd.DataFrame(rows, index=conditions, columns=MORPHOGEN_COLUMNS)
 
@@ -500,15 +813,263 @@ class CombinedParser:
 
     def parse(self, name: str) -> dict[str, float]:
         for p in self._sub_parsers:
-            if name in p.conditions:
+            if name in p._parsers:
                 return p.parse(name)
         raise ValueError(f"Unrecognized condition: {name!r}")
 
-    def build_matrix(self, conditions: list[str] | None = None) -> pd.DataFrame:
-        # Same as MorphogenParser.build_matrix — kept for duck-type compatibility
+    def build_matrix(
+        self,
+        conditions: list[str] | None = None,
+        *,
+        temporal_bins: bool = False,
+    ) -> pd.DataFrame:
+        """Build morphogen matrix across all sub-parsers.
+
+        Args:
+            conditions: Subset of conditions (default: all).
+            temporal_bins: If True, expand temporally-varying morphogens
+                into early/mid/late bin columns.
+        """
         conditions = conditions or self.conditions
+        if temporal_bins:
+            return build_morphogen_matrix_with_temporal_bins(conditions)
         rows = [self.parse(c) for c in conditions]
         return pd.DataFrame(rows, index=conditions, columns=MORPHOGEN_COLUMNS)
+
+
+# ==============================================================================
+# Sanchis-Calleja et al. 2025 patterning screen
+# (Nature Methods 23:465-478, DOI: 10.1038/s41592-025-02927-5)
+# ==============================================================================
+# 98 morphogen treatment conditions, Day 21 harvest
+# 8 morphogens: CHIR99021, RA, SHH (+purmorphamine), FGF8 (early/late),
+#               BMP4, BMP7, XAV939, Cyclopamine
+# Concentrations from Supplementary Figure 1 and MOESM5/MOESM9
+
+_SC_HARVEST_DAY: int = 21
+_LOG_SC_HARVEST_DAY: float = math.log(_SC_HARVEST_DAY)
+
+# Concentration levels A-E (all converted to µM at module load time)
+_SC_DOSE_LEVELS: dict[str, dict[str, float]] = {
+    # CHIR99021 (µM), Days 0-9
+    "CHIR": {"A": 0.2, "B": 0.6, "C": 1.0, "D": 1.4, "E": 1.8},
+    # Retinoic acid — 100-500 nM → µM
+    "RA": {
+        "A": nM_to_uM(100.0), "B": nM_to_uM(200.0), "C": nM_to_uM(300.0),
+        "D": nM_to_uM(400.0), "E": nM_to_uM(500.0),
+    },
+    # SHH — 20-180 ng/mL → µM (MW 19.6 kDa), Days 3-14
+    "SHH": {
+        k: ng_mL_to_uM(v, PROTEIN_MW_KDA["SHH"])
+        for k, v in {"A": 20.0, "B": 60.0, "C": 100.0, "D": 140.0, "E": 180.0}.items()
+    },
+    # Purmorphamine (µM), paired with SHH, Days 3-14
+    "PM": {"A": 0.03, "B": 0.09, "C": 0.15, "D": 0.21, "E": 0.27},
+    # FGF8 — 50-250 ng/mL → µM (MW 22.5 kDa)
+    # Early (Days 3-14) and late (Days 12-20) share the same dose levels;
+    # timing distinction is not captured in the 24-D concentration vector.
+    "FGF8_early": (_fgf8 := {
+        k: ng_mL_to_uM(v, PROTEIN_MW_KDA["FGF8"])
+        for k, v in {"A": 50.0, "B": 100.0, "C": 150.0, "D": 200.0, "E": 250.0}.items()
+    }),
+    "FGF8_late": _fgf8,
+    # BMP4 — 0.5-4.5 nM → µM, Days 12-20
+    "BMP4": {
+        "A": nM_to_uM(0.5), "B": nM_to_uM(1.5), "C": nM_to_uM(2.5),
+        "D": nM_to_uM(3.5), "E": nM_to_uM(4.5),
+    },
+    # BMP7 — 0.5-4.5 nM → µM, Days 12-20
+    "BMP7": {
+        "A": nM_to_uM(0.5), "B": nM_to_uM(1.5), "C": nM_to_uM(2.5),
+        "D": nM_to_uM(3.5), "E": nM_to_uM(4.5),
+    },
+    # XAV939 (µM), Days 0-9 — only A=1.0 and E=5.0 tested in patterning screen
+    "XAV939": {"A": 1.0, "E": 5.0},
+    # Cyclopamine (µM) — only level E tested (150 nM), Days 3-14
+    "CycA": {"E": nM_to_uM(150.0)},
+}
+
+# Fixed doses for timing experiments tA-tE (all in µM)
+_SC_TIMING_DOSES: dict[str, float] = {
+    "RA": nM_to_uM(250.0),                                     # 250 nM
+    "XAV939": 1.8,                                              # 1.8 µM (corrected: 180 nM was likely a unit error; dose-response range is 1-5 µM)
+    "FGF8": ng_mL_to_uM(100.0, PROTEIN_MW_KDA["FGF8"]),       # 100 ng/mL
+    "SHH": ng_mL_to_uM(200.0, PROTEIN_MW_KDA["SHH"]),         # 200 ng/mL
+    "BMP4": nM_to_uM(5.0),                                     # 5 nM
+    "BMP7": nM_to_uM(5.0),                                     # 5 nM
+}
+
+# Purmorphamine dose paired with SHH timing dose (200 ng/mL)
+# Ratio: PM (µM) = 0.0015 × SHH (ng/mL) → 0.0015 × 200 = 0.30 µM
+_SC_PM_TIMING_DOSE: float = 0.30
+
+# XAV939 D-E gradient: midpoint of MiSTR levels D=3.5 and E=4.5 µM
+_SC_XAV939_DE_UM: float = 4.0
+
+# Map Sanchis-Calleja morphogen tokens → MORPHOGEN_COLUMNS keys
+_SC_COL_MAP: dict[str, str] = {
+    "CHIR": "CHIR99021_uM",
+    "RA": "RA_uM",
+    "SHH": "SHH_uM",
+    "FGF8_early": "FGF8_uM",
+    "FGF8_late": "FGF8_uM",
+    "FGF8": "FGF8_uM",
+    "BMP4": "BMP4_uM",
+    "BMP7": "BMP7_uM",
+    "XAV939": "XAV939_uM",
+    "CycA": "cyclopamine_uM",
+}
+
+# Regex tokenizer for condition names: extracts (morphogen, level) pairs
+# Morphogens ordered longest-first to avoid partial matches
+_SC_TOKEN_RE = re.compile(
+    r'(FGF8_early|FGF8_late|XAV939|CycA|CHIR|BMP4|BMP7|FGF8|SHH|RA)'
+    r'_'
+    r'(D-E|Grad_<[ACE]|Grad_C-E|t_[ABCDE]|t[ABCDE]|[ABCDE])'
+)
+
+# Canonical 98 conditions from MOESM5 (Supplementary Table 5)
+SANCHIS_CALLEJA_CONDITIONS: list[str] = sorted([
+    # BMP4 dose-response (A-E) and timing (tA-tE)
+    "BMP4_A", "BMP4_B", "BMP4_C", "BMP4_D", "BMP4_E",
+    "BMP4_tA", "BMP4_tB", "BMP4_tC", "BMP4_tD", "BMP4_tE",
+    # BMP7 dose-response and timing
+    "BMP7_A", "BMP7_B", "BMP7_C", "BMP7_D", "BMP7_E",
+    "BMP7_tA", "BMP7_tB", "BMP7_tC", "BMP7_tD", "BMP7_tE",
+    # CHIR dose-response
+    "CHIR_A", "CHIR_B", "CHIR_C", "CHIR_D", "CHIR_E",
+    # CHIR combinations
+    "CHIR_E_CycA_E", "CHIR_E_SHH_A", "CHIR_E_SHH_E",
+    # Cyclopamine
+    "CycA_E", "CycA_E_FGF8_A",
+    # FGF8 dose-response (early Days 3-14 and late Days 12-20)
+    "FGF8_early_A", "FGF8_early_B", "FGF8_early_C", "FGF8_early_D", "FGF8_early_E",
+    "FGF8_late_A", "FGF8_late_B", "FGF8_late_C", "FGF8_late_D", "FGF8_late_E",
+    # FGF8 timing
+    "FGF8_tA", "FGF8_tB", "FGF8_tC", "FGF8_tD", "FGF8_tE",
+    # RA dose-response and timing
+    "RA_A", "RA_B", "RA_C", "RA_D", "RA_E",
+    "RA_tA", "RA_tB", "RA_tC", "RA_tD", "RA_tE",
+    # RA combinations
+    "RA_E_CycA_E", "RA_E_CycA_E_FGF8_A", "RA_E_FGF8_A",
+    "RA_E_SHH_A", "RA_E_SHH_A_FGF8_A", "RA_E_SHH_E",
+    # SHH dose-response and timing
+    "SHH_A", "SHH_B", "SHH_C", "SHH_D", "SHH_E",
+    "SHH_tA", "SHH_tB", "SHH_tC", "SHH_tD", "SHH_tE",
+    # XAV939 dose-response and timing
+    "XAV939_A", "XAV939_E",
+    "XAV939_tA", "XAV939_tB", "XAV939_tC", "XAV939_tD", "XAV939_tE",
+    # XAV939_A combinations
+    "XAV939_A_CycA_E", "XAV939_A_SHH_A", "XAV939_A_SHH_E",
+    # XAV939_D-E (microfluidic gradient chip)
+    "XAV939_D-E",
+    "XAV939_D-E_SHH_A", "XAV939_D-E_SHH_E",
+    "XAV939_D-E_SHH_Grad_<A", "XAV939_D-E_SHH_Grad_<C",
+    "XAV939_D-E_SHH_Grad_<E", "XAV939_D-E_SHH_Grad_C-E",
+    "XAV939_D-E_SHH_t_B", "XAV939_D-E_SHH_t_C",
+    "XAV939_D-E_SHH_t_D", "XAV939_D-E_SHH_t_E",
+    # XAV939_E combinations
+    "XAV939_E_CycA_E", "XAV939_E_CycA_E_FGF8_A", "XAV939_E_FGF8_A",
+    "XAV939_E_SHH_A", "XAV939_E_SHH_A_FGF8_A", "XAV939_E_SHH_E",
+])
+"""All 98 Sanchis-Calleja condition names (MOESM5 canonical naming)."""
+
+assert len(SANCHIS_CALLEJA_CONDITIONS) == 98, (
+    f"Expected 98 Sanchis-Calleja conditions, got {len(SANCHIS_CALLEJA_CONDITIONS)}"
+)
+
+
+class SanchisCallejaParser(MorphogenParser):
+    """Parser for Sanchis-Calleja et al. 2025 patterning screen.
+
+    98 conditions, Day 21 harvest. Uses a different base medium than
+    Amin/Kelley — no BDNF, NT3, cAMP, or Ascorbic Acid in the vector.
+
+    SHH is always paired with purmorphamine at proportional doses.
+    Gradient conditions (``XAV939_D-E_SHH_Grad_*``) are microfluidic chip
+    experiments approximated as scalar concentrations.
+    """
+
+    def __init__(self) -> None:
+        parsers = {c: self._handler_factory(c) for c in SANCHIS_CALLEJA_CONDITIONS}
+        super().__init__(parsers, harvest_day=_SC_HARVEST_DAY)
+
+    def parse(self, name: str) -> dict[str, float]:
+        """Parse condition name into 24-D morphogen concentration vector.
+
+        Unlike :class:`AminKelleyParser`, does NOT set base maturation media
+        (BDNF, NT3, cAMP, AscorbicAcid) — Sanchis-Calleja harvests at Day 21
+        before maturation begins.
+        """
+        vec = {col: 0.0 for col in MORPHOGEN_COLUMNS}
+        vec["log_harvest_day"] = self._log_harvest_day
+        if name not in self._parsers:
+            raise ValueError(f"Unrecognized condition: {name!r}")
+        self._parsers[name](vec)
+        return vec
+
+    @classmethod
+    def _handler_factory(cls, cond_name: str):
+        """Create a handler function for a given condition name."""
+        def handler(vec: dict[str, float]) -> None:
+            cls._fill_condition(cond_name, vec)
+        return handler
+
+    @classmethod
+    def _fill_condition(cls, name: str, vec: dict[str, float]) -> None:
+        """Parse morphogen tokens from condition name and set concentrations."""
+        pairs = _SC_TOKEN_RE.findall(name)
+        if not pairs:
+            raise ValueError(f"Cannot parse Sanchis-Calleja condition: {name!r}")
+        for morph_token, level_token in pairs:
+            cls._set_morphogen(vec, morph_token, level_token)
+
+    @classmethod
+    def _set_morphogen(
+        cls, vec: dict[str, float], morph: str, level: str,
+    ) -> None:
+        """Set one morphogen's concentration in the vector."""
+        col = _SC_COL_MAP[morph]
+
+        # Resolve dose-lookup key for morphogens with naming variants
+        lookup = morph
+        if morph == "FGF8":
+            lookup = "FGF8_late"  # Default for timing and combination conditions
+
+        if level.startswith("t"):
+            # Timing condition: tA-tE (standalone) or t_B-t_E (combo context)
+            # Fixed dose, variable application window
+            base = lookup.split("_")[0]
+            vec[col] = _SC_TIMING_DOSES[base]
+            if base == "SHH":
+                vec["purmorphamine_uM"] = _SC_PM_TIMING_DOSE
+
+        elif level == "D-E":
+            # XAV939 microfluidic gradient D-E
+            vec[col] = _SC_XAV939_DE_UM
+
+        elif level.startswith("Grad_"):
+            # SHH spatial gradient — approximate as scalar
+            if level == "Grad_<A":
+                vec[col] = _SC_DOSE_LEVELS["SHH"]["A"] / 2
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"]["A"] / 2
+            elif level == "Grad_<C":
+                vec[col] = _SC_DOSE_LEVELS["SHH"]["C"] / 2
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"]["C"] / 2
+            elif level == "Grad_<E":
+                vec[col] = _SC_DOSE_LEVELS["SHH"]["E"] / 2
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"]["E"] / 2
+            elif level == "Grad_C-E":
+                # Midpoint of C and E ≈ level D
+                vec[col] = _SC_DOSE_LEVELS["SHH"]["D"]
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"]["D"]
+
+        else:
+            # Standard concentration level A-E
+            vec[col] = _SC_DOSE_LEVELS[lookup][level]
+            # Pair SHH with purmorphamine
+            if lookup == "SHH":
+                vec["purmorphamine_uM"] = _SC_DOSE_LEVELS["PM"][level]
 
 
 # ==============================================================================

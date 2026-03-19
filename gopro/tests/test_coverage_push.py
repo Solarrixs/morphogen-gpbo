@@ -1,0 +1,1774 @@
+"""Coverage push tests for 02_map_to_hnoca.py and 05_cellrank2_virtual.py.
+
+These tests target the least-covered code paths in both modules to push
+coverage above 60%. Heavy external dependencies (scarches, moscot, cellrank)
+are mocked where needed.
+"""
+
+import math
+import pytest
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
+import anndata as ad
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from conftest import _import_pipeline_module
+
+step02 = _import_pipeline_module("02_map_to_hnoca")
+step05 = _import_pipeline_module("05_cellrank2_virtual")
+
+
+# =============================================================================
+# 02_map_to_hnoca.py — prepare_query_for_scpoli
+# =============================================================================
+
+class TestPrepareQueryForScpoli:
+    """Tests for prepare_query_for_scpoli — gene alignment and batch setup."""
+
+    @pytest.fixture
+    def ref_adata(self):
+        """Minimal reference AnnData with 5 genes."""
+        ref = ad.AnnData(
+            X=sp.csr_matrix(np.ones((10, 5))),
+            var=pd.DataFrame({"highly_variable": [True] * 5},
+                             index=["GeneA", "GeneB", "GeneC", "GeneD", "GeneE"]),
+            obs=pd.DataFrame({"batch": ["ref"] * 10},
+                             index=[f"ref_{i}" for i in range(10)]),
+        )
+        ref.layers["counts"] = ref.X.copy()
+        return ref
+
+    @pytest.fixture
+    def query_adata(self):
+        """Minimal query AnnData with overlapping genes."""
+        n_cells = 20
+        X = sp.csr_matrix(np.random.rand(n_cells, 6))
+        query = ad.AnnData(
+            X=X,
+            var=pd.DataFrame(index=["GeneA", "GeneB", "GeneC", "GeneX", "GeneY", "GeneZ"]),
+            obs=pd.DataFrame({
+                "sample": [f"s{i % 3}" for i in range(n_cells)],
+                "condition": ["cond_A"] * 10 + ["cond_B"] * 10,
+            }, index=[f"q_{i}" for i in range(n_cells)]),
+        )
+        query.layers["counts"] = X.copy()
+        return query
+
+    def test_shared_genes_subset(self, query_adata, ref_adata):
+        """Output should have same var_names as reference."""
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, min_shared_genes=0)
+        assert list(result.var_names) == list(ref_adata.var_names)
+
+    def test_batch_column_created(self, query_adata, ref_adata):
+        """Batch column should be created from sample column."""
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, batch_column="sample", min_shared_genes=0)
+        assert "batch" in result.obs.columns
+        assert result.obs["batch"].nunique() == 3
+
+    def test_batch_column_fallback(self, ref_adata):
+        """When batch column is missing, default to 'query'."""
+        query = ad.AnnData(
+            X=sp.csr_matrix(np.ones((5, 3))),
+            var=pd.DataFrame(index=["GeneA", "GeneB", "GeneX"]),
+            obs=pd.DataFrame(index=[f"c{i}" for i in range(5)]),
+        )
+        result = step02.prepare_query_for_scpoli(query, ref_adata, batch_column="nonexistent", min_shared_genes=0)
+        assert (result.obs["batch"] == "query").all()
+
+    def test_scpoli_label_cols_added(self, query_adata, ref_adata):
+        """scPoli placeholder label columns should be added."""
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, min_shared_genes=0)
+        for col in ["snapseed_pca_rss_level_1", "snapseed_pca_rss_level_12",
+                     "snapseed_pca_rss_level_123"]:
+            assert col in result.obs.columns
+            assert (result.obs[col] == "unknown").all()
+
+    def test_obsm_varm_cleared(self, query_adata, ref_adata):
+        """obsm and varm should be cleared."""
+        query_adata.obsm["X_pca"] = np.zeros((20, 10))
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, min_shared_genes=0)
+        assert len(result.obsm) == 0
+        assert len(result.varm) == 0
+
+    def test_gene_symbol_mapping(self, ref_adata):
+        """Query with gene_name_unique column should remap var_names."""
+        query = ad.AnnData(
+            X=sp.csr_matrix(np.ones((5, 4))),
+            var=pd.DataFrame({
+                "gene_name_unique": ["GeneA", "GeneB", "GeneD", "GeneZ"],
+            }, index=["ENSG001", "ENSG002", "ENSG003", "ENSG004"]),
+            obs=pd.DataFrame({"sample": ["s1"] * 5},
+                             index=[f"c{i}" for i in range(5)]),
+        )
+        query.layers["counts"] = query.X.copy()
+        result = step02.prepare_query_for_scpoli(query, ref_adata, min_shared_genes=0)
+        assert list(result.var_names) == list(ref_adata.var_names)
+
+    def test_zero_filled_for_missing_genes(self, query_adata, ref_adata):
+        """Genes not in query should be zero-filled in output."""
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, min_shared_genes=0)
+        X = result.X.toarray() if sp.issparse(result.X) else result.X
+        # GeneD and GeneE are not in query, should be zero
+        gene_d_idx = list(result.var_names).index("GeneD")
+        gene_e_idx = list(result.var_names).index("GeneE")
+        assert np.all(X[:, gene_d_idx] == 0)
+        assert np.all(X[:, gene_e_idx] == 0)
+
+    def test_dense_x_input(self, ref_adata):
+        """Should handle dense X input (no counts layer)."""
+        query = ad.AnnData(
+            X=np.ones((5, 3)),
+            var=pd.DataFrame(index=["GeneA", "GeneC", "GeneX"]),
+            obs=pd.DataFrame({"sample": ["s1"] * 5},
+                             index=[f"c{i}" for i in range(5)]),
+        )
+        result = step02.prepare_query_for_scpoli(query, ref_adata, min_shared_genes=0)
+        assert result.shape == (5, 5)
+
+    def test_insufficient_gene_overlap_raises(self, ref_adata):
+        """Should raise ValueError when shared genes < min_shared_genes."""
+        query = ad.AnnData(
+            X=sp.csr_matrix(np.ones((5, 3))),
+            var=pd.DataFrame(index=["GeneA", "GeneC", "GeneX"]),
+            obs=pd.DataFrame({"sample": ["s1"] * 5},
+                             index=[f"c{i}" for i in range(5)]),
+        )
+        import pytest
+        with pytest.raises(ValueError, match="Insufficient gene overlap"):
+            step02.prepare_query_for_scpoli(query, ref_adata, min_shared_genes=1000)
+
+
+# =============================================================================
+# 02_map_to_hnoca.py — filter_quality_cells edge cases
+# =============================================================================
+
+class TestFilterQualityCellsEdgeCases:
+    """Edge case tests for filter_quality_cells."""
+
+    def test_no_qc_columns(self):
+        """When no QC columns exist, return adata unchanged."""
+        adata = ad.AnnData(
+            X=sp.csr_matrix((10, 5)),
+            obs=pd.DataFrame({"gene_count": range(10)},
+                             index=[f"c{i}" for i in range(10)]),
+        )
+        result = step02.filter_quality_cells(adata)
+        assert result.n_obs == 10
+
+    def test_all_filtered_quality(self):
+        """When all cells are filtered, return empty adata."""
+        adata = ad.AnnData(
+            X=sp.csr_matrix((5, 3)),
+            obs=pd.DataFrame({"quality": ["remove"] * 5},
+                             index=[f"c{i}" for i in range(5)]),
+        )
+        result = step02.filter_quality_cells(adata)
+        assert result.n_obs == 0
+
+    def test_cluster_label_filter(self):
+        """ClusterLabel == 'filtered' should be removed."""
+        adata = ad.AnnData(
+            X=sp.csr_matrix((6, 3)),
+            obs=pd.DataFrame({
+                "ClusterLabel": ["Neuron", "filtered", "Glia", "filtered", "NPC", "Neuron"],
+            }, index=[f"c{i}" for i in range(6)]),
+        )
+        result = step02.filter_quality_cells(adata)
+        assert result.n_obs == 4
+        assert "filtered" not in result.obs["ClusterLabel"].values
+
+    def test_quality_column_takes_priority(self):
+        """When both quality and ClusterLabel exist, quality is used."""
+        adata = ad.AnnData(
+            X=sp.csr_matrix((4, 3)),
+            obs=pd.DataFrame({
+                "quality": ["keep", "remove", "keep", "keep"],
+                "ClusterLabel": ["Neuron", "Neuron", "filtered", "Neuron"],
+            }, index=[f"c{i}" for i in range(4)]),
+        )
+        result = step02.filter_quality_cells(adata)
+        # quality filter: keep rows 0, 2, 3 (ignores ClusterLabel)
+        assert result.n_obs == 3
+
+
+# =============================================================================
+# 02_map_to_hnoca.py — transfer_labels_knn edge cases
+# =============================================================================
+
+class TestTransferLabelsKnnEdgeCases:
+    """Edge case tests for transfer_labels_knn."""
+
+    @pytest.fixture
+    def knn_fixture(self):
+        """Standard KNN fixture with 3 types."""
+        np.random.seed(42)
+        n_ref, n_query, d = 60, 15, 8
+        # Create clustered reference data
+        ref_latent = np.vstack([
+            np.random.randn(20, d) + np.array([2, 0, 0, 0, 0, 0, 0, 0]),
+            np.random.randn(20, d) + np.array([0, 2, 0, 0, 0, 0, 0, 0]),
+            np.random.randn(20, d) + np.array([0, 0, 2, 0, 0, 0, 0, 0]),
+        ])
+        query_latent = np.random.randn(n_query, d)
+        ref_obs = pd.DataFrame({
+            "annot_level_1": ["TypeA"] * 20 + ["TypeB"] * 20 + ["TypeC"] * 20,
+            "annot_level_2": ["SubA1"] * 10 + ["SubA2"] * 10 + ["SubB1"] * 20 + ["SubC1"] * 20,
+        }, index=[f"r{i}" for i in range(n_ref)])
+        query_obs = pd.DataFrame(
+            index=[f"q{i}" for i in range(n_query)],
+        )
+        return ref_latent, query_latent, ref_obs, query_obs
+
+    def test_class_balanced_false(self, knn_fixture):
+        """class_balanced=False should still produce valid results."""
+        ref_latent, query_latent, ref_obs, query_obs = knn_fixture
+        results, soft = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_1"], k=10,
+            class_balanced=False,
+        )
+        assert "predicted_annot_level_1" in results.columns
+        prob_df = soft["annot_level_1"]
+        assert np.allclose(prob_df.sum(axis=1), 1.0, atol=1e-6)
+
+    def test_mean_knn_dist_saved(self, knn_fixture):
+        """transfer_labels_knn should save mean_knn_dist_to_ref in results."""
+        ref_latent, query_latent, ref_obs, query_obs = knn_fixture
+        results, _ = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_1"], k=10,
+        )
+        assert "mean_knn_dist_to_ref" in results.columns
+        assert len(results["mean_knn_dist_to_ref"]) == len(query_obs)
+        assert (results["mean_knn_dist_to_ref"] >= 0).all()
+
+    def test_multiple_label_columns(self, knn_fixture):
+        """Should transfer labels for all specified columns."""
+        ref_latent, query_latent, ref_obs, query_obs = knn_fixture
+        results, soft = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_1", "annot_level_2"], k=10,
+        )
+        assert "predicted_annot_level_1" in results.columns
+        assert "predicted_annot_level_2" in results.columns
+        assert "annot_level_1" in soft
+        assert "annot_level_2" in soft
+
+    def test_missing_label_column_skipped(self, knn_fixture):
+        """Missing label columns should be skipped gracefully."""
+        ref_latent, query_latent, ref_obs, query_obs = knn_fixture
+        results, soft = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_1", "nonexistent_col"], k=10,
+        )
+        assert "predicted_annot_level_1" in results.columns
+        assert "predicted_nonexistent_col" not in results.columns
+        assert "nonexistent_col" not in soft
+
+    def test_confidence_in_range(self, knn_fixture):
+        """Confidence scores should be in [0, 1]."""
+        ref_latent, query_latent, ref_obs, query_obs = knn_fixture
+        results, _ = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_1"], k=10,
+        )
+        conf = results["annot_level_1_confidence"]
+        assert (conf >= 0).all()
+        assert (conf <= 1).all()
+
+
+# =============================================================================
+# 02_map_to_hnoca.py — compute_cell_type_fractions edge cases
+# =============================================================================
+
+class TestComputeFractionsEdgeCases:
+    """Edge case tests for compute_cell_type_fractions."""
+
+    def test_single_condition(self):
+        """Single condition should still produce valid fractions."""
+        obs = pd.DataFrame({
+            "condition": ["A"] * 10,
+            "label": ["X"] * 6 + ["Y"] * 4,
+        })
+        fracs = step02.compute_cell_type_fractions(obs, "condition", "label", quality_filter=False)
+        assert len(fracs) == 1
+        assert fracs.loc["A", "X"] == pytest.approx(0.6)
+
+    def test_quality_filter_off(self):
+        """quality_filter=False should skip quality column filtering."""
+        obs = pd.DataFrame({
+            "condition": ["A"] * 4,
+            "label": ["X", "X", "Y", "Y"],
+            "quality": ["keep", "remove", "keep", "remove"],
+        })
+        fracs = step02.compute_cell_type_fractions(obs, "condition", "label", quality_filter=False)
+        assert fracs.loc["A"].sum() == pytest.approx(1.0)
+
+    def test_quality_filter_on(self):
+        """quality_filter=True should filter to 'keep' rows."""
+        obs = pd.DataFrame({
+            "condition": ["A"] * 4,
+            "label": ["X", "X", "Y", "Y"],
+            "quality": ["keep", "remove", "keep", "remove"],
+        })
+        fracs = step02.compute_cell_type_fractions(obs, "condition", "label", quality_filter=True)
+        assert fracs.loc["A", "X"] == pytest.approx(0.5)
+        assert fracs.loc["A", "Y"] == pytest.approx(0.5)
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — load_temporal_atlas
+# =============================================================================
+
+class TestLoadTemporalAtlas:
+    """Tests for load_temporal_atlas."""
+
+    @pytest.fixture
+    def atlas_h5ad(self, tmp_path):
+        """Create a minimal temporal atlas h5ad."""
+        n = 60
+        obs = pd.DataFrame({
+            "day": [7] * 20 + [15] * 20 + [30] * 20,
+            "cell_type": ["Neuron"] * 30 + ["Glia"] * 30,
+        }, index=[f"c{i}" for i in range(n)])
+        adata = ad.AnnData(X=sp.csr_matrix((n, 10)), obs=obs)
+        path = tmp_path / "atlas.h5ad"
+        adata.write(str(path))
+        return path
+
+    def test_loads_and_returns_anndata(self, atlas_h5ad):
+        result = step05.load_temporal_atlas(atlas_h5ad, time_key="day")
+        assert isinstance(result, ad.AnnData)
+        assert result.n_obs == 60
+
+    def test_time_key_numeric(self, atlas_h5ad):
+        result = step05.load_temporal_atlas(atlas_h5ad, time_key="day")
+        assert pd.api.types.is_numeric_dtype(result.obs["day"])
+
+    def test_missing_time_key_raises(self, atlas_h5ad):
+        with pytest.raises(ValueError, match="Time key"):
+            step05.load_temporal_atlas(atlas_h5ad, time_key="nonexistent")
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — preprocess_for_moscot
+# =============================================================================
+
+class TestPreprocessForMoscot:
+    """Tests for preprocess_for_moscot."""
+
+    def test_computes_pca_and_neighbors(self):
+        np.random.seed(42)
+        adata = ad.AnnData(X=sp.csr_matrix(np.random.rand(50, 200)))
+        result = step05.preprocess_for_moscot(adata, n_pcs=10, n_neighbors=10)
+        assert "X_pca" in result.obsm
+        assert "neighbors" in result.uns
+
+    def test_does_not_mutate_input(self):
+        np.random.seed(42)
+        adata = ad.AnnData(X=sp.csr_matrix(np.random.rand(50, 200)))
+        original_shape = adata.shape
+        step05.preprocess_for_moscot(adata, n_pcs=10, n_neighbors=10)
+        assert adata.shape == original_shape
+        assert "X_pca" not in adata.obsm  # original should not be modified
+
+    def test_skips_if_already_preprocessed(self):
+        np.random.seed(42)
+        adata = ad.AnnData(X=sp.csr_matrix(np.random.rand(50, 200)))
+        adata.obsm["X_pca"] = np.random.rand(50, 10)
+        adata.uns["neighbors"] = {"params": {}}
+        result = step05.preprocess_for_moscot(adata, n_pcs=10, n_neighbors=10)
+        # Should preserve existing PCA
+        assert result.obsm["X_pca"].shape == (50, 10)
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — _compose_transport_chain
+# =============================================================================
+
+class TestComposeTransportChain:
+    """Tests for _compose_transport_chain."""
+
+    def test_single_step_transport(self):
+        """Single step transport should return the matrix directly."""
+        n_source, n_target = 20, 30
+        T = sp.csr_matrix(np.random.rand(n_source, n_target))
+
+        mock_problem = MagicMock()
+        mock_solution = MagicMock()
+        mock_solution.transport_matrix = T
+        mock_problem.__getitem__ = MagicMock(return_value=MagicMock(solution=mock_solution))
+
+        source_indices = np.arange(n_source)
+        transport, local_idx, use = step05._compose_transport_chain(
+            mock_problem, [7, 15], n_target, source_indices,
+        )
+        assert use is True
+        assert transport.shape == (n_source, n_target)
+        assert sp.issparse(transport)
+
+    def test_multi_step_chain(self):
+        """Multi-step transport should compose matrices."""
+        T1 = sp.csr_matrix(np.eye(10, 15))
+        T2 = sp.csr_matrix(np.eye(15, 20))
+
+        mock_problem = MagicMock()
+        solutions = {
+            (7, 15): MagicMock(solution=MagicMock(transport_matrix=T1)),
+            (15, 30): MagicMock(solution=MagicMock(transport_matrix=T2)),
+        }
+        mock_problem.__getitem__ = lambda self, key: solutions[key]
+
+        source_indices = np.arange(10)
+        transport, local_idx, use = step05._compose_transport_chain(
+            mock_problem, [7, 15, 30], 20, source_indices,
+        )
+        assert use is True
+        assert transport.shape == (10, 20)
+
+    def test_dimension_mismatch_returns_false(self):
+        """When transport target dim != atlas target cells, should fail."""
+        T = sp.csr_matrix(np.eye(10, 15))
+
+        mock_problem = MagicMock()
+        mock_problem.__getitem__ = MagicMock(
+            return_value=MagicMock(solution=MagicMock(transport_matrix=T)),
+        )
+
+        source_indices = np.arange(10)
+        transport, local_idx, use = step05._compose_transport_chain(
+            mock_problem, [7, 15], 20,  # 20 != 15
+            source_indices,
+        )
+        assert use is False
+
+    def test_key_error_returns_false(self):
+        """KeyError from missing timepoint pair should return False."""
+        mock_problem = MagicMock()
+        mock_problem.__getitem__ = MagicMock(side_effect=KeyError("missing"))
+
+        source_indices = np.arange(10)
+        transport, local_idx, use = step05._compose_transport_chain(
+            mock_problem, [7, 15], 20, source_indices,
+        )
+        assert use is False
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — _project_condition_transport edge cases
+# =============================================================================
+
+class TestProjectConditionTransport:
+    """Tests for _project_condition_transport."""
+
+    def test_valid_projection(self):
+        """Should produce valid fractions from transport matrix."""
+        n_source, n_target = 10, 20
+        transport = sp.csr_matrix(np.random.rand(n_source, n_target))
+        local_idx_map = np.arange(n_source)
+        neighbor_idx = np.array([[0, 1, 2], [3, 4, 5]])
+        weights = np.array([[0.5, 0.3, 0.2], [0.4, 0.4, 0.2]])
+        cond_indices = np.array([0, 1])
+        target_labels_arr = np.array(["TypeA"] * 10 + ["TypeB"] * 10)
+        target_ct_fracs = pd.Series({"TypeA": 0.5, "TypeB": 0.5})
+
+        result = step05._project_condition_transport(
+            transport, local_idx_map, neighbor_idx, weights,
+            cond_indices, target_labels_arr, target_ct_fracs,
+        )
+        assert isinstance(result, pd.Series)
+        assert result.sum() > 0
+
+    def test_no_valid_neighbors_returns_atlas_avg(self):
+        """When all neighbors are out of range, return atlas average."""
+        transport = sp.csr_matrix(np.eye(5, 10))
+        local_idx_map = np.array([0, 1, 2, 3, 4])
+        # All neighbor indices are out of range
+        neighbor_idx = np.array([[100, 200, 300]])
+        weights = np.array([[0.5, 0.3, 0.2]])
+        cond_indices = np.array([0])
+        target_labels_arr = np.array(["A"] * 5 + ["B"] * 5)
+        target_ct_fracs = pd.Series({"A": 0.5, "B": 0.5})
+
+        result = step05._project_condition_transport(
+            transport, local_idx_map, neighbor_idx, weights,
+            cond_indices, target_labels_arr, target_ct_fracs,
+        )
+        assert result["A"] == pytest.approx(0.5)
+        assert result["B"] == pytest.approx(0.5)
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — _project_condition_push
+# =============================================================================
+
+class TestProjectConditionPush:
+    """Tests for _project_condition_push."""
+
+    def test_push_api_success(self):
+        """Successful push() call should return valid fractions."""
+        n_source = 20
+        n_target = 30
+        source_mask = np.array([True] * n_source + [False] * 10)
+        neighbor_idx = np.arange(6).reshape(3, 2)
+        weights = np.ones((3, 2)) * 0.5
+        cond_indices = np.array([0, 1])
+
+        target_labels = pd.Series(["TypeA"] * 15 + ["TypeB"] * 15)
+        target_ct_fracs = pd.Series({"TypeA": 0.5, "TypeB": 0.5})
+
+        # Mock problem with push() returning valid distribution
+        mock_problem = MagicMock()
+        target_dist = np.zeros(n_target)
+        target_dist[:15] = 1.0 / 15  # All mass on TypeA
+        mock_problem.push.return_value = target_dist
+
+        result = step05._project_condition_push(
+            mock_problem, 7, 30, source_mask, neighbor_idx, weights,
+            cond_indices, target_labels, target_ct_fracs, n_target,
+        )
+        assert isinstance(result, pd.Series)
+        assert result["TypeA"] > result["TypeB"]
+
+    def test_push_api_failure_returns_atlas_avg(self):
+        """When push() raises, should fall back to atlas average."""
+        source_mask = np.array([True] * 10)
+        neighbor_idx = np.arange(4).reshape(2, 2)
+        weights = np.ones((2, 2)) * 0.5
+        cond_indices = np.array([0])
+
+        target_labels = pd.Series(["A"] * 5 + ["B"] * 5)
+        target_ct_fracs = pd.Series({"A": 0.6, "B": 0.4})
+
+        mock_problem = MagicMock()
+        mock_problem.push.side_effect = RuntimeError("moscot error")
+
+        result = step05._project_condition_push(
+            mock_problem, 7, 30, source_mask, neighbor_idx, weights,
+            cond_indices, target_labels, target_ct_fracs, 10,
+        )
+        assert result["A"] == pytest.approx(0.6)
+        assert result["B"] == pytest.approx(0.4)
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — _resolve_target_labels
+# =============================================================================
+
+class TestResolveTargetLabelsExtended:
+    """Extended tests for _resolve_target_labels."""
+
+    def test_harmonization_applied(self):
+        """Non-standard labels should be harmonized via LABEL_HARMONIZATION."""
+        obs = pd.DataFrame({
+            "cell_type": ["Excitatory neuron"] * 5 + ["Radial glia"] * 5,
+        })
+        labels, fracs, col = step05._resolve_target_labels(obs, "nonexistent")
+        assert col == "cell_type"
+        # Should be harmonized
+        assert "Non-telencephalic Neuron" in labels.values
+        assert "Non-telencephalic NPC" in labels.values
+
+    def test_standard_column_no_harmonization(self):
+        """When preferred column exists, no harmonization should occur."""
+        obs = pd.DataFrame({
+            "predicted_annot_level_2": ["ExN"] * 3 + ["InN"] * 7,
+        })
+        labels, fracs, col = step05._resolve_target_labels(obs, "predicted_annot_level_2")
+        assert col == "predicted_annot_level_2"
+        assert "ExN" in labels.values
+
+    def test_fracs_sum_to_one(self):
+        """Returned fractions should sum to 1.0."""
+        obs = pd.DataFrame({
+            "cell_type": ["A"] * 3 + ["B"] * 7,
+        })
+        _, fracs, _ = step05._resolve_target_labels(obs, "nonexistent")
+        assert fracs.sum() == pytest.approx(1.0)
+
+    def test_unmapped_labels_kept(self):
+        """Labels not in LABEL_HARMONIZATION should be kept as-is."""
+        obs = pd.DataFrame({
+            "cell_type": ["UnknownType"] * 10,
+        })
+        labels, fracs, _ = step05._resolve_target_labels(obs, "nonexistent")
+        assert "UnknownType" in labels.values
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — _embed_query_in_atlas_pca extended
+# =============================================================================
+
+class TestEmbedQueryInAtlasPcaExtended:
+    """Extended tests for _embed_query_in_atlas_pca."""
+
+    def test_with_pca_loadings_in_atlas(self):
+        """Should project query through atlas PCA loadings when available."""
+        n_genes = 50
+        n_query = 10
+        n_source = 20
+        n_pcs = 15
+
+        gene_names = [f"Gene{i}" for i in range(n_genes)]
+
+        atlas = ad.AnnData(
+            X=sp.csr_matrix((30, n_genes)),
+            var=pd.DataFrame({
+                "highly_variable": [True] * 30 + [False] * (n_genes - 30),
+            }, index=gene_names),
+        )
+        atlas.varm["PCs"] = np.random.rand(n_genes, n_pcs)
+
+        query = ad.AnnData(
+            X=sp.csr_matrix(np.random.rand(n_query, n_genes)),
+            var=pd.DataFrame(index=gene_names),
+        )
+
+        source_mask = np.array([True] * n_source + [False] * 10)
+        source_pca = np.random.rand(n_source, n_pcs)
+
+        q_emb, s_pca = step05._embed_query_in_atlas_pca(
+            query, atlas, source_mask, source_pca,
+        )
+        assert q_emb.shape[0] == n_query
+        assert q_emb.shape[1] == s_pca.shape[1]
+
+    def test_fallback_to_joint_pca(self):
+        """When no PCA loadings exist, should compute joint PCA."""
+        np.random.seed(42)
+        n_genes = 200
+        n_query = 20
+        n_source = 40
+
+        gene_names = [f"Gene{i}" for i in range(n_genes)]
+        atlas = ad.AnnData(
+            X=sp.csr_matrix(np.random.rand(60, n_genes)),
+            obs=pd.DataFrame({"day": [7] * 60}, index=[f"a{i}" for i in range(60)]),
+            var=pd.DataFrame(index=gene_names),
+        )
+        query = ad.AnnData(
+            X=sp.csr_matrix(np.random.rand(n_query, n_genes)),
+            var=pd.DataFrame(index=gene_names),
+        )
+
+        source_mask = np.array([True] * n_source + [False] * 20)
+        source_pca = np.random.rand(n_source, 30)
+
+        q_emb, s_pca = step05._embed_query_in_atlas_pca(
+            query, atlas, source_mask, source_pca,
+        )
+        assert q_emb.shape[0] == n_query
+        assert s_pca.shape[0] == n_source
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — build_virtual_morphogen_matrix edge cases
+# =============================================================================
+
+class TestBuildVirtualMorphogenMatrixEdgeCases:
+    """Edge case tests for build_virtual_morphogen_matrix."""
+
+    def test_missing_condition_skipped(self, tmp_path):
+        """Conditions not in real morphogens should be skipped."""
+        morph = pd.DataFrame({
+            "CHIR99021_uM": [1.5],
+            "log_harvest_day": [math.log(72)],
+        }, index=["cond_A"])
+        morph_path = tmp_path / "morph.csv"
+        morph.to_csv(str(morph_path))
+
+        virtual_fracs = pd.DataFrame({
+            "original_condition": ["cond_A", "nonexistent"],
+            "target_day": [90, 90],
+            "TypeA": [0.5, 0.5],
+        }, index=["cond_A_day90", "nonexistent_day90"])
+
+        result = step05.build_virtual_morphogen_matrix(virtual_fracs, morph_path)
+        assert len(result) == 1
+        assert "cond_A_day90" in result.index
+
+    def test_empty_input(self, tmp_path):
+        """Empty virtual fractions should return empty DataFrame."""
+        morph = pd.DataFrame({"CHIR99021_uM": [1.5]}, index=["cond_A"])
+        morph_path = tmp_path / "morph.csv"
+        morph.to_csv(str(morph_path))
+
+        virtual_fracs = pd.DataFrame({
+            "original_condition": pd.Series([], dtype=str),
+            "target_day": pd.Series([], dtype=int),
+        })
+        virtual_fracs.index.name = "virtual_condition"
+
+        result = step05.build_virtual_morphogen_matrix(virtual_fracs, morph_path)
+        assert result.empty
+
+    def test_harvest_day_updated(self, tmp_path):
+        """log_harvest_day should be updated to target timepoint."""
+        morph = pd.DataFrame({
+            "CHIR99021_uM": [1.5],
+            "log_harvest_day": [math.log(72)],
+        }, index=["cond_A"])
+        morph_path = tmp_path / "morph.csv"
+        morph.to_csv(str(morph_path))
+
+        virtual_fracs = pd.DataFrame({
+            "original_condition": ["cond_A"],
+            "target_day": [90],
+            "TypeA": [0.5],
+        }, index=["cond_A_day90"])
+
+        result = step05.build_virtual_morphogen_matrix(virtual_fracs, morph_path)
+        assert result.loc["cond_A_day90", "log_harvest_day"] == pytest.approx(math.log(90))
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — validate_transport_quality
+# =============================================================================
+
+class TestValidateTransportQuality:
+    """Tests for validate_transport_quality."""
+
+    def test_valid_transport(self):
+        """Should report OK for converged, low-cost solutions."""
+        mock_problem = MagicMock()
+        mock_sol1 = MagicMock()
+        mock_sol1.cost = 10.0
+        mock_sol1.converged = True
+        mock_sol2 = MagicMock()
+        mock_sol2.cost = 20.0
+        mock_sol2.converged = True
+        mock_problem.solutions = {(7, 15): mock_sol1, (15, 30): mock_sol2}
+
+        result = step05.validate_transport_quality(mock_problem)
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 2
+        assert (result["status"] == "OK").all()
+
+    def test_high_cost_flagged(self):
+        """Solutions with cost > threshold should be flagged."""
+        mock_problem = MagicMock()
+        mock_sol = MagicMock()
+        mock_sol.cost = 200.0
+        mock_sol.converged = True
+        mock_problem.solutions = {(7, 15): mock_sol}
+
+        result = step05.validate_transport_quality(mock_problem, max_cost_threshold=100.0)
+        assert result.iloc[0]["status"] == "HIGH_COST"
+
+    def test_not_converged_flagged(self):
+        """Non-converged solutions should be flagged."""
+        mock_problem = MagicMock()
+        mock_sol = MagicMock()
+        mock_sol.cost = 10.0
+        mock_sol.converged = False
+        mock_problem.solutions = {(7, 15): mock_sol}
+
+        result = step05.validate_transport_quality(mock_problem)
+        assert result.iloc[0]["status"] == "NOT_CONVERGED"
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — LABEL_HARMONIZATION
+# =============================================================================
+
+class TestLabelHarmonization:
+    """Tests for the LABEL_HARMONIZATION mapping."""
+
+    def test_all_values_are_strings(self):
+        for k, v in step05.LABEL_HARMONIZATION.items():
+            assert isinstance(k, str)
+            assert isinstance(v, str)
+
+    def test_no_empty_keys_or_values(self):
+        for k, v in step05.LABEL_HARMONIZATION.items():
+            assert len(k) > 0
+            assert len(v) > 0
+
+    def test_key_cell_types_present(self):
+        """Core cell types should be in harmonization map."""
+        expected_keys = [
+            "Excitatory neuron", "Inhibitory neuron", "Radial glia",
+            "Astrocyte", "Oligodendrocyte precursor",
+        ]
+        for key in expected_keys:
+            assert key in step05.LABEL_HARMONIZATION
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — generate_virtual_training_data (mocked)
+# =============================================================================
+
+class TestGenerateVirtualTrainingData:
+    """Tests for generate_virtual_training_data with mocked transport."""
+
+    @pytest.fixture
+    def mock_setup(self, tmp_path):
+        """Create query adata, atlas, mock problem, and morphogen CSV."""
+        np.random.seed(42)
+        n_query = 30
+        n_atlas = 60
+
+        # Atlas with days 7, 15, 30
+        atlas_obs = pd.DataFrame({
+            "day": [7] * 20 + [15] * 20 + [30] * 20,
+            "annot_level_2": (["Neuron"] * 10 + ["NPC"] * 10) * 3,
+        }, index=[f"a{i}" for i in range(n_atlas)])
+        atlas = ad.AnnData(X=sp.csr_matrix(np.random.rand(n_atlas, 50)), obs=atlas_obs)
+        atlas.obsm["X_pca"] = np.random.rand(n_atlas, 10)
+
+        # Query with conditions
+        query_obs = pd.DataFrame({
+            "condition": ["cond_A"] * 15 + ["cond_B"] * 15,
+            "predicted_annot_level_2": (["Neuron"] * 8 + ["NPC"] * 7) * 2,
+        }, index=[f"q{i}" for i in range(n_query)])
+        query = ad.AnnData(X=sp.csr_matrix(np.random.rand(n_query, 50)), obs=query_obs)
+        query.obsm["X_pca"] = np.random.rand(n_query, 10)
+
+        # Morphogen CSV
+        morph = pd.DataFrame({
+            "CHIR99021_uM": [1.5, 3.0],
+            "log_harvest_day": [math.log(21), math.log(21)],
+        }, index=["cond_A", "cond_B"])
+        morph_path = tmp_path / "morph.csv"
+        morph.to_csv(str(morph_path))
+
+        # Mock problem — no push() API, use transport chain
+        # Use a regular class instance instead of MagicMock(spec=[])
+        # because MagicMock with spec won't allow setting __getitem__
+        class FakeProblem:
+            def __getitem__(self, key):
+                T = sp.csr_matrix(np.random.rand(20, 20))
+                sol = MagicMock()
+                sol.transport_matrix = T
+                return MagicMock(solution=sol)
+        mock_problem = FakeProblem()
+
+        return query, atlas, mock_problem, morph_path
+
+    def test_returns_tuple_of_dataframes(self, mock_setup):
+        query, atlas, problem, morph_path = mock_setup
+        virtual_X, virtual_Y = step05.generate_virtual_training_data(
+            query_adata=query,
+            atlas_adata=atlas,
+            problem=problem,
+            real_morphogen_csv=morph_path,
+            query_timepoint=7,
+            target_timepoints=[15, 30],
+            condition_key="condition",
+        )
+        assert isinstance(virtual_X, pd.DataFrame)
+        assert isinstance(virtual_Y, pd.DataFrame)
+
+    def test_matching_indices(self, mock_setup):
+        query, atlas, problem, morph_path = mock_setup
+        virtual_X, virtual_Y = step05.generate_virtual_training_data(
+            query_adata=query,
+            atlas_adata=atlas,
+            problem=problem,
+            real_morphogen_csv=morph_path,
+            query_timepoint=7,
+            target_timepoints=[15, 30],
+            condition_key="condition",
+        )
+        if not virtual_X.empty:
+            assert list(virtual_X.index) == list(virtual_Y.index)
+
+
+# =============================================================================
+# 02_map_to_hnoca.py — compute_soft_cell_type_fractions
+# =============================================================================
+
+class TestComputeSoftCellTypeFractions:
+    """Tests for compute_soft_cell_type_fractions."""
+
+    def test_soft_fractions_sum_to_one(self):
+        """Soft fractions should sum to ~1.0 for each condition."""
+        obs = pd.DataFrame({
+            "condition": ["A"] * 5 + ["B"] * 5,
+        }, index=[f"c{i}" for i in range(10)])
+        soft_probs = pd.DataFrame(
+            np.random.dirichlet([1, 1, 1], size=10),
+            columns=["TypeX", "TypeY", "TypeZ"],
+            index=obs.index,
+        )
+        result = step02.compute_soft_cell_type_fractions(obs, soft_probs, "condition")
+        assert np.allclose(result.sum(axis=1), 1.0, atol=1e-6)
+
+    def test_soft_fractions_shape(self):
+        """Should have one row per condition."""
+        obs = pd.DataFrame({
+            "condition": ["A"] * 4 + ["B"] * 3 + ["C"] * 3,
+        }, index=[f"c{i}" for i in range(10)])
+        soft_probs = pd.DataFrame(
+            np.random.dirichlet([1, 1], size=10),
+            columns=["TypeX", "TypeY"],
+            index=obs.index,
+        )
+        result = step02.compute_soft_cell_type_fractions(obs, soft_probs, "condition")
+        assert result.shape[0] == 3
+        assert set(result.index) == {"A", "B", "C"}
+
+    def test_soft_matches_hard_when_deterministic(self):
+        """When probabilities are 1-hot, soft should match hard fractions."""
+        obs = pd.DataFrame({
+            "condition": ["A"] * 6,
+        }, index=[f"c{i}" for i in range(6)])
+        # 4 cells are TypeX, 2 cells are TypeY (deterministic)
+        soft_probs = pd.DataFrame(
+            [[1.0, 0.0]] * 4 + [[0.0, 1.0]] * 2,
+            columns=["TypeX", "TypeY"],
+            index=obs.index,
+        )
+        result = step02.compute_soft_cell_type_fractions(obs, soft_probs, "condition")
+        assert result.loc["A", "TypeX"] == pytest.approx(4.0 / 6.0, abs=1e-6)
+        assert result.loc["A", "TypeY"] == pytest.approx(2.0 / 6.0, abs=1e-6)
+
+    def test_soft_differs_from_hard_when_uncertain(self):
+        """When probabilities are spread, soft should differ from argmax-based."""
+        obs = pd.DataFrame({
+            "condition": ["A"] * 4,
+        }, index=[f"c{i}" for i in range(4)])
+        # All cells are 60% TypeX, 40% TypeY
+        soft_probs = pd.DataFrame(
+            [[0.6, 0.4]] * 4,
+            columns=["TypeX", "TypeY"],
+            index=obs.index,
+        )
+        result = step02.compute_soft_cell_type_fractions(obs, soft_probs, "condition")
+        # Soft: average of [0.6, 0.4] = [0.6, 0.4]
+        assert result.loc["A", "TypeX"] == pytest.approx(0.6, abs=1e-6)
+        assert result.loc["A", "TypeY"] == pytest.approx(0.4, abs=1e-6)
+        # Hard (argmax): all cells are TypeX -> [1.0, 0.0] — different from soft
+
+
+# =============================================================================
+# 02_map_to_hnoca.py — transfer_labels_knn: balanced vs unbalanced
+# =============================================================================
+
+class TestTransferLabelsKnnBalancing:
+    """Tests verifying class-balanced KNN correction behavior."""
+
+    @pytest.fixture
+    def imbalanced_fixture(self):
+        """Fixture with heavily imbalanced reference classes."""
+        np.random.seed(123)
+        d = 5
+        # 90 cells of TypeA, 10 cells of TypeB — 9:1 imbalance
+        ref_latent = np.vstack([
+            np.random.randn(90, d),
+            np.random.randn(10, d) + 3,
+        ])
+        # Query cells near TypeB cluster
+        query_latent = np.random.randn(5, d) + 3
+        ref_obs = pd.DataFrame({
+            "label": ["TypeA"] * 90 + ["TypeB"] * 10,
+        }, index=[f"r{i}" for i in range(100)])
+        query_obs = pd.DataFrame(index=[f"q{i}" for i in range(5)])
+        return ref_latent, query_latent, ref_obs, query_obs
+
+    def test_balanced_boosts_minority_class(self, imbalanced_fixture):
+        """Class balancing should boost TypeB probability vs unbalanced."""
+        ref_latent, query_latent, ref_obs, query_obs = imbalanced_fixture
+
+        _, soft_balanced = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["label"], k=20, class_balanced=True,
+        )
+        _, soft_unbalanced = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["label"], k=20, class_balanced=False,
+        )
+        # Balanced should give higher TypeB probability than unbalanced
+        balanced_b = soft_balanced["label"]["TypeB"].mean()
+        unbalanced_b = soft_unbalanced["label"]["TypeB"].mean()
+        assert balanced_b > unbalanced_b
+
+    def test_small_k(self, imbalanced_fixture):
+        """k=5 should still work."""
+        ref_latent, query_latent, ref_obs, query_obs = imbalanced_fixture
+        results, soft = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["label"], k=5,
+        )
+        assert len(results) == 5
+        assert np.allclose(soft["label"].sum(axis=1), 1.0, atol=1e-6)
+
+
+# =============================================================================
+# 02_map_to_hnoca.py — compute_cell_type_fractions: multiple conditions
+# =============================================================================
+
+class TestComputeFractionsMultipleConditions:
+    """Test compute_cell_type_fractions with multiple conditions."""
+
+    def test_multiple_conditions_fractions_sum_to_one(self):
+        """Each condition's fractions should sum to 1.0."""
+        obs = pd.DataFrame({
+            "condition": ["A"] * 10 + ["B"] * 10 + ["C"] * 10,
+            "label": (["X"] * 5 + ["Y"] * 5) * 3,
+        })
+        fracs = step02.compute_cell_type_fractions(obs, "condition", "label", quality_filter=False)
+        assert len(fracs) == 3
+        for cond in ["A", "B", "C"]:
+            assert fracs.loc[cond].sum() == pytest.approx(1.0)
+
+    def test_different_type_counts_per_condition(self):
+        """Conditions may have different numbers of cell types."""
+        obs = pd.DataFrame({
+            "condition": ["A"] * 10 + ["B"] * 10,
+            "label": ["X"] * 10 + ["X"] * 5 + ["Y"] * 3 + ["Z"] * 2,
+        })
+        fracs = step02.compute_cell_type_fractions(obs, "condition", "label", quality_filter=False)
+        assert fracs.loc["A", "X"] == pytest.approx(1.0)
+        assert fracs.loc["B", "X"] == pytest.approx(0.5)
+        assert fracs.loc["B", "Y"] == pytest.approx(0.3)
+        assert fracs.loc["B", "Z"] == pytest.approx(0.2)
+
+
+# =============================================================================
+# 02_map_to_hnoca.py — prepare_query_for_scpoli: gene_symbol column
+# =============================================================================
+
+class TestPrepareQueryGeneSymbolColumn:
+    """Tests for prepare_query_for_scpoli with gene_symbol var column."""
+
+    def test_gene_symbol_column_mapping(self):
+        """Query with gene_symbol column should remap var_names."""
+        ref = ad.AnnData(
+            X=sp.csr_matrix(np.ones((5, 3))),
+            var=pd.DataFrame({"hv": [True] * 3}, index=["GA", "GB", "GC"]),
+            obs=pd.DataFrame({"batch": ["r"] * 5}, index=[f"r{i}" for i in range(5)]),
+        )
+        ref.layers["counts"] = ref.X.copy()
+
+        query = ad.AnnData(
+            X=sp.csr_matrix(np.ones((4, 3))),
+            var=pd.DataFrame({
+                "gene_symbol": ["GA", "GB", "GX"],
+            }, index=["ENS1", "ENS2", "ENS3"]),
+            obs=pd.DataFrame({"sample": ["s1"] * 4}, index=[f"q{i}" for i in range(4)]),
+        )
+        result = step02.prepare_query_for_scpoli(query, ref, min_shared_genes=0)
+        assert list(result.var_names) == ["GA", "GB", "GC"]
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — _embed_query_in_atlas_pca: existing X_pca
+# =============================================================================
+
+class TestEmbedQueryWithExistingPCA:
+    """Test _embed_query_in_atlas_pca when query already has X_pca."""
+
+    def test_existing_xpca_truncated_to_shared_dims(self):
+        """When query has X_pca, should truncate to shared dimensions."""
+        n_query, n_source = 10, 20
+        query = ad.AnnData(X=sp.csr_matrix((n_query, 5)))
+        query.obsm["X_pca"] = np.random.rand(n_query, 50)
+
+        atlas = ad.AnnData(X=sp.csr_matrix((30, 5)))
+        source_mask = np.array([True] * n_source + [False] * 10)
+        source_pca = np.random.rand(n_source, 30)  # fewer dims than query
+
+        q_emb, s_pca = step05._embed_query_in_atlas_pca(
+            query, atlas, source_mask, source_pca,
+        )
+        # Should truncate to min(50, 30) = 30
+        assert q_emb.shape == (n_query, 30)
+        assert s_pca.shape == (n_source, 30)
+
+    def test_existing_xpca_fewer_dims_than_source(self):
+        """When query X_pca has fewer dims, should truncate source."""
+        n_query, n_source = 10, 20
+        query = ad.AnnData(X=sp.csr_matrix((n_query, 5)))
+        query.obsm["X_pca"] = np.random.rand(n_query, 15)
+
+        atlas = ad.AnnData(X=sp.csr_matrix((30, 5)))
+        source_mask = np.array([True] * n_source + [False] * 10)
+        source_pca = np.random.rand(n_source, 30)
+
+        q_emb, s_pca = step05._embed_query_in_atlas_pca(
+            query, atlas, source_mask, source_pca,
+        )
+        assert q_emb.shape == (n_query, 15)
+        assert s_pca.shape == (n_source, 15)
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — _resolve_target_labels: no column found
+# =============================================================================
+
+class TestResolveTargetLabelsErrors:
+    """Error handling tests for _resolve_target_labels."""
+
+    def test_no_column_found_raises(self):
+        """Should raise ValueError when no label column exists."""
+        obs = pd.DataFrame({"random_col": [1, 2, 3]})
+        with pytest.raises(ValueError, match="No cell type label column found"):
+            step05._resolve_target_labels(obs, "nonexistent")
+
+    def test_annot_level_2_fallback(self):
+        """Should fall back to annot_level_2 when preferred key is missing."""
+        obs = pd.DataFrame({
+            "annot_level_2": ["TypeA"] * 3 + ["TypeB"] * 7,
+        })
+        labels, fracs, col = step05._resolve_target_labels(obs, "missing_key")
+        assert col == "annot_level_2"
+
+    def test_celltype_fallback(self):
+        """Should fall back to CellType when other columns missing."""
+        obs = pd.DataFrame({
+            "CellType": ["Neuron"] * 5 + ["Glia"] * 5,
+        })
+        labels, fracs, col = step05._resolve_target_labels(obs, "missing_key")
+        assert col == "CellType"
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — _compose_transport_chain: dense matrix input
+# =============================================================================
+
+class TestComposeTransportChainDense:
+    """Test _compose_transport_chain with dense transport matrices."""
+
+    def test_dense_matrix_converted_to_sparse(self):
+        """Dense transport matrices should be converted to CSR."""
+        n_source, n_target = 10, 15
+        T = np.random.rand(n_source, n_target)  # dense
+
+        mock_problem = MagicMock()
+        mock_solution = MagicMock()
+        mock_solution.transport_matrix = T
+        mock_problem.__getitem__ = MagicMock(
+            return_value=MagicMock(solution=mock_solution)
+        )
+
+        source_indices = np.arange(n_source)
+        transport, local_idx, use = step05._compose_transport_chain(
+            mock_problem, [7, 15], n_target, source_indices,
+        )
+        assert use is True
+        assert sp.issparse(transport)
+
+
+# =============================================================================
+# 05_cellrank2_virtual.py — _project_condition_push: edge cases
+# =============================================================================
+
+class TestProjectConditionPushEdgeCases:
+    """Edge case tests for _project_condition_push."""
+
+    def test_push_returns_wrong_length(self):
+        """When push returns wrong-length dist, should fall back to atlas avg."""
+        source_mask = np.array([True] * 10)
+        neighbor_idx = np.arange(4).reshape(2, 2)
+        weights = np.ones((2, 2)) * 0.5
+        cond_indices = np.array([0])
+        target_labels = pd.Series(["A"] * 5 + ["B"] * 5)
+        target_ct_fracs = pd.Series({"A": 0.5, "B": 0.5})
+
+        mock_problem = MagicMock()
+        # Return wrong-length distribution
+        mock_problem.push.return_value = np.ones(5)  # should be 10
+
+        result = step05._project_condition_push(
+            mock_problem, 7, 30, source_mask, neighbor_idx, weights,
+            cond_indices, target_labels, target_ct_fracs, 10,
+        )
+        # Falls back to atlas average
+        assert result["A"] == pytest.approx(0.5)
+
+    def test_push_returns_zero_sum(self):
+        """When push returns zero-sum dist, should fall back to atlas avg."""
+        source_mask = np.array([True] * 10)
+        neighbor_idx = np.arange(4).reshape(2, 2)
+        weights = np.ones((2, 2)) * 0.5
+        cond_indices = np.array([0])
+        target_labels = pd.Series(["A"] * 5 + ["B"] * 5)
+        target_ct_fracs = pd.Series({"A": 0.7, "B": 0.3})
+
+        mock_problem = MagicMock()
+        mock_problem.push.return_value = np.zeros(10)
+
+        result = step05._project_condition_push(
+            mock_problem, 7, 30, source_mask, neighbor_idx, weights,
+            cond_indices, target_labels, target_ct_fracs, 10,
+        )
+        assert result["A"] == pytest.approx(0.7)
+        assert result["B"] == pytest.approx(0.3)
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — cosine_similarity
+# =============================================================================
+
+step03 = _import_pipeline_module("03_fidelity_scoring")
+
+
+class TestCosineSimilarity:
+    """Tests for cosine_similarity."""
+
+    def test_identical_vectors(self):
+        """Identical vectors should have similarity 1.0."""
+        a = np.array([1.0, 2.0, 3.0])
+        assert step03.cosine_similarity(a, a) == pytest.approx(1.0)
+
+    def test_orthogonal_vectors(self):
+        """Orthogonal vectors should have similarity 0.0."""
+        a = np.array([1.0, 0.0])
+        b = np.array([0.0, 1.0])
+        assert step03.cosine_similarity(a, b) == pytest.approx(0.0)
+
+    def test_opposite_vectors(self):
+        """Opposite vectors should have similarity -1.0."""
+        a = np.array([1.0, 0.0])
+        b = np.array([-1.0, 0.0])
+        assert step03.cosine_similarity(a, b) == pytest.approx(-1.0)
+
+    def test_zero_vector_returns_zero(self):
+        """Zero vector should return 0.0."""
+        a = np.array([0.0, 0.0, 0.0])
+        b = np.array([1.0, 2.0, 3.0])
+        assert step03.cosine_similarity(a, b) == 0.0
+        assert step03.cosine_similarity(b, a) == 0.0
+
+    def test_scaled_vectors_same_similarity(self):
+        """Scaled vectors should have same similarity as original."""
+        a = np.array([1.0, 2.0, 3.0])
+        b = np.array([4.0, 5.0, 6.0])
+        sim1 = step03.cosine_similarity(a, b)
+        sim2 = step03.cosine_similarity(a * 100, b * 0.01)
+        assert sim1 == pytest.approx(sim2)
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — shannon_entropy & normalized_entropy
+# =============================================================================
+
+class TestShannonEntropy:
+    """Tests for shannon_entropy."""
+
+    def test_uniform_distribution(self):
+        """Uniform distribution over n elements has entropy log2(n)."""
+        n = 8
+        fracs = np.ones(n) / n
+        assert step03.shannon_entropy(fracs) == pytest.approx(np.log2(n))
+
+    def test_single_element(self):
+        """Single element distribution has entropy 0."""
+        fracs = np.array([1.0])
+        assert step03.shannon_entropy(fracs) == 0.0
+
+    def test_deterministic(self):
+        """Distribution with all mass on one element has entropy 0."""
+        fracs = np.array([1.0, 0.0, 0.0])
+        assert step03.shannon_entropy(fracs) == 0.0
+
+
+class TestNormalizedEntropy:
+    """Tests for normalized_entropy."""
+
+    def test_uniform_returns_one(self):
+        """Uniform distribution should have normalized entropy 1.0."""
+        n = 10
+        fracs = np.ones(n) / n
+        assert step03.normalized_entropy(fracs) == pytest.approx(1.0)
+
+    def test_single_element_returns_zero(self):
+        """Single nonzero element should return 0.0."""
+        fracs = np.array([1.0, 0.0, 0.0])
+        assert step03.normalized_entropy(fracs) == 0.0
+
+    def test_all_zero_except_one(self):
+        """Only one nonzero element should return 0.0."""
+        fracs = np.array([0.0, 0.0, 1.0])
+        assert step03.normalized_entropy(fracs) == 0.0
+
+    def test_total_types_normalization(self):
+        """Using total_types should change normalization."""
+        fracs = np.array([0.5, 0.5])
+        # Without total_types: log2(2)/log2(2) = 1.0
+        assert step03.normalized_entropy(fracs) == pytest.approx(1.0)
+        # With total_types=4: log2(2)/log2(4) = 0.5
+        assert step03.normalized_entropy(fracs, total_types=4) == pytest.approx(0.5)
+
+    def test_total_types_one_returns_zero(self):
+        """total_types=1 should return 0.0."""
+        fracs = np.array([1.0])
+        assert step03.normalized_entropy(fracs, total_types=1) == 0.0
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — compute_rss
+# =============================================================================
+
+class TestComputeRSS:
+    """Tests for compute_rss."""
+
+    def test_perfect_match(self):
+        """Identical composition should give similarity 1.0."""
+        ref = pd.DataFrame({
+            "TypeA": [0.6, 0.0],
+            "TypeB": [0.4, 1.0],
+        }, index=["Region1", "Region2"])
+        cond = pd.Series({"TypeA": 0.6, "TypeB": 0.4})
+        region, score = step03.compute_rss(cond, ref)
+        assert region == "Region1"
+        assert score == pytest.approx(1.0)
+
+    def test_no_overlap_returns_low(self):
+        """Non-overlapping types should give very low score."""
+        ref = pd.DataFrame({
+            "TypeA": [0.5],
+            "TypeB": [0.5],
+        }, index=["Region1"])
+        cond = pd.Series({"TypeC": 0.5, "TypeD": 0.5})
+        region, score = step03.compute_rss(cond, ref)
+        assert score < 0.01  # Near zero for non-overlapping compositions
+
+    def test_best_region_selected(self):
+        """Should select the region with highest cosine similarity."""
+        ref = pd.DataFrame({
+            "TypeA": [0.9, 0.1],
+            "TypeB": [0.1, 0.9],
+        }, index=["RegionA", "RegionB"])
+        cond = pd.Series({"TypeA": 0.05, "TypeB": 0.95})
+        region, score = step03.compute_rss(cond, ref)
+        assert region == "RegionB"
+        assert score > 0.5  # Aitchison similarity scale (lower than cosine for near-matches)
+
+    def test_partial_overlap(self):
+        """Partial overlap should give intermediate score."""
+        ref = pd.DataFrame({
+            "TypeA": [0.5],
+            "TypeB": [0.5],
+        }, index=["Region1"])
+        cond = pd.Series({"TypeA": 0.5, "TypeC": 0.5})
+        _, score = step03.compute_rss(cond, ref)
+        assert 0.0 < score < 1.0
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — compute_composite_fidelity
+# =============================================================================
+
+class TestComputeCompositeFidelity:
+    """Tests for compute_composite_fidelity."""
+
+    def test_perfect_scores(self):
+        """Perfect sub-scores should give high composite fidelity."""
+        score = step03.compute_composite_fidelity(
+            rss_score=1.0,
+            on_target_frac=1.0,
+            off_target_frac=0.0,
+            norm_entropy=0.55,  # optimal entropy
+        )
+        assert score > 0.9
+
+    def test_worst_scores(self):
+        """Worst sub-scores should give low composite fidelity."""
+        score = step03.compute_composite_fidelity(
+            rss_score=0.0,
+            on_target_frac=0.0,
+            off_target_frac=1.0,
+            norm_entropy=0.0,
+        )
+        assert score < 0.2
+
+    def test_nan_handling(self):
+        """NaN inputs should be handled gracefully."""
+        score = step03.compute_composite_fidelity(
+            rss_score=np.nan,
+            on_target_frac=np.nan,
+            off_target_frac=np.nan,
+            norm_entropy=np.nan,
+        )
+        assert 0.0 <= score <= 1.0
+
+    def test_custom_weights(self):
+        """Custom weights should change the score."""
+        score_default = step03.compute_composite_fidelity(
+            rss_score=1.0, on_target_frac=0.0, off_target_frac=0.0, norm_entropy=0.55,
+        )
+        score_rss_only = step03.compute_composite_fidelity(
+            rss_score=1.0, on_target_frac=0.0, off_target_frac=0.0, norm_entropy=0.55,
+            weights={"rss": 1.0, "on_target": 0.0, "off_target": 0.0, "entropy": 0.0},
+        )
+        assert score_rss_only == pytest.approx(1.0)
+        assert score_rss_only != pytest.approx(score_default)
+
+    def test_output_clipped_to_unit_interval(self):
+        """Output should always be in [0, 1]."""
+        for _ in range(20):
+            score = step03.compute_composite_fidelity(
+                rss_score=np.random.rand(),
+                on_target_frac=np.random.rand(),
+                off_target_frac=np.random.rand(),
+                norm_entropy=np.random.rand(),
+            )
+            assert 0.0 <= score <= 1.0
+
+    def test_maturity_score_increases_composite(self):
+        """High maturity score should increase composite fidelity."""
+        base = step03.compute_composite_fidelity(
+            rss_score=0.7, on_target_frac=0.8, off_target_frac=0.1, norm_entropy=0.55,
+        )
+        with_maturity = step03.compute_composite_fidelity(
+            rss_score=0.7, on_target_frac=0.8, off_target_frac=0.1, norm_entropy=0.55,
+            maturity_score=1.0,
+        )
+        assert with_maturity > base
+
+    def test_maturity_nan_ignored(self):
+        """NaN maturity_score should fall back to 4-sub-score weights."""
+        score_no_maturity = step03.compute_composite_fidelity(
+            rss_score=0.7, on_target_frac=0.8, off_target_frac=0.1, norm_entropy=0.55,
+        )
+        score_nan_maturity = step03.compute_composite_fidelity(
+            rss_score=0.7, on_target_frac=0.8, off_target_frac=0.1, norm_entropy=0.55,
+            maturity_score=float("nan"),
+        )
+        assert score_no_maturity == pytest.approx(score_nan_maturity)
+
+    def test_maturity_weights_constant_exists(self):
+        """DEFAULT_COMPOSITE_WEIGHTS_WITH_MATURITY must exist and sum to ~1."""
+        w = step03.DEFAULT_COMPOSITE_WEIGHTS_WITH_MATURITY
+        assert "maturity" in w
+        assert abs(sum(w.values()) - 1.0) < 0.01
+
+
+class TestMaturityScoreInReport:
+    """Tests for maturity_score column in score_all_conditions output."""
+
+    def _make_query_adata(self, n_cells=60, include_knn_dist=True):
+        import anndata as ad
+        import scipy.sparse as sp
+        from gopro.config import ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_LEVEL_3, ANNOT_REGION
+        np.random.seed(42)
+        obs = pd.DataFrame({
+            "condition": ["cond_A"] * 30 + ["cond_B"] * 30,
+            f"predicted_{ANNOT_LEVEL_1}": (["Neuron"] * 15 + ["NPC"] * 15) * 2,
+            f"predicted_{ANNOT_LEVEL_2}": (["Cortical EN"] * 15 + ["Cortical RG"] * 15) * 2,
+            f"predicted_{ANNOT_LEVEL_3}": (["L2-3 CPN"] * 15 + ["oRG"] * 15) * 2,
+            f"predicted_{ANNOT_REGION}": ["Dorsal telencephalon"] * 60,
+        }, index=[f"c{i}" for i in range(n_cells)])
+        if include_knn_dist:
+            # cond_A: low distance (mature), cond_B: high distance (immature)
+            obs["mean_knn_dist_to_ref"] = [0.5] * 30 + [2.0] * 30
+        X = sp.eye(n_cells, format="csr", dtype=float)
+        return ad.AnnData(X=X, obs=obs)
+
+    def test_maturity_column_present_when_knn_available(self):
+        """maturity_score column appears in report when mean_knn_dist_to_ref exists."""
+        adata = self._make_query_adata(include_knn_dist=True)
+        # Build a minimal braun_profiles DataFrame
+        braun = pd.DataFrame({"Neuron": [0.6], "NPC": [0.4]}, index=["Dorsal"])
+        report = step03.score_all_conditions(
+            adata, braun_profiles=braun, condition_key="condition",
+        )
+        assert "maturity_score" in report.columns
+
+    def test_mature_condition_higher_maturity(self):
+        """Condition with lower KNN distance should have higher maturity_score."""
+        braun = pd.DataFrame({"Neuron": [0.6], "NPC": [0.4]}, index=["Dorsal"])
+        adata = self._make_query_adata(include_knn_dist=True)
+        report = step03.score_all_conditions(
+            adata, braun_profiles=braun, condition_key="condition",
+        )
+        # cond_A has dist=0.5, cond_B has dist=2.0 → cond_A should be more mature
+        assert report.loc["cond_A", "maturity_score"] > report.loc["cond_B", "maturity_score"]
+
+    def test_maturity_nan_when_no_knn_col(self):
+        """maturity_score should be NaN when mean_knn_dist_to_ref is absent."""
+        braun = pd.DataFrame({"Neuron": [0.6], "NPC": [0.4]}, index=["Dorsal"])
+        adata = self._make_query_adata(include_knn_dist=False)
+        report = step03.score_all_conditions(
+            adata, braun_profiles=braun, condition_key="condition",
+        )
+        assert "maturity_score" in report.columns
+        assert report["maturity_score"].isna().all()
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — compute_off_target_fraction
+# =============================================================================
+
+class TestComputeOffTargetFraction:
+    """Tests for compute_off_target_fraction."""
+
+    def test_all_neural(self):
+        """All neural cells should give off-target fraction 0."""
+        obs = pd.DataFrame({
+            "predicted_annot_level_1": ["Neuron"] * 10,
+        })
+        assert step03.compute_off_target_fraction(obs) == 0.0
+
+    def test_all_off_target(self):
+        """All off-target cells should give fraction 1."""
+        obs = pd.DataFrame({
+            "predicted_annot_level_1": ["PSC"] * 5 + ["MC"] * 5,
+        })
+        assert step03.compute_off_target_fraction(obs) == 1.0
+
+    def test_mixed(self):
+        """Mixed should give correct fraction."""
+        obs = pd.DataFrame({
+            "predicted_annot_level_1": ["Neuron"] * 7 + ["PSC"] * 3,
+        })
+        assert step03.compute_off_target_fraction(obs) == pytest.approx(0.3)
+
+    def test_missing_column_returns_nan(self):
+        """Missing column should return NaN."""
+        obs = pd.DataFrame({"other": [1, 2, 3]})
+        result = step03.compute_off_target_fraction(obs)
+        assert np.isnan(result)
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — compute_on_target_fraction
+# =============================================================================
+
+class TestComputeOnTargetFraction:
+    """Tests for compute_on_target_fraction."""
+
+    def test_single_region(self):
+        """All cells in one region should give fraction 1.0."""
+        obs = pd.DataFrame({
+            "predicted_annot_region_rev2": ["Dorsal telencephalon"] * 10,
+        })
+        region, frac = step03.compute_on_target_fraction(obs)
+        assert region == "Dorsal telencephalon"
+        assert frac == pytest.approx(1.0)
+
+    def test_mixed_regions(self):
+        """Should return dominant region and its fraction."""
+        obs = pd.DataFrame({
+            "predicted_annot_region_rev2": (
+                ["Dorsal telencephalon"] * 7 + ["Ventral telencephalon"] * 3
+            ),
+        })
+        region, frac = step03.compute_on_target_fraction(obs)
+        assert region == "Dorsal telencephalon"
+        assert frac == pytest.approx(0.7)
+
+    def test_missing_column(self):
+        """Missing column should return 'unknown' and NaN."""
+        obs = pd.DataFrame({"other": [1, 2, 3]})
+        region, frac = step03.compute_on_target_fraction(obs)
+        assert region == "unknown"
+        assert np.isnan(frac)
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — align_composition_to_braun
+# =============================================================================
+
+class TestAlignCompositionToBraun:
+    """Tests for align_composition_to_braun."""
+
+    def test_simple_mapping(self):
+        """Should map HNOCA labels to Braun labels."""
+        hnoca_fracs = pd.Series({"Neuron": 0.6, "Glia": 0.4})
+        label_map = {"Neuron": "ExN", "Glia": "Astro"}
+        result = step03.align_composition_to_braun(hnoca_fracs, label_map)
+        assert result["ExN"] == pytest.approx(0.6)
+        assert result["Astro"] == pytest.approx(0.4)
+
+    def test_many_to_one_mapping_sums(self):
+        """Multiple HNOCA types mapping to same Braun class should sum."""
+        hnoca_fracs = pd.Series({"SubA": 0.3, "SubB": 0.2, "Other": 0.5})
+        label_map = {"SubA": "TypeX", "SubB": "TypeX", "Other": "TypeY"}
+        result = step03.align_composition_to_braun(hnoca_fracs, label_map)
+        assert result["TypeX"] == pytest.approx(0.5)
+        assert result["TypeY"] == pytest.approx(0.5)
+
+    def test_unmapped_labels_kept_as_is(self):
+        """Labels not in map should be kept with original name."""
+        hnoca_fracs = pd.Series({"Known": 0.6, "Unknown": 0.4})
+        label_map = {"Known": "Mapped"}
+        result = step03.align_composition_to_braun(hnoca_fracs, label_map)
+        assert result["Mapped"] == pytest.approx(0.6)
+        assert result["Unknown"] == pytest.approx(0.4)
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — score_all_conditions
+# =============================================================================
+
+class TestScoreAllConditions:
+    """Tests for score_all_conditions with mock AnnData."""
+
+    @pytest.fixture
+    def mock_query_adata(self):
+        """Create a mock mapped AnnData with predicted labels."""
+        n = 30
+        obs = pd.DataFrame({
+            "condition": ["cond_A"] * 15 + ["cond_B"] * 15,
+            "predicted_annot_level_1": ["Neuron"] * 10 + ["PSC"] * 5 + ["Neuron"] * 12 + ["MC"] * 3,
+            "predicted_annot_level_2": (
+                ["Cortical EN"] * 8 + ["Cortical IN"] * 2 + ["PSC"] * 5
+                + ["Cortical EN"] * 10 + ["Astroglia"] * 2 + ["MC"] * 3
+            ),
+            "predicted_annot_level_3_rev2": (
+                ["Cortical EN deep"] * 8 + ["Cortical IN"] * 2 + ["PSC"] * 5
+                + ["Cortical EN deep"] * 10 + ["Astroglia"] * 2 + ["MC"] * 3
+            ),
+            "predicted_annot_region_rev2": (
+                ["Dorsal telencephalon"] * 10 + ["Unspecific"] * 5
+                + ["Dorsal telencephalon"] * 12 + ["Unspecific"] * 3
+            ),
+        }, index=[f"c{i}" for i in range(n)])
+        adata = ad.AnnData(
+            X=sp.csr_matrix((n, 5)),
+            obs=obs,
+        )
+        return adata
+
+    @pytest.fixture
+    def braun_profiles(self):
+        """Minimal Braun reference profiles."""
+        return pd.DataFrame({
+            "Neuron": [0.7, 0.3],
+            "Radial glia": [0.2, 0.5],
+            "Oligo": [0.1, 0.2],
+        }, index=["Dorsal telencephalon", "Ventral telencephalon"])
+
+    def test_returns_dataframe_with_expected_columns(self, mock_query_adata, braun_profiles):
+        report = step03.score_all_conditions(mock_query_adata, braun_profiles)
+        expected_cols = {
+            "n_cells", "n_cell_types", "dominant_region", "on_target_fraction",
+            "off_target_fraction", "shannon_entropy", "normalized_entropy",
+            "rss_best_region", "rss_score", "composite_fidelity",
+        }
+        assert expected_cols.issubset(set(report.columns))
+
+    def test_all_conditions_scored(self, mock_query_adata, braun_profiles):
+        report = step03.score_all_conditions(mock_query_adata, braun_profiles)
+        assert set(report.index) == {"cond_A", "cond_B"}
+
+    def test_sorted_by_composite_fidelity(self, mock_query_adata, braun_profiles):
+        report = step03.score_all_conditions(mock_query_adata, braun_profiles)
+        fidelity_vals = report["composite_fidelity"].values
+        assert all(fidelity_vals[i] >= fidelity_vals[i + 1] for i in range(len(fidelity_vals) - 1))
+
+    def test_fidelity_in_unit_interval(self, mock_query_adata, braun_profiles):
+        report = step03.score_all_conditions(mock_query_adata, braun_profiles)
+        assert (report["composite_fidelity"] >= 0).all()
+        assert (report["composite_fidelity"] <= 1).all()
+
+    def test_with_target_profile(self, mock_query_adata, braun_profiles):
+        """Scoring with a custom target profile."""
+        target = pd.Series({"Cortical EN": 0.8, "Cortical IN": 0.2})
+        report = step03.score_all_conditions(
+            mock_query_adata, braun_profiles, target_profile=target,
+        )
+        assert set(report.index) == {"cond_A", "cond_B"}
+        # At least one condition should match custom_target
+        assert "custom_target" in report["rss_best_region"].values
+
+    def test_condition_b_less_off_target(self, mock_query_adata, braun_profiles):
+        """cond_B has fewer off-target cells, should have lower off_target_fraction."""
+        report = step03.score_all_conditions(mock_query_adata, braun_profiles)
+        assert report.loc["cond_B", "off_target_fraction"] < report.loc["cond_A", "off_target_fraction"]
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — compute_condition_composition
+# =============================================================================
+
+class TestComputeConditionComposition:
+    """Tests for compute_condition_composition."""
+
+    def test_fractions_sum_to_one(self):
+        obs = pd.DataFrame({
+            "condition": ["A"] * 10 + ["B"] * 10,
+            "predicted_annot_level_2": ["X"] * 5 + ["Y"] * 5 + ["X"] * 3 + ["Y"] * 7,
+        })
+        result = step03.compute_condition_composition(obs)
+        for cond in result.index:
+            assert result.loc[cond].sum() == pytest.approx(1.0)
+
+    def test_correct_values(self):
+        obs = pd.DataFrame({
+            "condition": ["A"] * 10,
+            "predicted_annot_level_2": ["X"] * 7 + ["Y"] * 3,
+        })
+        result = step03.compute_condition_composition(obs)
+        assert result.loc["A", "X"] == pytest.approx(0.7)
+        assert result.loc["A", "Y"] == pytest.approx(0.3)
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — compute_hit_threshold
+# =============================================================================
+
+class TestComputeHitThreshold:
+    """Tests for compute_hit_threshold."""
+
+    @pytest.fixture
+    def report_with_spread(self):
+        """Report where one condition clearly exceeds the control + 3*MAD."""
+        return pd.DataFrame({
+            "composite_fidelity": [0.3, 0.32, 0.31, 0.29, 0.9],
+        }, index=["control", "cond_A", "cond_B", "cond_C", "cond_D"])
+
+    @pytest.fixture
+    def report_uniform(self):
+        """Report where all conditions are very similar to control."""
+        return pd.DataFrame({
+            "composite_fidelity": [0.50, 0.51, 0.49, 0.50, 0.52],
+        }, index=["control", "cond_A", "cond_B", "cond_C", "cond_D"])
+
+    def test_basic_hit_calling(self, report_with_spread):
+        """Conditions above threshold should be identified as hits."""
+        result = step03.compute_hit_threshold(report_with_spread, "control")
+        assert result["control_median"] == pytest.approx(0.3)
+        assert result["mad"] > 0
+        assert result["threshold"] > 0.3
+        assert "cond_D" in result["hit_conditions"]
+        assert result["n_hits"] >= 1
+
+    def test_no_hits_when_all_similar(self, report_uniform):
+        """When all conditions are similar to control, no hits."""
+        result = step03.compute_hit_threshold(report_uniform, "control")
+        assert result["n_hits"] == 0
+        assert result["hit_conditions"] == []
+
+    def test_missing_control_raises(self, report_with_spread):
+        """Missing control condition should raise KeyError."""
+        with pytest.raises(KeyError, match="not_a_condition"):
+            step03.compute_hit_threshold(report_with_spread, "not_a_condition")
+
+    def test_custom_n_mad(self, report_with_spread):
+        """Lower n_mad should produce more hits."""
+        strict = step03.compute_hit_threshold(report_with_spread, "control", n_mad=5.0)
+        lenient = step03.compute_hit_threshold(report_with_spread, "control", n_mad=1.0)
+        assert lenient["n_hits"] >= strict["n_hits"]
+        assert lenient["threshold"] < strict["threshold"]
+
+    def test_mad_scaling_constant(self, report_with_spread):
+        """MAD should use 1.4826 consistency constant."""
+        scores = report_with_spread["composite_fidelity"]
+        median_val = scores.median()
+        expected_mad = float(np.median(np.abs(scores - median_val))) * 1.4826
+        result = step03.compute_hit_threshold(report_with_spread, "control")
+        assert result["mad"] == pytest.approx(expected_mad)
+
+    def test_is_hit_column_in_score_all_conditions(self):
+        """score_all_conditions with control_condition should add is_hit column."""
+        from gopro.config import ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_LEVEL_3, ANNOT_REGION
+        n = 30
+        obs = pd.DataFrame({
+            "condition": ["control"] * 15 + ["treated"] * 15,
+            f"predicted_{ANNOT_LEVEL_1}": ["Neuron"] * 30,
+            f"predicted_{ANNOT_LEVEL_2}": ["Cortical EN"] * 30,
+            f"predicted_{ANNOT_LEVEL_3}": ["L2-3 CPN"] * 30,
+            f"predicted_{ANNOT_REGION}": ["Dorsal telencephalon"] * 30,
+        }, index=[f"c{i}" for i in range(n)])
+        adata = ad.AnnData(X=sp.csr_matrix((n, 5)), obs=obs)
+        braun = pd.DataFrame({"Neuron": [0.7]}, index=["Dorsal"])
+        report = step03.score_all_conditions(
+            adata, braun, control_condition="control",
+        )
+        assert "is_hit" in report.columns

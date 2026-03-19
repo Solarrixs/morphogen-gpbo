@@ -19,7 +19,6 @@ Usage:
   python 00b_download_patterning_screen.py --no-extract # download without extracting
 """
 
-import hashlib
 import json
 import shutil
 import subprocess
@@ -30,7 +29,7 @@ from urllib.request import Request, urlopen
 
 RECORD_ID = "17225179"
 ZENODO_API = "https://zenodo.org/api"
-from gopro.config import DATA_DIR
+from gopro.config import DATA_DIR, md5_file
 
 OUTPUT_DIR = DATA_DIR / "patterning_screen"
 
@@ -74,13 +73,7 @@ def format_size(nbytes: int) -> str:
     return f"{nbytes:.1f} PB"
 
 
-def md5_file(filepath: Path) -> str:
-    """Compute MD5 checksum without loading entire file into memory."""
-    h = hashlib.md5()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+# md5_file imported from gopro.config
 
 
 def file_already_valid(filepath: Path, expected_md5: str) -> bool:

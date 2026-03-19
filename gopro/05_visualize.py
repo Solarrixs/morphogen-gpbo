@@ -33,9 +33,13 @@ if __name__ == "__main__":
         "--output", type=str, default=None,
         help="Output HTML path (default: data_dir/report_round{N}.html)"
     )
+    parser.add_argument(
+        "--output-prefix", type=str, default="amin_kelley",
+        help="Dataset prefix for CSV filenames (default: amin_kelley)"
+    )
     args = parser.parse_args()
 
     output_path = Path(args.output) if args.output else None
     logger.info("Starting visualization report generation")
-    report_path = generate_report(Path(args.data_dir), output_path)
+    report_path = generate_report(Path(args.data_dir), output_path, output_prefix=args.output_prefix)
     logger.info("Report generated: %s", report_path)
