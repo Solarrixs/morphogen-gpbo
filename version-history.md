@@ -28,3 +28,4 @@
 | 17 | `f9ebf5d` | working | ralph/production-readiness-phase2 | [ralph-simplify] Clean up ALR transform: remove overly strict guard, vectorize variance loop, fix docstrings |
 | 1 | `1a958ab` | working | ralph/fix-review-issues | [ralph-simplify] Fix TVR test: capture baseline before optimization, assert improvement direction |
 | 2 | `0438a12` | working | ralph/fix-review-issues | [ralph-simplify] Reuse scorer.py YAML loader instead of duplicating it |
+| 3 | `574e099` | working | ralph/fix-review-issues | [ralph-3] I-1: Inline _inflate_cellflow_variance — remove importlib from 04_gpbo_loop.py |
