@@ -29,12 +29,28 @@ morphogen-gpbo/
 │   ├── visualize_report.py             # Plotly report generation (called by 05_visualize.py)
 │   ├── requirements.txt
 │   ├── README.md
-│   └── tests/                          # pytest test suite (165 tests)
+│   ├── signature_utils.py              # NEST-Score + gene signature scoring + refinement
+│   ├── agents/                         # Recommendation scoring framework
+│   │   ├── scorer.py                   # Plausibility/novelty/feasibility/fidelity scoring
+│   │   └── pathway_rules.yaml          # Morphogen antagonist pair rules (BMP, WNT, SHH)
+│   ├── benchmarks/                     # Synthetic test functions
+│   │   ├── toy_morphogen_function.py   # 24D Hill response → simplex output
+│   │   └── noise_robustness.py         # Noise × batch size sweep
+│   ├── requirements.txt
+│   ├── README.md
+│   └── tests/                          # pytest test suite (~860 tests)
 │       ├── conftest.py                 # Shared fixtures + dynamic module loader
-│       ├── test_unit.py                # Unit tests (ILR, morphogen parsing, QC, GP functions)
+│       ├── test_unit.py                # Unit tests (ILR, morphogen parsing, QC, GP, scoring)
 │       ├── test_integration.py         # Integration tests (all 46 primary conditions)
 │       ├── test_properties.py          # Property-based tests (Hypothesis)
-│       └── test_phase4_5.py            # Phase 4-5 tests (CellRank2 + CellFlow)
+│       ├── test_phase4_5.py            # Phase 4-5 tests (CellRank2 + CellFlow)
+│       ├── test_agents.py              # Recommendation scorer tests (26 tests)
+│       ├── test_benchmarks.py          # Benchmark function tests (23 tests)
+│       └── test_validation.py          # Inter-step validation tests
+├── literature/               # Literature intelligence (spiked)
+│   ├── models.py                       # SQLAlchemy ORM (Paper, Dataset, SearchRun)
+│   ├── db.py                           # Database + config with env var overrides
+│   └── scrapers/                       # PubMed + bioRxiv scraper ABCs
 ├── data/                     # All large data files (gitignored, see data/README.md)
 │   ├── *.h5ad                          # Reference atlases + pipeline outputs
 │   ├── GSE233574_*                     # GEO morphogen screen raw data
@@ -42,7 +58,9 @@ morphogen-gpbo/
 ├── data/neural_organoid_atlas/  # Cloned theislab HNOCA repo (gitignored, inside data/)
 │   └── supplemental_files/scpoli_model_params/  # Pre-trained scPoli model
 └── docs/                     # Research notes and architecture docs
-    └── plans/                          # Design docs and implementation plans
+    ├── plans/                          # Design docs and implementation plans
+    ├── specs/                          # Pipeline execution spec (7-job plan)
+    └── task_plan.md                    # Consolidated task plan (all §1 pipeline TODOs complete)
 ```
 
 ## Config Module (`gopro/config.py`)
@@ -105,17 +123,36 @@ Produces: `data/gp_training_labels_{prefix}.csv`, `data/gp_training_regions_{pre
 ### Step 04 CLI Options
 
 ```
+# Data sources
 --fractions PATH       Cell type fractions CSV (default: data/gp_training_labels_amin_kelley.csv)
 --morphogens PATH      Morphogen matrix CSV (default: data/morphogen_matrix_amin_kelley.csv)
---sag-fractions PATH   SAG screen fractions CSV (default: auto-discovers data/gp_training_labels_sag_screen.csv)
---sag-morphogens PATH  SAG screen morphogens CSV (default: auto-discovers data/morphogen_matrix_sag_screen.csv)
+--sag-fractions/--sag-morphogens          SAG screen (auto-discovers)
 --cellrank2-fractions/--cellrank2-morphogens  CellRank2 virtual data (fidelity=0.5)
 --cellflow-fractions/--cellflow-morphogens    CellFlow virtual data (fidelity=0.0)
---target-cell-types    Cell types to optimize for (default: all)
+--sanchis-fractions/--sanchis-morphogens  Sanchis-Calleja data (fidelity=0.7, auto-discovers)
+--use-cellflow-fallback  Enable heuristic fallback when CellFlow model unavailable
+
+# GP model
+--no-ilr               Disable ILR transform
+--saasbo               Fully Bayesian SAASBO via NUTS
+--adaptive-complexity  Auto-select kernel by N/d ratio
+--input-warp           Kumaraswamy CDF input warping
+--explicit-priors      Dimensionality-scaled lengthscale priors (Hvarfner 2024)
+--per-type-gp          Independent GP per cell type (ModelListGP)
+
+# Acquisition & optimization
 --n-recommendations N  Number of experiments to recommend (default: 24)
 --round N              Optimization round number (default: 1)
---no-ilr               Disable ILR transform
 --multi-objective      Use multi-objective acquisition (qLogNEHVI)
+--mc-samples N         Sobol QMC samples for acquisition (default: 512)
+--contextual-cols COL [COL ...]  Hold columns fixed within plates (e.g., log_harvest_day)
+
+# Experimental design
+--n-controls K         Carry-forward top-K conditions as controls (default: 0)
+--n-lhd-fill N         LHD space-filling points per round (Round 2+ only)
+--cost-weight W        Cost-aware desirability gate weight (0=disabled)
+--validation           Generate validation plate (0.3x/1x/3x dose-response)
+--confirmation         Generate confirmation plate (3 replicates of optimum)
 ```
 
 ## Data
@@ -147,13 +184,13 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 - **Morphogen parser class hierarchy**: `MorphogenParser` base class → `AminKelleyParser` (46 conditions, Day 72), `SAGSecondaryParser` (2 conditions, Day 70), `CombinedParser` (merges parsers). `_BASE_MEDIA` dict provides default base media concentrations (BDNF, NT3, cAMP, Ascorbic Acid) appended to all 24-column vectors. Legacy functions (`parse_condition_name`, `build_morphogen_matrix`, `ALL_CONDITIONS`) remain for backward compatibility.
 - **scArches/scPoli architecture surgery**: Transfer learning to map query organoid cells onto HNOCA reference atlas. Step 02 supports multiple datasets via `--input`/`--output-prefix` CLI args.
 - **Cell filtering**: Primary screen uses `quality == 'keep'`; SAG screen uses `ClusterLabel != 'filtered'` (handled automatically by `filter_quality_cells()`).
-- **Two-tier fidelity scoring** (step 03): Tier 1 = brain region assignment, Tier 2 = subtype fidelity via cosine similarity to Braun fetal brain
+- **Two-tier fidelity scoring** (step 03): Tier 1 = brain region assignment, Tier 2 = subtype fidelity via Aitchison similarity to Braun fetal brain. Now includes NEST-Score maturity proxy (`maturity_score` from KNN latent distance), hit threshold via MAD, and optional `control_condition` for is_hit calling.
 - **GP fitting**: BoTorch `SingleTaskGP` / `SingleTaskMultiFidelityGP` with Matérn 5/2 + ARD kernel; `--saasbo` flag enables `SaasFullyBayesianSingleTaskGP` with half-Cauchy sparsity prior
 - **SAASBO**: Fully Bayesian GP via NUTS; wraps per-output models in `ModelListGP`; automatic variable selection in high-D morphogen space; `_extract_lengthscales` helper for diagnostics
 - **Soft fractions**: `compute_soft_cell_type_fractions` averages per-cell KNN probabilities instead of hard argmax; saved as `gp_training_labels_soft_*.csv`
 - **ILR transform**: Isometric log-ratio via Helmert basis for compositional Y data
 - **Multi-objective acquisition**: `qLogNoisyExpectedHypervolumeImprovement` or scalarized `qLogExpectedImprovement`
-- **Multi-fidelity GP integration**: `merge_multi_fidelity_data()` in step 04 combines real data (fidelity=1.0, from both primary and SAG screens) + CellRank2 virtual (0.5) + CellFlow virtual (0.0). SAG screen CSVs are auto-discovered if present.
+- **Multi-fidelity GP integration**: `merge_multi_fidelity_data()` in step 04 combines real data (fidelity=1.0) + Sanchis-Calleja (0.7) + CellRank2 virtual (0.5) + CellFlow virtual (0.0). Returns `(X, Y, noise_df)` — confidence-based heteroscedastic noise from CellFlow scores + CellRank2 transport quality. Auto-discovers SAG + Sanchis-Calleja CSVs.
 - **Cross-screen QC** (`qc_cross_screen.py`): Validates overlapping conditions between screens via cosine similarity on cell type fraction vectors. Flags conditions below threshold (default 0.8).
 - **CellRank 2 virtual data** (step 05): moscot OT maps on Azbukina temporal atlas → forward-project query cells via `.push()` API → medium-fidelity (0.5) training points; falls back to manual transport composition or atlas average
 - **CellFlow virtual screening** (step 06): Protocol encoding (RDKit + ESM2) → generative model → low-fidelity (0.0) training points
@@ -167,7 +204,9 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 - `gopro/morphogen_parser.py` — `parse_condition_name()`, `build_morphogen_matrix()`, `ALL_CONDITIONS`, `SAG_SECONDARY_CONDITIONS`, `_BASE_MEDIA`, `AminKelleyParser`, `SAGSecondaryParser`, `CombinedParser`
 - `gopro/02_map_to_hnoca.py` — `filter_quality_cells()`, `prepare_query_for_scpoli()`, `map_to_hnoca_scpoli()`, `transfer_labels_knn()`, `compute_cell_type_fractions()`
 - `gopro/03_fidelity_scoring.py` — `score_all_conditions()`, `compute_composite_fidelity()`, `compute_rss()`, `build_hnoca_to_braun_label_map()`, `align_composition_to_braun()`
-- `gopro/04_gpbo_loop.py` — `build_training_set()`, `merge_multi_fidelity_data()`, `run_gpbo_loop()`, `fit_gp_botorch()`, `recommend_next_experiments()`, `ilr_transform()`, `ilr_inverse()`, `_compute_active_bounds()`
+- `gopro/04_gpbo_loop.py` — `build_training_set()`, `merge_multi_fidelity_data()`, `run_gpbo_loop()`, `fit_gp_botorch()`, `recommend_next_experiments()`, `ilr_transform()`, `ilr_inverse()`, `_compute_active_bounds()`, `generate_lhd_fill()`, `generate_validation_plate()`, `generate_confirmation_plate()`, `compute_cocktail_cost()`, `apply_desirability_gate()`, `compute_ard_lipschitz()`, `characterize_fidelity_noise()`, `confidence_to_noise_variance()`
+- `gopro/signature_utils.py` — `compute_nest_score()`, `score_gene_signatures()`, `refine_signatures()`
+- `gopro/agents/scorer.py` — `score_recommendations()`, `score_plausibility()`, `score_novelty()`, `score_feasibility()`, `score_predicted_fidelity()`, `RecommendationScore`
 - `gopro/05_cellrank2_virtual.py` — `load_temporal_atlas()`, `compute_transport_maps()`, `project_query_forward()`, `generate_virtual_training_data()`, `build_virtual_morphogen_matrix()`
 - `gopro/06_cellflow_virtual.py` — `encode_protocol_cellflow()`, `generate_virtual_screen_grid()`, `predict_cellflow()`, `run_virtual_screen()`
 - `gopro/qc_cross_screen.py` — `compute_cross_screen_similarity()`, `validate_cross_screen()`
@@ -184,7 +223,7 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 - Avoid deprecated pandas APIs: use `isinstance(series.dtype, pd.CategoricalDtype)` instead of `pd.api.types.is_categorical_dtype()`
 - Tests in `gopro/tests/`, run with `python -m pytest gopro/tests/ -v`
 - Tests use dynamic module loading (via `conftest.py`) to handle numeric-prefixed filenames
-- Test coverage target: prioritize `02_map_to_hnoca.py` and `05_cellrank2_virtual.py` (both below 20%); 165 tests total
+- Test suite: ~860 tests total across 8 test files; run with `python -m pytest gopro/tests/ -v`
 - BoTorch uses CPU (MPS doesn't support float64 required by GP fitting)
 - scPoli model expects `snapseed_pca_rss_level_*` column names (mapped from `annot_level_*`)
 
@@ -195,4 +234,6 @@ Key dependencies: scanpy, anndata, scvi-tools, scarches, hnoca, scikit-learn, sc
 
 ## Known Issues
 
-- **Low test coverage**: `02_map_to_hnoca.py` (16%) and `05_cellrank2_virtual.py` (18%) have critical untested code paths.
+- **9 pre-existing test failures**: 4 gruffi (decoupler compatibility), 3 numba cache (fast_array_utils path mismatch), 2 scgpt (annotation validation). All unrelated to pipeline logic.
+- **Pipeline not yet executed**: Steps 02-07 have not been run on real data. See `docs/specs/pipeline-execution-spec.md` for the 7-job execution plan.
+- **Paper figures missing**: All figure placeholders in the manuscript. Paper lives at `/Users/maxxyung/Projects/engram-projects/latex-papers/morphogen-gbpo/`.
