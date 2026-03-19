@@ -129,7 +129,8 @@ class ToyMorphogenFunction:
         """Evaluate the function at morphogen concentrations.
 
         Args:
-            x: Array of shape (n_points, 24) -- morphogen concentrations.
+            x: Array of shape (n_points, n_morphogens) -- morphogen concentrations
+                where n_morphogens = len(MORPHOGEN_COLUMNS).
 
         Returns:
             Array of shape (n_points, n_cell_types) -- cell type fractions
@@ -143,11 +144,14 @@ class ToyMorphogenFunction:
 
         n_points = x.shape[0]
 
-        # Compute Hill responses: (n_points, n_morphogens)
-        hill_responses = np.zeros_like(x)
-        for d in range(self.n_morphogens):
-            for i in range(n_points):
-                hill_responses[i, d] = hill_response(x[i, d], self.ec50[d])
+        # Vectorized Hill response: h(c, ec50) = c^n / (ec50^n + c^n)
+        # (scalar hill_response() function retained for external callers)
+        ec50 = self.ec50.reshape(1, -1)
+        safe_x = np.maximum(x, 0.0)
+        safe_ec50 = np.maximum(ec50, 1e-20)
+        hill_responses = safe_x**2 / (safe_ec50**2 + safe_x**2)
+        # Zero out where input concentration is zero
+        hill_responses[x <= 0] = 0.0
 
         # Logit-space cell type scores: (n_points, n_cell_types)
         logits = hill_responses @ self.pathway_effects

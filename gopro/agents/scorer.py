@@ -15,6 +15,7 @@ References:
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -46,11 +47,17 @@ class RecommendationScore:
         return self.plausibility + self.novelty + self.feasibility + self.predicted_fidelity
 
 
+@functools.lru_cache(maxsize=1)
+def _load_pathway_rules_cached(path_str: str) -> dict:
+    """Load and cache antagonist pair rules from YAML."""
+    with open(path_str) as f:
+        return yaml.safe_load(f)
+
+
 def load_pathway_rules(path: Optional[Path] = None) -> dict:
     """Load antagonist pair rules from YAML."""
     path = path or RULES_PATH
-    with open(path) as f:
-        return yaml.safe_load(f)
+    return _load_pathway_rules_cached(str(path))
 
 
 def score_plausibility(
@@ -87,14 +94,22 @@ def score_novelty(
     recommendation: pd.Series,
     training_X: pd.DataFrame,
     k: int = 5,
+    _precomputed_dists: Optional[np.ndarray] = None,
+    _precomputed_max_pairwise: Optional[float] = None,
 ) -> float:
     """Score novelty (0-25) based on distance from training data.
 
     Uses mean distance to k-nearest training points, normalized
     to [0, 25] by the max pairwise distance in training data.
-    """
-    from scipy.spatial.distance import pdist
 
+    Args:
+        recommendation: Single recommendation row.
+        training_X: Training morphogen concentrations.
+        k: Number of nearest neighbors.
+        _precomputed_dists: Precomputed distance vector from this recommendation
+            to all training points (avoids redundant computation in batch scoring).
+        _precomputed_max_pairwise: Precomputed max pairwise distance in training data.
+    """
     # Get shared morphogen columns (exclude fidelity, metadata)
     shared_cols = [
         c for c in recommendation.index if c in training_X.columns and c != "fidelity"
@@ -102,28 +117,35 @@ def score_novelty(
     if not shared_cols:
         return 12.5  # neutral
 
-    rec_vec = recommendation[shared_cols].values.astype(float).reshape(1, -1)
-    train_vecs = training_X[shared_cols].values.astype(float)
+    if _precomputed_dists is not None:
+        dists = _precomputed_dists
+    else:
+        rec_vec = recommendation[shared_cols].values.astype(float).reshape(1, -1)
+        train_vecs = training_X[shared_cols].values.astype(float)
+        dists = np.sqrt(((train_vecs - rec_vec) ** 2).sum(axis=1))
 
-    # Distances to all training points
-    dists = np.sqrt(((train_vecs - rec_vec) ** 2).sum(axis=1))
     k_actual = min(k, len(dists))
     knn_dists = np.sort(dists)[:k_actual]
     mean_knn_dist = float(knn_dists.mean())
 
     # Normalize by max pairwise distance in training data
-    if len(train_vecs) > 1:
-        max_pairwise = float(pdist(train_vecs).max())
-        if max_pairwise > 0:
-            return min(25.0, 25.0 * mean_knn_dist / max_pairwise)
+    if _precomputed_max_pairwise is not None:
+        max_pairwise = _precomputed_max_pairwise
+    else:
+        from scipy.spatial.distance import pdist
+        train_vecs = training_X[shared_cols].values.astype(float)
+        if len(train_vecs) > 1:
+            max_pairwise = float(pdist(train_vecs).max())
         else:
-            # All training points are identical; novelty is purely based
-            # on whether the recommendation matches them.
-            if mean_knn_dist == 0.0:
-                return 0.0
-            return 25.0
+            return 12.5
 
-    return 12.5
+    if max_pairwise > 0:
+        return min(25.0, 25.0 * mean_knn_dist / max_pairwise)
+    else:
+        # All training points are identical
+        if mean_knn_dist == 0.0:
+            return 0.0
+        return 25.0
 
 
 def score_feasibility(
@@ -189,10 +211,28 @@ def score_recommendations(
     if rules is None:
         rules = load_pathway_rules()
 
+    # Precompute pairwise distances for novelty scoring
+    from scipy.spatial.distance import pdist, cdist
+
+    shared_cols = [
+        c for c in recommendations.columns if c in training_X.columns and c != "fidelity"
+    ]
+    _precomputed_max_pairwise = None
+    _all_dists = None
+    if shared_cols:
+        train_vecs = training_X[shared_cols].values.astype(float)
+        rec_vecs = recommendations[shared_cols].values.astype(float)
+        _precomputed_max_pairwise = float(pdist(train_vecs).max()) if len(train_vecs) > 1 else 1.0
+        _all_dists = cdist(rec_vecs, train_vecs)  # (n_recs, n_train)
+
     scores: list[RecommendationScore] = []
-    for idx, row in recommendations.iterrows():
+    for i, (idx, row) in enumerate(recommendations.iterrows()):
         plaus, penalties = score_plausibility(row, rules)
-        nov = score_novelty(row, training_X)
+        nov = score_novelty(
+            row, training_X,
+            _precomputed_dists=_all_dists[i] if _all_dists is not None else None,
+            _precomputed_max_pairwise=_precomputed_max_pairwise,
+        )
         feas = score_feasibility(row)
 
         pred_mean = (

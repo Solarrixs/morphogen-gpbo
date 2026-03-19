@@ -152,6 +152,7 @@ def score_gene_signatures(
                     .mean()
                 )
                 null_scores[i] = null_per_cond.reindex(observed.index).values
+                del adata.obs[perm_col]
 
             # p-value = fraction of null scores >= observed
             observed_arr = observed.values[np.newaxis, :]  # (1, n_conditions)
@@ -250,7 +251,6 @@ def refine_signatures(
     scores_shared = scores_series.loc[scores_series.index.isin(shared_conditions)].sort_values(ascending=False)
     midpoint = len(scores_shared) // 2
     high_conditions = set(scores_shared.iloc[:midpoint].index)
-    low_conditions = set(scores_shared.iloc[midpoint:].index)
 
     # Assign fidelity_bin label
     adata_sub.obs["fidelity_bin"] = adata_sub.obs[condition_key].map(

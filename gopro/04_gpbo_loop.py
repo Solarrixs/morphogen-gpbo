@@ -50,6 +50,7 @@ from gopro.config import (
     MORPHOGEN_ACTIVITY_THRESHOLDS,
     MORPHOGEN_ACTIVITY_THRESHOLD_DEFAULT,
     MORPHOGEN_COLUMNS,
+    MORPHOGEN_COST_PER_UM,
     PROTEIN_MW_KDA,
     SANCHIS_CALLEJA_DEFAULT_FIDELITY,
     TIMING_FULL,
@@ -1501,6 +1502,7 @@ def build_training_set(
         X: (N_conditions, D_morphogens + 1_time + 1_fidelity)
         Y: (N_conditions, M_cell_types)
     """
+    import os
     import tempfile as _tempfile
 
     from gopro.validation import validate_training_csvs
@@ -1525,8 +1527,12 @@ def build_training_set(
     # Validate after status filtering -- validator reads from file, so write
     # the (potentially filtered) fractions to a temp CSV for validation.
     with _tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as _tmp:
-        Y.to_csv(_tmp.name)
-        validate_training_csvs(_tmp.name, morphogen_csv)
+        _tmp_path = _tmp.name
+        Y.to_csv(_tmp_path)
+    try:
+        validate_training_csvs(_tmp_path, morphogen_csv)
+    finally:
+        os.unlink(_tmp_path)
 
     # Align indices
     common = Y.index.intersection(X.index)
@@ -2744,7 +2750,6 @@ def compute_cocktail_cost(
         Series of total costs indexed by recommendation index.
     """
     if cost_dict is None:
-        from gopro.config import MORPHOGEN_COST_PER_UM
         cost_dict = MORPHOGEN_COST_PER_UM
 
     total_cost = pd.Series(0.0, index=recommendations.index, dtype=np.float64)
