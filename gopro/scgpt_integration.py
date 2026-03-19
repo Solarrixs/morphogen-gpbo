@@ -140,6 +140,10 @@ def load_scgpt_brain(
 ) -> tuple:
     """Load the scGPT brain checkpoint.
 
+    Reference: Cui et al. (2024), "scGPT: toward building a foundation model
+    for single-cell multi-omics using generative AI", Nature Methods
+    21:1470-1480, DOI:10.1038/s41592-024-02201-0.
+
     Args:
         model_dir: Path to checkpoint directory. Defaults to data/scgpt_brain/.
         device: 'cpu' or 'cuda'. Defaults to CPU (safe for macOS).
@@ -201,6 +205,9 @@ def load_scgpt_brain(
         pre_norm=False,
     )
 
+    # SECURITY NOTE: weights_only=False allows arbitrary code execution from
+    # malicious checkpoint files. Only load models from trusted sources
+    # (e.g., CellxGene Census, official scGPT releases).
     state_dict = torch.load(model_file, map_location=device, weights_only=False)
     # Remap flash-attn keys to standard PyTorch transformer keys
     state_dict = {
@@ -264,6 +271,10 @@ def embed_cells(
     device: Optional[str] = None,
 ) -> np.ndarray:
     """Extract scGPT cell embeddings from an AnnData object.
+
+    Reference: Cui et al. (2024), "scGPT: toward building a foundation model
+    for single-cell multi-omics using generative AI", Nature Methods
+    21:1470-1480, DOI:10.1038/s41592-024-02201-0.
 
     Args:
         adata: AnnData with raw counts in X. Gene names in var.index or var[gene_col].
@@ -426,7 +437,9 @@ def validate_annotations_scgpt(
 
     Computes scGPT embeddings (if not already in adata.obsm), runs Leiden clustering
     on the scGPT embedding space, and measures agreement between scPoli-assigned labels
-    and scGPT-derived clusters via Adjusted Rand Index (ARI) and per-cell-type purity.
+    and scGPT-derived clusters via Adjusted Rand Index (ARI; Hubert & Arabie 1985,
+    "Comparing Partitions", Journal of Classification 2:193-218) and per-cell-type
+    purity.
 
     Args:
         adata: AnnData with cell type labels in obs[label_col].
