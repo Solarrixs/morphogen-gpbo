@@ -68,7 +68,7 @@ morphogen-gpbo/
 Centralized configuration — import paths and constants from here instead of defining locally.
 
 - `PROJECT_DIR`, `DATA_DIR`, `MODEL_DIR` — derived from env vars (`GPBO_PROJECT_DIR`, `GPBO_DATA_DIR`, `GPBO_MODEL_DIR`) or auto-detected from `__file__`
-- `MORPHOGEN_COLUMNS` — canonical list of 24 morphogen dimension names (all concentrations in µM)
+- `MORPHOGEN_COLUMNS` — canonical list of 25 morphogen dimension names (all concentrations in µM)
 - `PROTEIN_MW_KDA` — molecular weights (kDa) for recombinant protein morphogens
 - `ng_mL_to_uM(ng_per_mL, mw_kda)`, `nM_to_uM(nM)` — unit conversion functions
 - `ANNOT_LEVEL_1`, `ANNOT_LEVEL_2`, `ANNOT_REGION`, `ANNOT_LEVEL_3` — HNOCA annotation column names

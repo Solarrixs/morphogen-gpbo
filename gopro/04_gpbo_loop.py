@@ -312,10 +312,10 @@ FIDELITY_KERNEL_UNMAP: dict[float, float] = {v: k for k, v in FIDELITY_KERNEL_RE
 
 
 def _remap_fidelity(fidelity_values: torch.Tensor) -> torch.Tensor:
-    """Remap fidelity values from {0.0, 0.5, 1.0} → open interval (0, 1).
+    """Remap fidelity values from {0.0, 0.5, 0.7, 1.0} → open interval (0, 1).
 
     Prevents boundary collapse in LinearTruncatedFidelityKernel.  Unknown
-    fidelity values are linearly interpolated between 0→1/3 and 1→2/3.
+    fidelity values are linearly interpolated. See FIDELITY_KERNEL_REMAP.
     """
     out = fidelity_values.clone()
     matched = torch.zeros_like(fidelity_values, dtype=torch.bool)

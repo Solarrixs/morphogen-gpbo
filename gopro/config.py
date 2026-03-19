@@ -77,7 +77,7 @@ MORPHOGEN_COST_PER_UM: dict[str, float] = {
     "CHIR99021_uM": 0.01, "IWP2_uM": 0.05, "XAV939_uM": 0.05,
     "SB431542_uM": 0.02, "LDN193189_uM": 0.10, "DAPT_uM": 0.05,
     "cyclopamine_uM": 0.10, "purmorphamine_uM": 0.05,
-    "SAG_uM": 0.10, "RA_uM": 0.01, "9cisRA_uM": 0.05,
+    "SAG_uM": 0.10, "RA_uM": 0.01,
     "SR11237_uM": 0.05, "Dorsomorphin_uM": 0.05,
     # Recombinant proteins (expensive: ~$1-10 per µM per well)
     "SHH_uM": 5.0, "BMP4_uM": 5.0, "BMP7_uM": 5.0,
