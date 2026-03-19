@@ -1794,7 +1794,7 @@ class TestFidelityKernelRemap:
         """Standard fidelity levels map to open interval (0, 1)."""
         fid = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
         remapped = step04._remap_fidelity(fid)
-        expected = torch.tensor([1 / 3, 1 / 2, 2 / 3], dtype=torch.float64)
+        expected = torch.tensor([1 / 5, 2 / 5, 4 / 5], dtype=torch.float64)
         torch.testing.assert_close(remapped, expected)
 
     def test_remap_excludes_boundaries(self):
@@ -1821,7 +1821,7 @@ class TestFidelityKernelRemap:
         """FIDELITY_KERNEL_REMAP and FIDELITY_KERNEL_UNMAP are accessible."""
         assert hasattr(step04, "FIDELITY_KERNEL_REMAP")
         assert hasattr(step04, "FIDELITY_KERNEL_UNMAP")
-        assert len(step04.FIDELITY_KERNEL_REMAP) == 3
+        assert len(step04.FIDELITY_KERNEL_REMAP) == 4
         # All mapped values in (0, 1)
         for v in step04.FIDELITY_KERNEL_REMAP.values():
             assert 0 < v < 1
@@ -1849,12 +1849,12 @@ class TestFidelityKernelRemap:
         fid_col = train_X[:, -1]
         # Should NOT contain 1.0 or 0.5 (raw values)
         assert not torch.any(torch.isclose(fid_col, torch.tensor(1.0, dtype=torch.float64)))
-        # Should contain remapped values ≈ 1/2 and 2/3
+        # Should contain remapped values ≈ 2/5 and 4/5
         unique_fids = sorted(fid_col.unique().tolist())
         assert len(unique_fids) == 2
         torch.testing.assert_close(
             torch.tensor(unique_fids, dtype=torch.float64),
-            torch.tensor([1 / 2, 2 / 3], dtype=torch.float64),
+            torch.tensor([2 / 5, 4 / 5], dtype=torch.float64),
         )
 
 
@@ -5123,3 +5123,130 @@ class TestCostAwareDesirability:
         acq = pd.Series([1.0, 0.8], index=recs.index)
         _ = step04.apply_desirability_gate(recs, acq, cost_weight=0.2)
         assert list(recs.columns) == original_cols
+
+
+class TestSanchisCallejaMultiFidelity:
+    """Tests for Sanchis-Calleja patterning screen multi-fidelity wire-up."""
+
+    def test_sanchis_calleja_fidelity_in_config(self):
+        """SANCHIS_CALLEJA_DEFAULT_FIDELITY exists and is 0.7."""
+        from gopro.config import SANCHIS_CALLEJA_DEFAULT_FIDELITY
+        assert SANCHIS_CALLEJA_DEFAULT_FIDELITY == 0.7
+
+    def test_sanchis_calleja_in_fidelity_labels(self):
+        """FIDELITY_LABELS contains the 0.7 Sanchis-Calleja level."""
+        from gopro.config import FIDELITY_LABELS
+        assert 0.7 in FIDELITY_LABELS
+        assert FIDELITY_LABELS[0.7] == "SanchisCalleja"
+
+    def test_sanchis_calleja_in_fidelity_costs(self):
+        """FIDELITY_COSTS contains the 0.7 Sanchis-Calleja level."""
+        from gopro.config import FIDELITY_COSTS
+        assert 0.7 in FIDELITY_COSTS
+        # Cost should be between real (1.0) and CellRank2 (0.005)
+        assert FIDELITY_COSTS[1.0] > FIDELITY_COSTS[0.7] > FIDELITY_COSTS[0.5]
+
+    def test_sanchis_calleja_imported_in_gpbo(self):
+        """SANCHIS_CALLEJA_DEFAULT_FIDELITY is accessible from 04_gpbo_loop."""
+        assert hasattr(step04, "SANCHIS_CALLEJA_DEFAULT_FIDELITY")
+        assert step04.SANCHIS_CALLEJA_DEFAULT_FIDELITY == 0.7
+
+    def test_sanchis_calleja_in_kernel_remap(self):
+        """FIDELITY_KERNEL_REMAP includes the 0.7 level."""
+        assert 0.7 in step04.FIDELITY_KERNEL_REMAP
+        # Remapped value must be in (0, 1) and ordered correctly
+        assert 0 < step04.FIDELITY_KERNEL_REMAP[0.7] < 1
+        assert step04.FIDELITY_KERNEL_REMAP[0.5] < step04.FIDELITY_KERNEL_REMAP[0.7]
+        assert step04.FIDELITY_KERNEL_REMAP[0.7] < step04.FIDELITY_KERNEL_REMAP[1.0]
+
+    def test_sanchis_calleja_auto_discovery(self, tmp_path):
+        """Auto-discovery finds Sanchis-Calleja CSVs and adds them to virtual_sources."""
+        import argparse
+
+        # Create mock CSV files in tmp dir
+        sc_frac = tmp_path / "gp_training_labels_sanchis_calleja.csv"
+        sc_morph = tmp_path / "morphogen_matrix_sanchis_calleja.csv"
+        pd.DataFrame({"ct1": [0.5]}, index=["cond_0"]).to_csv(str(sc_frac))
+        pd.DataFrame({"CHIR99021_uM": [1.0]}, index=["cond_0"]).to_csv(str(sc_morph))
+
+        # Simulate the auto-discovery logic from __main__
+        virtual_sources = []
+        args = argparse.Namespace(
+            sanchis_fractions=None,
+            sanchis_morphogens=None,
+            sanchis_fidelity=0.7,
+        )
+        sc_frac_path = Path(args.sanchis_fractions) if args.sanchis_fractions else sc_frac
+        sc_morph_path = Path(args.sanchis_morphogens) if args.sanchis_morphogens else sc_morph
+        if sc_frac_path.exists() and sc_morph_path.exists():
+            virtual_sources.append((sc_frac_path, sc_morph_path, args.sanchis_fidelity))
+
+        assert len(virtual_sources) == 1
+        assert virtual_sources[0][2] == 0.7
+
+    def test_sanchis_calleja_auto_discovery_missing(self, tmp_path):
+        """Auto-discovery does not add sources when CSVs are missing."""
+        import argparse
+
+        virtual_sources = []
+        args = argparse.Namespace(
+            sanchis_fractions=None,
+            sanchis_morphogens=None,
+            sanchis_fidelity=0.7,
+        )
+        # Point to non-existent files
+        sc_frac_path = tmp_path / "gp_training_labels_sanchis_calleja.csv"
+        sc_morph_path = tmp_path / "morphogen_matrix_sanchis_calleja.csv"
+        if sc_frac_path.exists() and sc_morph_path.exists():
+            virtual_sources.append((sc_frac_path, sc_morph_path, args.sanchis_fidelity))
+
+        assert len(virtual_sources) == 0
+
+    def test_sanchis_calleja_cli_flags(self):
+        """Argparse parser accepts --sanchis-fractions, --sanchis-morphogens, --sanchis-fidelity."""
+        import argparse
+
+        # Build the parser the same way as __main__ (subset of relevant args)
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--sanchis-fractions", type=str, default=None)
+        parser.add_argument("--sanchis-morphogens", type=str, default=None)
+        parser.add_argument("--sanchis-fidelity", type=float, default=0.7)
+
+        # Test with explicit paths
+        args = parser.parse_args([
+            "--sanchis-fractions", "/tmp/sc_frac.csv",
+            "--sanchis-morphogens", "/tmp/sc_morph.csv",
+            "--sanchis-fidelity", "0.65",
+        ])
+        assert args.sanchis_fractions == "/tmp/sc_frac.csv"
+        assert args.sanchis_morphogens == "/tmp/sc_morph.csv"
+        assert args.sanchis_fidelity == 0.65
+
+        # Test defaults
+        args_default = parser.parse_args([])
+        assert args_default.sanchis_fractions is None
+        assert args_default.sanchis_morphogens is None
+        assert args_default.sanchis_fidelity == 0.7
+
+    def test_sanchis_calleja_custom_fidelity(self, tmp_path):
+        """Custom fidelity override is passed through to virtual_sources."""
+        import argparse
+
+        sc_frac = tmp_path / "sc_frac.csv"
+        sc_morph = tmp_path / "sc_morph.csv"
+        pd.DataFrame({"ct1": [0.5]}, index=["cond_0"]).to_csv(str(sc_frac))
+        pd.DataFrame({"CHIR99021_uM": [1.0]}, index=["cond_0"]).to_csv(str(sc_morph))
+
+        virtual_sources = []
+        args = argparse.Namespace(
+            sanchis_fractions=str(sc_frac),
+            sanchis_morphogens=str(sc_morph),
+            sanchis_fidelity=0.65,
+        )
+        sc_frac_path = Path(args.sanchis_fractions) if args.sanchis_fractions else tmp_path / "default.csv"
+        sc_morph_path = Path(args.sanchis_morphogens) if args.sanchis_morphogens else tmp_path / "default.csv"
+        if sc_frac_path.exists() and sc_morph_path.exists():
+            virtual_sources.append((sc_frac_path, sc_morph_path, args.sanchis_fidelity))
+
+        assert len(virtual_sources) == 1
+        assert virtual_sources[0][2] == 0.65

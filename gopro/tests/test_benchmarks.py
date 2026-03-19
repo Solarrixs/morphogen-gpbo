@@ -12,6 +12,7 @@ from gopro.benchmarks.toy_morphogen_function import (
     CELL_TYPES,
     MORPHOGEN_COLUMNS,
 )
+from gopro.benchmarks.noise_robustness import run_noise_sweep, summarize_noise_sweep
 from conftest import _import_pipeline_module
 
 step04 = _import_pipeline_module("04_gpbo_loop")
@@ -214,3 +215,71 @@ class TestARDLipschitz:
         model = self._make_mock_model([1.0, 2.0, 3.0], outputscale=1.0)  # 3 dims
         with pytest.raises(ValueError, match="mismatch"):
             step04.compute_ard_lipschitz(model, cols)
+
+
+class TestRunNoiseSweep:
+    """Tests for the noise-robustness sweep."""
+
+    def test_run_noise_sweep_shape(self):
+        """Output has expected columns and correct number of rows."""
+        noise_levels = (0.01, 0.1)
+        batch_sizes = (4, 8)
+        n_rounds = 2
+        df = run_noise_sweep(
+            noise_levels=noise_levels,
+            batch_sizes=batch_sizes,
+            n_rounds=n_rounds,
+            n_initial=5,
+            seed=0,
+        )
+        expected_cols = {
+            "noise_level",
+            "batch_size",
+            "round",
+            "best_observed",
+            "mean_observed",
+            "n_evaluated",
+        }
+        assert set(df.columns) == expected_cols
+        # Each (noise, batch) combo produces (n_rounds + 1) rows (round 0 = initial)
+        expected_rows = len(noise_levels) * len(batch_sizes) * (n_rounds + 1)
+        assert len(df) == expected_rows
+
+    def test_sweep_low_noise_better(self):
+        """Low noise should produce lower regret than high noise."""
+        df = run_noise_sweep(
+            noise_levels=(0.01, 0.5),
+            batch_sizes=(16,),
+            n_rounds=5,
+            n_initial=20,
+            seed=42,
+        )
+        summary = summarize_noise_sweep(df)
+        low_regret = summary.loc[
+            summary["noise_level"] == 0.01, "regret"
+        ].values[0]
+        high_regret = summary.loc[
+            summary["noise_level"] == 0.5, "regret"
+        ].values[0]
+        # Low noise should have equal or lower regret than high noise
+        assert low_regret <= high_regret
+
+    def test_summarize_produces_recommendation(self):
+        """Summary includes 'robust' or 'sensitive' recommendation."""
+        df = run_noise_sweep(
+            noise_levels=(0.01, 0.2),
+            batch_sizes=(8,),
+            n_rounds=2,
+            n_initial=5,
+            seed=42,
+        )
+        summary = summarize_noise_sweep(df)
+        assert "recommendation" in summary.columns
+        assert set(summary["recommendation"].unique()).issubset(
+            {"robust", "sensitive"}
+        )
+        # With very low noise, the configuration should be marked robust
+        low_noise_rec = summary.loc[
+            summary["noise_level"] == 0.01, "recommendation"
+        ].values[0]
+        assert low_noise_rec == "robust"

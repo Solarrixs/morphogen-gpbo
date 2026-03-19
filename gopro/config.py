@@ -173,9 +173,15 @@ FIDELITY_R2_THRESHOLDS: dict[str, float] = {
 FIDELITY_DROP_R2_THRESHOLD = FIDELITY_R2_THRESHOLDS["drop"]
 FIDELITY_SKIP_R2_THRESHOLD = FIDELITY_R2_THRESHOLDS["skip"]
 
+# Sanchis-Calleja patterning screen (Nat Methods 2025) default fidelity.
+# Different cell lines + timepoints (Days 1-36 vs Day 72) warrant a discount.
+# Use qc_cross_screen.py to compute empirical R² and override this default.
+SANCHIS_CALLEJA_DEFAULT_FIDELITY = 0.7
+
 # Human-readable labels for fidelity levels
 FIDELITY_LABELS: dict[float, str] = {
     1.0: "real",
+    0.7: "SanchisCalleja",
     0.5: "CellRank2",
     0.0: "CellFlow",
 }
@@ -184,6 +190,7 @@ FIDELITY_LABELS: dict[float, str] = {
 # Real scRNA-seq: ~$2,000 + 72 days; CellRank2: ~2 hours compute; CellFlow: ~10 min
 FIDELITY_COSTS: dict[float, float] = {
     1.0: 1.0,     # real experiment
+    0.7: 0.8,     # Sanchis-Calleja patterning screen (different cell line/timepoints)
     0.5: 0.005,   # CellRank2 forward projection
     0.0: 0.001,   # CellFlow generative prediction
 }

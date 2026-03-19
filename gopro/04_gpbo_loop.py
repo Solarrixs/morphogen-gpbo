@@ -51,6 +51,7 @@ from gopro.config import (
     MORPHOGEN_ACTIVITY_THRESHOLD_DEFAULT,
     MORPHOGEN_COLUMNS,
     PROTEIN_MW_KDA,
+    SANCHIS_CALLEJA_DEFAULT_FIDELITY,
     TIMING_FULL,
     TIMING_WINDOW_COLUMNS,
     nM_to_uM,
@@ -301,9 +302,10 @@ DTYPE = torch.double
 # when fidelity ∈ {0.0, 1.0} (boundary values annihilate the inter-fidelity
 # kernel component). Remap to the open interval (0, 1) to avoid this.
 FIDELITY_KERNEL_REMAP: dict[float, float] = {
-    0.0: 1 / 3,   # CellFlow → 0.333
-    0.5: 1 / 2,   # CellRank2 → 0.500
-    1.0: 2 / 3,   # real → 0.667
+    0.0: 1 / 5,   # CellFlow → 0.200
+    0.5: 2 / 5,   # CellRank2 → 0.400
+    0.7: 3 / 5,   # SanchisCalleja → 0.600
+    1.0: 4 / 5,   # real → 0.800
 }
 FIDELITY_KERNEL_UNMAP: dict[float, float] = {v: k for k, v in FIDELITY_KERNEL_REMAP.items()}
 
@@ -5201,6 +5203,15 @@ if __name__ == "__main__":
                         help="Path to SAG screen fractions CSV (fidelity=1.0)")
     parser.add_argument("--sag-morphogens", type=str, default=None,
                         help="Path to SAG screen morphogens CSV")
+    parser.add_argument("--sanchis-fractions", type=str, default=None,
+                        help="Path to Sanchis-Calleja patterning screen fractions CSV")
+    parser.add_argument("--sanchis-morphogens", type=str, default=None,
+                        help="Path to Sanchis-Calleja patterning screen morphogens CSV")
+    parser.add_argument("--sanchis-fidelity", type=float,
+                        default=SANCHIS_CALLEJA_DEFAULT_FIDELITY,
+                        help="Fidelity level for Sanchis-Calleja data "
+                             f"(default: {SANCHIS_CALLEJA_DEFAULT_FIDELITY}). "
+                             "Override with empirical R² from qc_cross_screen.py.")
     parser.add_argument("--saasbo", action="store_true",
                         help="Use SAASBO (fully Bayesian GP with sparsity prior)")
     parser.add_argument("--saasbo-fast", action="store_true",
@@ -5439,6 +5450,14 @@ if __name__ == "__main__":
     if sag_frac.exists() and sag_morph.exists():
         virtual_sources.append((sag_frac, sag_morph, 1.0))
         logger.info("Including SAG secondary screen real data (fidelity=1.0)")
+
+    # Check for Sanchis-Calleja patterning screen data
+    sc_frac = Path(args.sanchis_fractions) if args.sanchis_fractions else DATA_DIR / "gp_training_labels_sanchis_calleja.csv"
+    sc_morph = Path(args.sanchis_morphogens) if args.sanchis_morphogens else DATA_DIR / "morphogen_matrix_sanchis_calleja.csv"
+    if sc_frac.exists() and sc_morph.exists():
+        sc_fidelity = args.sanchis_fidelity
+        virtual_sources.append((sc_frac, sc_morph, sc_fidelity))
+        logger.info("Including Sanchis-Calleja patterning screen data (fidelity=%.2f)", sc_fidelity)
 
     # Resolve target profile
     target_profile = None
