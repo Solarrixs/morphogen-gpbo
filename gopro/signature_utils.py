@@ -105,11 +105,15 @@ def score_gene_signatures(
     all_genes = list(adata.var_names)
     rng = np.random.default_rng(42)
 
+    # Cache filtered gene lists to avoid recomputing in the permutation loop
+    filtered_genes: dict[str, list[str]] = {}
+
     try:
         # Score each signature
         for sig_name, gene_list in signatures.items():
             # Filter to genes present in the data
             valid_genes = [g for g in gene_list if g in adata.var_names]
+            filtered_genes[sig_name] = valid_genes
             if len(valid_genes) == 0:
                 logger.warning("Signature '%s': no genes found in adata.var_names", sig_name)
                 adata.obs[sig_name] = 0.0
@@ -135,8 +139,8 @@ def score_gene_signatures(
         pvalues_df = None
         if n_permutations > 0:
             pvalues = {}
-            for sig_name, gene_list in signatures.items():
-                valid_genes = [g for g in gene_list if g in adata.var_names]
+            for sig_name in signatures:
+                valid_genes = filtered_genes[sig_name]
                 n_genes = max(len(valid_genes), 1)
                 observed = scores_df[sig_name]
 
@@ -145,6 +149,7 @@ def score_gene_signatures(
                 for i in range(n_permutations):
                     perm_genes = list(rng.choice(all_genes, size=n_genes, replace=False))
                     perm_col = f"_perm_{sig_name}_{i}"
+                    added_cols.append(perm_col)
                     perm_n_ctrl = min(len(perm_genes), max(1, len(all_genes) // 10))
                     perm_n_bins = min(25, max(1, (len(all_genes) - len(perm_genes)) // perm_n_ctrl))
                     sc.tl.score_genes(
@@ -158,6 +163,7 @@ def score_gene_signatures(
                     )
                     null_scores[i] = null_per_cond.reindex(observed.index).values
                     del adata.obs[perm_col]
+                    added_cols.pop()  # inline delete succeeded, remove from tracking
 
                 # p-value = fraction of null scores >= observed
                 observed_arr = observed.values[np.newaxis, :]  # (1, n_conditions)
