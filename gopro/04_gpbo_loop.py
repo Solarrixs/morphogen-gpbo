@@ -30,6 +30,7 @@ from collections import namedtuple
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -2640,27 +2641,21 @@ def compute_ard_lipschitz(model, columns: list[str]) -> pd.DataFrame:
 
 
 # --- Desirability-based feasibility gate (Cosenza 2022) ---
-# Maps each signaling pathway to its agonist and antagonist morphogen columns.
-# When both are present at high concentration, the protocol is biologically
-# implausible (simultaneous activation and inhibition of the same pathway).
-ANTAGONIST_PAIRS: dict[str, dict[str, list[str]]] = {
-    "WNT": {
-        "agonists": ["CHIR99021_uM"],
-        "antagonists": ["IWP2_uM", "XAV939_uM"],
-    },
-    "BMP": {
-        "agonists": ["BMP4_uM", "BMP7_uM"],
-        "antagonists": ["LDN193189_uM", "Dorsomorphin_uM"],
-    },
-    "SHH": {
-        "agonists": ["SHH_uM", "SAG_uM", "purmorphamine_uM"],
-        "antagonists": ["cyclopamine_uM"],
-    },
-    "TGFb": {
-        "agonists": ["ActivinA_uM"],
-        "antagonists": ["SB431542_uM"],
-    },
-}
+# Agonist/antagonist groups loaded from gopro/agents/pathway_rules.yaml
+# (single source of truth shared with gopro/agents/scorer.py).
+_PATHWAY_RULES_PATH = Path(__file__).parent / "agents" / "pathway_rules.yaml"
+
+
+@functools.lru_cache(maxsize=1)
+def _load_antagonist_groups() -> dict[str, dict[str, list[str]]]:
+    """Load agonist_groups from pathway_rules.yaml."""
+    with open(_PATHWAY_RULES_PATH) as f:
+        rules = yaml.safe_load(f)
+    return rules["agonist_groups"]
+
+
+# Module-level alias for backward compatibility (used by tests).
+ANTAGONIST_PAIRS = _load_antagonist_groups()
 
 
 def compute_desirability(

@@ -26,3 +26,20 @@ antagonist_pairs:
 # Concentration thresholds below which a morphogen is considered "absent"
 # (used to avoid flagging trace amounts as antagonistic)
 absence_threshold_uM: 0.001
+
+# Agonist/antagonist groups by pathway (used by desirability gate in 04_gpbo_loop.py).
+# Groups all morphogens that activate vs inhibit each pathway, enabling summed
+# agonist vs antagonist scoring (beyond pairwise checks above).
+agonist_groups:
+  WNT:
+    agonists: [CHIR99021_uM]
+    antagonists: [IWP2_uM, XAV939_uM]
+  BMP:
+    agonists: [BMP4_uM, BMP7_uM]
+    antagonists: [LDN193189_uM, Dorsomorphin_uM]
+  SHH:
+    agonists: [SHH_uM, SAG_uM, purmorphamine_uM]
+    antagonists: [cyclopamine_uM]
+  TGFb:
+    agonists: [ActivinA_uM]
+    antagonists: [SB431542_uM]

@@ -2,6 +2,13 @@
 
 ## Iteration Log
 
+## Iteration 2 — 2026-03-19
+- Task: I-4 — Deduplicate antagonist pairs (YAML single source of truth)
+- Result: pass
+- Files changed: gopro/agents/pathway_rules.yaml (+15), gopro/04_gpbo_loop.py (+14/-18), task_plan.md (+1/-1)
+- Quality: Added `agonist_groups` section to pathway_rules.yaml; replaced hardcoded ANTAGONIST_PAIRS dict in 04_gpbo_loop.py with YAML loader; both scorer.py and 04_gpbo_loop.py now load from same YAML; backward-compatible `ANTAGONIST_PAIRS` alias kept for existing tests. 474 tests pass (4 pre-existing gruffi failures).
+- Notes: 6 code review items remaining (I-1, S-1 through S-5).
+
 ## Iteration 1 — 2026-03-19T10:45:17Z
 - Task: I-3 — Add TVR gradient warning docstring + acquisition optimization test (ralph-task.md code review fixes)
 - Result: pass
