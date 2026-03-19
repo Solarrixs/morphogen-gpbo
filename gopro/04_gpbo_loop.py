@@ -1910,6 +1910,20 @@ class TVRModelEnsemble:
         For each candidate point, selects the model with the lowest
         cost-scaled variance (variance * cost). Returns that model's
         posterior mean and variance.
+
+        Warning:
+            The ``argmin`` used for model selection is **not differentiable**.
+            Gradients do not flow through the fidelity-selection step, so
+            BoTorch's gradient-based acquisition optimizers (e.g. L-BFGS)
+            will only see gradients from the *selected* model's posterior,
+            not from the selection itself.  This means small perturbations
+            in X will not cause the optimizer to switch fidelity levels.
+            In practice this works because (a) the selection is locally
+            constant within each fidelity region, so the selected model's
+            posterior *is* smooth, and (b) ``optimize_acqf`` uses random
+            restarts that sample across fidelity regions.  However, any
+            downstream code that relies on end-to-end differentiability
+            through the ensemble (e.g. second-order optimizers) will break.
         """
         # Collect posteriors from all models (no torch.no_grad — gradients
         # must flow for BoTorch acquisition function optimization)

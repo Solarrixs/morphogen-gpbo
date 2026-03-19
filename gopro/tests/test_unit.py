@@ -2421,6 +2421,53 @@ class TestTVR:
         # 3 cell types -> 2 ILR coords
         assert model.num_outputs == 2
 
+    def test_tvr_acquisition_optimization_does_not_silently_fail(self, multi_fidelity_data):
+        """Gradient-based optimization should work through TVR posterior.
+
+        The argmin in TVR.posterior() breaks the gradient chain for model
+        selection.  This test verifies that gradients still flow through
+        the *selected* model's posterior, so torch.optim-based acquisition
+        optimization produces finite, improving candidates.
+        """
+        import torch
+
+        X, Y = multi_fidelity_data
+        model, train_X, train_Y, _ = step04.fit_tvr_models(X, Y, use_ilr=True)
+
+        # Start from a random point, optimize posterior mean via gradient descent
+        d = train_X.shape[-1]
+        x = torch.rand(1, d, dtype=train_X.dtype, requires_grad=True)
+        optimizer = torch.optim.Adam([x], lr=0.05)
+
+        initial_mean = None
+        for step in range(10):
+            optimizer.zero_grad()
+            post = model.posterior(x)
+            # Maximize mean of first output
+            loss = -post.mean[..., 0].sum()
+            loss.backward()
+            optimizer.step()
+            # Clamp to [0, 1]
+            with torch.no_grad():
+                x.clamp_(0.0, 1.0)
+            if step == 0:
+                initial_mean = -loss.item()
+
+        final_mean = -loss.item()
+
+        # Gradients should have flowed — check x.grad is finite
+        assert x.grad is not None, "No gradients computed through TVR posterior"
+        assert torch.all(torch.isfinite(x.grad)), "TVR gradients contain NaN/Inf"
+        assert torch.all(torch.isfinite(x)), "Optimized x contains NaN/Inf"
+        # Optimization should not have gotten stuck (mean should have changed)
+        assert final_mean != initial_mean, "Optimization made no progress through TVR"
+
+    def test_tvr_gradient_warning_in_docstring(self):
+        """TVRModelEnsemble.posterior docstring should warn about gradient chain."""
+        docstring = step04.TVRModelEnsemble.posterior.__doc__
+        assert "argmin" in docstring
+        assert "not differentiable" in docstring
+
 
 class TestRefineTargetProfile:
     """Tests for target profile refinement (DeMeo 2025 interpolation)."""
