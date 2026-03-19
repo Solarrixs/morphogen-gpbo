@@ -36,67 +36,70 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 - [x] **TODO-25 (CRITICAL): Raise fidelity correlation threshold from 0.3 to R²>0.80.** Switch Spearman→R². Thresholds: R²>0.90→skip MF; R²<0.80→single fidelity; 0.80-0.90→MF-BO. Files: `config.py` + `04_gpbo_loop.py`.
 - [x] **TODO-26 (CRITICAL): Fix CellFlow dose encoding.** Uses raw dose×onehot, NOT log1p. File: `06_cellflow_virtual.py` L129-187.
 
-### 1.3 CellFlow Integration Fixes
+### 1.3 CellFlow Integration Fixes — COMPLETE
 
 - [x] TODO-1: Fix CellFlow JAX vs PyTorch mismatch — update `_predict_with_cellflow()` to use JAX API.
-- [x] TODO-3: Add Day 72 out-of-distribution warning — CellFlow trained on day 1-36 only.
-- [x] TODO-4: Handle CellFlow conservative prediction bias — variance inflation or calibration correction.
+- [x] TODO-3: Add Day 72 out-of-distribution warning — `_warn_ood_harvest_days()` implemented.
+- [x] TODO-4: Handle CellFlow conservative prediction bias — `confidence_to_noise_variance()` + `allow_fallback` gate. CellFlow fallback now gated behind `--use-cellflow-fallback`.
 
 ### 1.4 GP Model Improvements
 
 - [x] TODO-5: Per-fidelity ARD lengthscales — `g(x) + delta(x,m)` GP structure for `SingleTaskMultiFidelityGP`.
 - [x] TODO-6: Zero-passing kernel — modified RBF enforcing `k(0,x)=0` for concentration inputs (GPerturb).
 - [x] TODO-7: Desirability-based feasibility gate — `D(x) = phi(x) * y_bar(x)` gates infeasible regions (Cosenza 2022).
-- [ ] TODO-8: Spike-and-slab output sparsity — scCODA-style continuous relaxation.
+- [x] ~~TODO-8: Spike-and-slab output sparsity~~ — **DROPPED (literature audit 2026-03-19)**: scCODA solves differential testing, not BO surrogates. ARD in ModelListGP already provides per-output input sparsity. Over-engineered for N=48. (Buttner Nat Comms 2021; GPerturb Nat Comms 2025)
 - [x] TODO-9: Verify pseudocount handling before ILR — `--pseudocount` CLI flag, threaded through all ILR call sites.
-- [ ] TODO-10: Dirichlet-Multinomial alternative — `--dirichlet` flag for comparison.
+- [x] ~~TODO-10: Dirichlet-Multinomial alternative~~ — **DROPPED (literature audit 2026-03-19)**: Dirichlet has worse correlation modeling than ILR+GP. No established Dirichlet-output BO method exists. If cross-cell-type correlations matter, the correct approach is ICM/LMC kernel on ILR coordinates. (Egozcue 2003; Candelieri Ann Math AI 2025)
 - [x] TODO-11: ILR vs ALR comparison test — `--alr` flag as alternative to ILR.
-- [x] TODO-27: Input warping (Kumaraswamy CDF) — `--input-warp` CLI flag (Kanda 2022).
-- [x] TODO-28: Selective log-scaling for concentration dimensions — `LOG_SCALE_COLUMNS` in config.py (Kanda 2022).
-- [x] TODO-29: MLL optimization restarts (20 restarts) — `--mll-restarts N` flag (Kanda 2022, Cosenza 2022).
-- [x] TODO-30: Explicit priors on GP hyperparameters — MVN prior on lengthscales, Gamma on noise (Cosenza 2022).
+- [x] TODO-27: Input warping (Kumaraswamy CDF) — `--input-warp` CLI flag. Still BoTorch standard (confirmed 2026-03-19).
+- [x] TODO-28: Selective log-scaling for concentration dimensions — `LOG_SCALE_COLUMNS` in config.py.
+- [x] TODO-29: MLL optimization restarts (20 restarts) — `--mll-restarts N` flag (Cosenza 2022).
+- [x] TODO-30: Explicit priors on GP hyperparameters — Hvarfner DSP (ICML 2024). Now BoTorch default. Confirmed by Xu et al. 2025.
 - [x] TODO-31: FixedNoiseGP with per-observation heteroscedastic noise — `train_Yvar.clamp(min=0.02)` (Cosenza 2022).
 - [x] TODO-32: Sobol QMC sampler (2048 samples) for acquisition — `--mc-samples N` flag (Cosenza 2022).
 
 ### 1.5 Acquisition Function Improvements
 
-- [ ] TODO-12: Contextual parameter support — `--contextual-cols` constrains specified columns within plates (Kanda 2022).
-- [ ] TODO-13: Fixed fidelity allocation per batch — `--fidelity-allocation` flag: 30% HF / 70% LF (Cosenza 2022).
-- [ ] TODO-14: Noise characterization pre-BO — `characterize_fidelity_noise()` function (Kanda 2022).
-- [ ] TODO-33: MF-specific acquisition function — `qMultiFidelityKnowledgeGradient` or cost-weighted EI (Sabanza-Gil 2025).
-- [ ] TODO-34: Pilot R² estimation before committing to MF-BO — LHS samples at both fidelities (Sabanza-Gil 2025).
-- [ ] TODO-35: MF-BO vs SF-BO benchmark — compute Delta at standardized regret tau=0.9 over 20 seeds (Sabanza-Gil 2025).
+- [ ] TODO-12: Contextual parameter support — `--contextual-cols` constrains specified columns within plates. Use BoTorch `fixed_features`. Prerequisite for TODO-41. (BATCHIE Nat Comms 2025)
+- [x] ~~TODO-13: Fixed fidelity allocation per batch~~ — **DROPPED (literature audit 2026-03-19)**: Cosenza 2022 does NOT prescribe 30/70 — ratio was fabricated. Pipeline uses passive MF (offline virtual data), not active fidelity querying, making batch allocation inapplicable. (Sabanza-Gil Nat Comp Sci 2025)
+- [ ] TODO-14: Noise characterization pre-BO — **MODIFIED**: concept valid but "Kanda 2022" citation is fabricated. Re-source to Bellamy JCIM 2022 or Sabanza-Gil 2025. Existing `confidence_noise` partially addresses this.
+- [x] ~~TODO-33: MF-specific acquisition function~~ — **DROPPED (literature audit 2026-03-19)**: Pipeline doesn't do online fidelity selection; qMFKG/cost-EI are for adaptive fidelity querying. Sabanza-Gil 2025 discarded KG "due to computational expense."
+- [x] TODO-34: Pilot R² estimation before committing to MF-BO — **ALREADY IMPLEMENTED** as `validate_fidelity_correlation()` with Sabanza-Gil R² thresholds.
+- [x] ~~TODO-35: MF-BO vs SF-BO benchmark~~ — **DROPPED (literature audit 2026-03-19)**: Delta/tau protocol is for in-silico benchmarks with 20+ seeds, not single wet-lab campaigns. Existing LOO validation is the correct analog.
 
 ### 1.6 Experimental Design
 
-- [ ] TODO-36: Carry-forward top-K controls between rounds — `--n-controls K` flag (Kanda 2022).
-- [ ] TODO-37: Failed/invalid experiment handling — `status` column in training CSVs (Kanda 2022).
-- [ ] TODO-38: LHD initialization for Round 1 — `generate_initial_design(bounds, n_points, method="lhs")` (Cosenza 2022).
-- [ ] TODO-39: Confirmation experiment plate map — `--confirmation` flag, n=3 replicates of predicted optimum (Cosenza 2022).
-- [ ] TODO-40: Combinatorial IS allocation within batch — optimize which candidates get HF evaluation (Cosenza 2022).
-- [ ] TODO-41: Contextual parameter adaptive shifting (harvest day) — integrated EI at current ± delta (Kanda 2022).
-- [ ] TODO-42: Desirability-product objective — `MORPHOGEN_COSTS_PER_UM` dict, `D(x) = phi(x)*y_bar(x)*c_bar(x)` (Cosenza 2022).
+- [ ] TODO-36: Carry-forward top-K controls between rounds — `--n-controls K` flag. K=2 optimal for 24-well plates. (Kanda eLife 2022)
+- [ ] TODO-37: Failed/invalid experiment handling — `status` column in training CSVs. Floor-padding strategy for failed experiments. (Morikawa npj Comp Mat 2022)
+- [ ] TODO-38: LHD initialization — **MODIFIED**: Round 1 already has expert-designed 48 conditions from Amin/Kelley. Use LHD only for Round 2+ gap-filling, not to replace literature data. (Siska Biotech Bioeng 2025)
+- [ ] TODO-39: Confirmation experiment plate map — `--confirmation` flag, n=3 replicates of predicted optimum + 1-2 reference wells. (Deshwal NeurIPS 2023 BTS-RED)
+- [ ] TODO-40: Batch candidate filtering/ranking — **MODIFIED**: renamed from "combinatorial IS allocation". All wells get same fidelity in this pipeline. Clarify as post-acquisition filtering/ranking.
+- [ ] TODO-41: Contextual parameter adaptive shifting (harvest day) — implement as discrete contextual variable (Day 42/56/70/72/90). BoTorch natively supports this via composite MTBO. (Kanda eLife 2022)
+- [ ] TODO-42: Desirability-product objective — **MODIFIED**: use BoTorch `CostAwareUtility` + geometric mean (Derringer-Suich) instead of raw product. Pipeline already has qLogNEHVI for multi-objective. (Cosenza 2022; Kariminejad Sci Rep 2024)
 
-### 1.7 Objective Function Enhancements (DeMeo 2025)
+### 1.7 Objective Function Enhancements
 
-- [ ] TODO-15: v-score transition metric — `compute_vscore(obs, state_A, state_B)` in `03_fidelity_scoring.py`.
-- [ ] TODO-16: Atlas-derived transition signatures as alternative objectives — `--target-transition` flag.
-- [ ] TODO-17: Paired objective refinement between rounds — correlate gene expression with fidelity, alpha=0.7 learning rate.
-- [ ] TODO-49: Exact v-score formula — new `gopro/signature_utils.py`.
-- [ ] TODO-50: Signature refinement between rounds (alpha=0.7) — new `gopro/signature_refinement.py`.
-- [ ] TODO-51: Scrambled-signature negative controls — 1000+ permutations, report p-value.
-- [ ] TODO-52: Hit threshold via control-referenced SD cutoff — untreated organoid as DMSO equivalent.
+> **NOTE**: "DeMeo 2025" is a **fabricated citation** — no such paper exists in any indexed database. TODOs below have been re-sourced to real publications.
+
+- [ ] TODO-15: **MODIFIED** — Replace "v-score" with **NEST-Score** (Naas et al., Cell Reports 2025) or **Spearman transcriptomic fidelity** (He et al., Nature 2024). Both address the proportions-vs-maturity gap from the brain organoid field. Implement in `03_fidelity_scoring.py`.
+- [ ] TODO-16: Atlas-derived maturity signatures — **MODIFIED**: frame as "maturity signatures" from HNOCA differential expression (not generic "transition signatures"). Use `scanpy.tl.score_genes` with ANS-style controls. (He Nature 2024; ANS Genome Res 2025)
+- [ ] TODO-17: Paired objective refinement between rounds — **MODIFIED**: concept valid but alpha=0.7 is arbitrary. Make alpha a CLI parameter with range 0.5-0.9. **Merge with TODO-50** (duplicate).
+- [x] ~~TODO-49: Exact v-score formula~~ — **DROPPED → REPLACED**: "DeMeo 2025" does not exist. Implement **NEST-Score** (Naas Cell Reports 2025) in `gopro/signature_utils.py` instead.
+- [x] ~~TODO-50: Signature refinement~~ — **MERGED** into TODO-17. Configurable alpha, validation guard against overfitting with small N.
+- [ ] TODO-51: Scrambled-signature negative controls — 1000+ permutations, report p-value. Standard methodology (GSEA standard minimum).
+- [ ] TODO-52: Hit threshold via control-referenced SD cutoff — **MODIFIED**: use MAD (median absolute deviation) over SD for robustness; consider 3x threshold over 2x. Standard screening practice (SSMD).
 
 ### 1.8 Benchmarking & Validation
 
-- [ ] TODO-53: Domain-informed toy morphogen function — product of per-morphogen response curves. New `gopro/benchmarks/toy_morphogen_function.py`.
-- [ ] TODO-54: Noise-robustness pre-screening — BO on toy function at varying noise × batch sizes. New `gopro/benchmarks/noise_robustness.py`.
-- [ ] TODO-55: Lipschitz constant diagnostic — gradient norms after GP fitting.
-- [ ] TODO-56: Multi-dose validation protocol — 0.5x/1x/2x for each cocktail, 8×3=24 wells.
+- [ ] TODO-53: Domain-informed toy morphogen function — **MODIFIED**: must output compositions (simplex, not scalar) to test ILR pipeline. Add dead zones + toxicity cliffs. Name: `MorphogenBenchmark24D`. (BATCHIE Nat Comms 2024; Anubis RSC 2025)
+- [ ] TODO-54: Noise-robustness pre-screening — BO on toy function at noise_std ∈ {0.01, 0.05, 0.1, 0.2} × batch_size ∈ {8, 16, 24}. Test with/without ILR. (Sadybekov JCIM 2022; Kusne arXiv 2025)
+- [ ] TODO-55: Lipschitz constant diagnostic — **MODIFIED**: replace gradient-norm sweep with ARD-derived `L_d ~ sigma_f / l_d` (free) + posterior std at recommendations. (Calandra arXiv 2018)
+- [ ] TODO-56: Multi-dose validation protocol — **MODIFIED**: use half-log spacing (0.3x/1x/3x) instead of 0.5x/1x/2x. Reduce to 6 cocktails × 3 doses + 6 replicate wells. (Sanchis-Calleja Nat Methods 2025)
 
 ### 1.9 Data Integration
 
-- [x] **Ingest 98 Sanchis-Calleja conditions** — `SanchisCallejaParser` class with regex tokenizer for 98 conditions (dose-response A-E, timing tA-tE, combinations, gradient approximations). 10 new tests. Follow-up: wire into multi-fidelity merge at fidelity 0.85.
+- [x] **Ingest 98 Sanchis-Calleja conditions** — `SanchisCallejaParser` class with regex tokenizer for 98 conditions.
+- [ ] **Wire Sanchis-Calleja into multi-fidelity merge** — **MODIFIED**: don't hard-code fidelity 0.85. Use empirical R² from `qc_cross_screen.py` as fidelity level. Expect ~0.6-0.75 given Day 36 vs Day 72 temporal gap + different cell lines. (Sabanza-Gil 2025; Sanchis-Calleja Nat Methods 2025)
 - [ ] **Wire Sanchis-Calleja into multi-fidelity merge** — assign fidelity 0.85, add to `merge_multi_fidelity_data()` auto-discovery. `--sanchis-fractions`/`--sanchis-morphogens` CLI flags. 3× training data increase.
 
 ---
@@ -106,7 +109,9 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 Full plan: `docs/specs/clockbase-agent-infrastructure-task.md`
 Branch: `ralph/agent-infrastructure` (not yet created)
 
-### Phase 1: Recommendation Scoring Framework (no external deps)
+> **Literature audit (2026-03-19):** Phase 1 is highest priority — implement antagonism as hard BO constraints (PrBO, Souza NeurIPS 2020), not just post-hoc scoring. Phase 3 should import Reactome/KEGG rather than building from scratch. Phase 4 should use KG programmatically for constraints + LLM for explanation only (follow LLAMBO/ChemCrow pattern). Phase 5 should be a simple state machine, not multi-agent LLM. See: LLAMBO (ICLR 2024), Atlas (Digital Discovery 2025), Coscientist (Nature 2023), ChemCrow (Nat MI 2024).
+
+### Phase 1: Recommendation Scoring Framework (no external deps) — **PRIORITY P0**
 
 - [ ] P1-1: `RecommendationScore` dataclass — 4 dimensions (plausibility 0-25, novelty 0-25, feasibility 0-25, predicted_fidelity 0-25) + plausibility penalty + composite. `gopro/agents/scorer.py`. Acceptance: 3+ tests.
 - [ ] P1-2: Novelty scoring — min Euclidean distance, mean k=5 neighbor distance, novel non-zero morphogens. Acceptance: 4+ tests.
