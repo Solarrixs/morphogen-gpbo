@@ -68,6 +68,7 @@ def prepare_query_for_scpoli(
     query: sc.AnnData,
     ref: sc.AnnData,
     batch_column: str = "sample",
+    min_shared_genes: int = 1000,
 ) -> sc.AnnData:
     """Prepare query AnnData for scPoli mapping.
 
@@ -99,6 +100,13 @@ def prepare_query_for_scpoli(
     # Align query to reference var_names (scPoli expects exact same genes)
     shared_genes = query.var_names.intersection(ref.var_names)
     logger.info("Shared genes with reference: %d / %d", len(shared_genes), ref.n_vars)
+
+    if len(shared_genes) < min_shared_genes:
+        raise ValueError(
+            f"Insufficient gene overlap with reference: {len(shared_genes)} shared genes "
+            f"(minimum {min_shared_genes} required). Check that query var_names use the same "
+            f"gene symbol format as the reference."
+        )
 
     # Efficient reindexing: build a permutation matrix to map query genes → ref genes
     # Start with query counts

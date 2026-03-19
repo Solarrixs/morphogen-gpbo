@@ -58,12 +58,12 @@ class TestPrepareQueryForScpoli:
 
     def test_shared_genes_subset(self, query_adata, ref_adata):
         """Output should have same var_names as reference."""
-        result = step02.prepare_query_for_scpoli(query_adata, ref_adata)
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, min_shared_genes=0)
         assert list(result.var_names) == list(ref_adata.var_names)
 
     def test_batch_column_created(self, query_adata, ref_adata):
         """Batch column should be created from sample column."""
-        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, batch_column="sample")
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, batch_column="sample", min_shared_genes=0)
         assert "batch" in result.obs.columns
         assert result.obs["batch"].nunique() == 3
 
@@ -74,12 +74,12 @@ class TestPrepareQueryForScpoli:
             var=pd.DataFrame(index=["GeneA", "GeneB", "GeneX"]),
             obs=pd.DataFrame(index=[f"c{i}" for i in range(5)]),
         )
-        result = step02.prepare_query_for_scpoli(query, ref_adata, batch_column="nonexistent")
+        result = step02.prepare_query_for_scpoli(query, ref_adata, batch_column="nonexistent", min_shared_genes=0)
         assert (result.obs["batch"] == "query").all()
 
     def test_scpoli_label_cols_added(self, query_adata, ref_adata):
         """scPoli placeholder label columns should be added."""
-        result = step02.prepare_query_for_scpoli(query_adata, ref_adata)
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, min_shared_genes=0)
         for col in ["snapseed_pca_rss_level_1", "snapseed_pca_rss_level_12",
                      "snapseed_pca_rss_level_123"]:
             assert col in result.obs.columns
@@ -88,7 +88,7 @@ class TestPrepareQueryForScpoli:
     def test_obsm_varm_cleared(self, query_adata, ref_adata):
         """obsm and varm should be cleared."""
         query_adata.obsm["X_pca"] = np.zeros((20, 10))
-        result = step02.prepare_query_for_scpoli(query_adata, ref_adata)
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, min_shared_genes=0)
         assert len(result.obsm) == 0
         assert len(result.varm) == 0
 
@@ -103,12 +103,12 @@ class TestPrepareQueryForScpoli:
                              index=[f"c{i}" for i in range(5)]),
         )
         query.layers["counts"] = query.X.copy()
-        result = step02.prepare_query_for_scpoli(query, ref_adata)
+        result = step02.prepare_query_for_scpoli(query, ref_adata, min_shared_genes=0)
         assert list(result.var_names) == list(ref_adata.var_names)
 
     def test_zero_filled_for_missing_genes(self, query_adata, ref_adata):
         """Genes not in query should be zero-filled in output."""
-        result = step02.prepare_query_for_scpoli(query_adata, ref_adata)
+        result = step02.prepare_query_for_scpoli(query_adata, ref_adata, min_shared_genes=0)
         X = result.X.toarray() if sp.issparse(result.X) else result.X
         # GeneD and GeneE are not in query, should be zero
         gene_d_idx = list(result.var_names).index("GeneD")
@@ -124,8 +124,20 @@ class TestPrepareQueryForScpoli:
             obs=pd.DataFrame({"sample": ["s1"] * 5},
                              index=[f"c{i}" for i in range(5)]),
         )
-        result = step02.prepare_query_for_scpoli(query, ref_adata)
+        result = step02.prepare_query_for_scpoli(query, ref_adata, min_shared_genes=0)
         assert result.shape == (5, 5)
+
+    def test_insufficient_gene_overlap_raises(self, ref_adata):
+        """Should raise ValueError when shared genes < min_shared_genes."""
+        query = ad.AnnData(
+            X=sp.csr_matrix(np.ones((5, 3))),
+            var=pd.DataFrame(index=["GeneA", "GeneC", "GeneX"]),
+            obs=pd.DataFrame({"sample": ["s1"] * 5},
+                             index=[f"c{i}" for i in range(5)]),
+        )
+        import pytest
+        with pytest.raises(ValueError, match="Insufficient gene overlap"):
+            step02.prepare_query_for_scpoli(query, ref_adata, min_shared_genes=1000)
 
 
 # =============================================================================
@@ -1027,7 +1039,7 @@ class TestPrepareQueryGeneSymbolColumn:
             }, index=["ENS1", "ENS2", "ENS3"]),
             obs=pd.DataFrame({"sample": ["s1"] * 4}, index=[f"q{i}" for i in range(4)]),
         )
-        result = step02.prepare_query_for_scpoli(query, ref)
+        result = step02.prepare_query_for_scpoli(query, ref, min_shared_genes=0)
         assert list(result.var_names) == ["GA", "GB", "GC"]
 
 

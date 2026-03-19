@@ -148,6 +148,14 @@ def validate_training_csvs(
             f"Fractions CSV contains {n_nan} NaN values"
         )
 
+    # Check non-negative values (required for ILR/ALR log transforms)
+    if (fractions.values < 0).any():
+        n_neg = int((fractions.values < 0).sum())
+        raise ValidationError(
+            f"Fractions CSV contains {n_neg} negative values. "
+            f"Cell type fractions must be non-negative."
+        )
+
     # Check row sums
     row_sums = fractions.sum(axis=1)
     bad_rows = row_sums[~np.isclose(row_sums, 1.0, atol=0.05)]

@@ -1,29 +1,29 @@
 # Core scientific computing
-numpy
-pandas
-scipy
-scikit-learn
+numpy>=2,<3
+pandas>=2,<3
+scipy>=1,<2
+scikit-learn>=1,<2
 
 # Single-cell analysis
-scanpy
-anndata
+scanpy>=1,<2
+anndata>=0.12,<0.13
 
 # scArches + HNOCA mapping (install after core packages)
-scvi-tools
-scarches
-hnoca
+scvi-tools>=0.20,<0.21
+scarches>=0.6,<0.7
+hnoca>=0.2,<0.3
 
 # GP-BO
-botorch
-gpytorch
-torch
+botorch>=0.17,<0.18
+gpytorch>=1,<2
+torch>=2,<3
 
 # Configuration
-pyyaml
+pyyaml>=6,<7
 
 # Testing
-pytest
-hypothesis
+pytest>=9,<10
+hypothesis>=6,<7
 
 # CellRank 2 + moscot (Phase 4: temporal prediction)
 cellrank
@@ -33,6 +33,6 @@ moscot
 # cellflow-tools
 
 # Visualization
-matplotlib
-seaborn
-plotly
+matplotlib>=3,<4
+seaborn>=0.13,<0.14
+plotly>=6,<7
