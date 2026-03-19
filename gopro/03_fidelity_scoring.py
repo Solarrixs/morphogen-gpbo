@@ -690,6 +690,7 @@ def score_all_conditions(
     label_map: Optional[dict[str, str]] = None,
     target_profile: Optional[pd.Series] = None,
     entropy_center: Optional[float] = None,
+    control_condition: Optional[str] = None,
 ) -> pd.DataFrame:
     """Compute full fidelity report for all conditions in the query data.
 
@@ -720,6 +721,9 @@ def score_all_conditions(
         target_profile: Optional target cell type composition profile.
             When provided, RSS is computed against this single profile instead
             of searching all reference regions.
+        control_condition: Optional name of an untreated/baseline condition.
+            When provided, an ``is_hit`` boolean column is added to the report
+            using :func:`compute_hit_threshold` (3-MAD above control).
 
     Returns:
         DataFrame with one row per condition, sorted by composite_fidelity
@@ -860,7 +864,69 @@ def score_all_conditions(
         .sort_values("composite_fidelity", ascending=False)
     )
 
+    if control_condition is not None:
+        hit_info = compute_hit_threshold(report, control_condition)
+        report["is_hit"] = report.index.isin(hit_info["hit_conditions"])
+        logger.info(
+            "Hit calling: %d/%d conditions exceed threshold %.4f (control=%s)",
+            hit_info["n_hits"], len(report), hit_info["threshold"], control_condition,
+        )
+
     return report
+
+
+def compute_hit_threshold(
+    report: pd.DataFrame,
+    control_condition: str,
+    score_col: str = "composite_fidelity",
+    n_mad: float = 3.0,
+) -> dict:
+    """Compute hit threshold from a control/untreated baseline condition.
+
+    Uses MAD (median absolute deviation) for robustness to outliers.
+    A condition is a "hit" if its score exceeds control_median + n_mad * MAD.
+
+    Args:
+        report: Per-condition fidelity report (from score_all_conditions).
+        control_condition: Name of the untreated/baseline condition.
+        score_col: Column to threshold on.
+        n_mad: Number of MADs above control median for hit calling.
+
+    Returns:
+        Dict with keys: control_median, mad, threshold, n_hits, hit_conditions.
+
+    Raises:
+        KeyError: If control_condition is not found in the report index.
+    """
+    if control_condition not in report.index:
+        raise KeyError(
+            f"Control condition '{control_condition}' not found in report. "
+            f"Available conditions: {list(report.index)}"
+        )
+
+    control_score = float(report.loc[control_condition, score_col])
+    scores = report[score_col].dropna()
+
+    # MAD with consistency constant (1.4826) for normality equivalence
+    median_scores = float(scores.median())
+    mad = float(np.median(np.abs(scores - median_scores))) * 1.4826
+
+    threshold = control_score + n_mad * mad
+    hit_mask = scores > threshold
+    hit_conditions = list(scores[hit_mask].index)
+
+    logger.info(
+        "Hit threshold: control=%s (%.4f), MAD=%.4f, threshold=%.4f, hits=%d/%d",
+        control_condition, control_score, mad, threshold, len(hit_conditions), len(scores),
+    )
+
+    return {
+        "control_median": control_score,
+        "mad": mad,
+        "threshold": threshold,
+        "n_hits": len(hit_conditions),
+        "hit_conditions": hit_conditions,
+    }
 
 
 def assign_cell_level_fidelity(

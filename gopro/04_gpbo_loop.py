@@ -1443,11 +1443,32 @@ def build_training_set(
         X: (N_conditions, D_morphogens + 1_time + 1_fidelity)
         Y: (N_conditions, M_cell_types)
     """
+    import tempfile as _tempfile
+
     from gopro.validation import validate_training_csvs
-    validate_training_csvs(fractions_csv, morphogen_csv)
 
     Y = pd.read_csv(str(fractions_csv), index_col=0)
     X = pd.read_csv(str(morphogen_csv), index_col=0)
+
+    # Filter by status column if present (TODO-37: failed/invalid experiment handling)
+    if "status" in Y.columns:
+        before = len(Y)
+        Y = Y.copy()
+        mask = Y["status"].str.strip().str.lower().isin({"valid", "success"})
+        Y = Y.loc[mask]
+        Y = Y.drop(columns=["status"])
+        filtered = before - len(Y)
+        if filtered > 0:
+            logger.info(
+                "Filtered %d/%d rows with non-valid status from %s",
+                filtered, before, fractions_csv,
+            )
+
+    # Validate after status filtering -- validator reads from file, so write
+    # the (potentially filtered) fractions to a temp CSV for validation.
+    with _tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as _tmp:
+        Y.to_csv(_tmp.name)
+        validate_training_csvs(_tmp.name, morphogen_csv)
 
     # Align indices
     common = Y.index.intersection(X.index)
@@ -2588,6 +2609,9 @@ def recommend_next_experiments(
     n_duplicates: int = 0,
     mc_samples: int = 512,
     desirability_gate: bool = False,
+    n_controls: int = 0,
+    train_X_df: Optional[pd.DataFrame] = None,
+    train_Y_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Use acquisition function to recommend next experiments.
 
@@ -2622,9 +2646,18 @@ def recommend_next_experiments(
             (Cosenza 2022). Generates 2x candidates, scores each with
             D(x) = phi(x) * acq(x) where phi(x) penalises antagonist pathway
             conflicts, then keeps the top N by desirability-weighted acquisition.
+        n_controls: Number of top-performing conditions from the training data
+            to carry forward as controls (Kanda eLife 2022). These are selected
+            by highest mean Y value (predicted fidelity) and reserved from the
+            ``n_recommendations`` budget. Set to 0 to disable. (default: 0)
+        train_X_df: Training X as a pandas DataFrame (needed when n_controls > 0
+            to recover condition indices and morphogen values).
+        train_Y_df: Training Y as a pandas DataFrame (needed when n_controls > 0
+            to rank conditions by mean Y).
 
     Returns:
         DataFrame with recommended morphogen concentrations and predictions.
+        When ``n_controls > 0``, includes an ``is_control`` boolean column.
     """
     from botorch.optim import optimize_acqf
     from botorch.acquisition import qLogExpectedImprovement
@@ -2768,11 +2801,36 @@ def recommend_next_experiments(
                 sampler=sampler,
             )
 
-    # Reserve slots for QC duplicates
-    n_unique = n_recommendations - n_duplicates
+    # Select carry-forward controls (Kanda eLife 2022)
+    control_df = None
+    if n_controls > 0:
+        if train_X_df is None or train_Y_df is None:
+            raise ValueError(
+                "train_X_df and train_Y_df must be provided when n_controls > 0"
+            )
+        if n_controls >= n_recommendations:
+            raise ValueError(
+                f"n_controls ({n_controls}) must be less than "
+                f"n_recommendations ({n_recommendations})"
+            )
+        # Rank conditions by mean Y value (mean predicted fidelity across cell types)
+        mean_y = train_Y_df.mean(axis=1)
+        top_k_idx = mean_y.nlargest(n_controls).index
+        # Build control rows from original training X DataFrame
+        control_df = train_X_df.loc[top_k_idx, :].copy()
+        # Keep only columns matching the recommendation columns
+        control_cols = [c for c in columns if c in control_df.columns]
+        control_df = control_df[control_cols]
+        logger.info(
+            "Carry-forward controls: %d conditions selected (top by mean Y): %s",
+            n_controls, list(top_k_idx),
+        )
+
+    # Reserve slots for QC duplicates and controls
+    n_unique = n_recommendations - n_duplicates - n_controls
     if n_unique < 1:
         raise ValueError(
-            f"n_duplicates ({n_duplicates}) must be less than "
+            f"n_duplicates ({n_duplicates}) + n_controls ({n_controls}) must be less than "
             f"n_recommendations ({n_recommendations})"
         )
 
@@ -2865,6 +2923,22 @@ def recommend_next_experiments(
         else:
             full_phi = filtered_phi
         recommendations["desirability_score"] = full_phi
+
+    # Append carry-forward controls
+    recommendations["is_control"] = False
+    if control_df is not None and len(control_df) > 0:
+        ctrl = control_df.copy()
+        # Add missing columns (predictions, metadata) as NaN for controls
+        for col in recommendations.columns:
+            if col not in ctrl.columns:
+                ctrl[col] = np.nan
+        ctrl["is_control"] = True
+        ctrl["is_qc_duplicate"] = False
+        # Reorder to match recommendations columns
+        ctrl = ctrl[recommendations.columns]
+        recommendations = pd.concat(
+            [recommendations, ctrl], ignore_index=True,
+        )
 
     # Add well labels (A1-D6 for 24-well plate)
     wells = [f"{chr(65 + i // 6)}{i % 6 + 1}" for i in range(n_recommendations)]
@@ -3934,6 +4008,7 @@ def run_gpbo_loop(
     saasbo_warmup: int = 512,
     saasbo_num_samples: int = 256,
     saasbo_thinning: int = 16,
+    n_controls: int = 0,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -4040,6 +4115,9 @@ def run_gpbo_loop(
             Simpler than ILR but introduces asymmetry. Mutually exclusive
             with use_ilr — when use_alr is True, use_ilr is ignored.
             (default: False)
+        n_controls: Number of top-performing conditions from the training data
+            to carry forward as controls (Kanda eLife 2022). Reserved from the
+            ``n_recommendations`` budget. Set to 0 to disable. (default: 0)
 
     Returns:
         DataFrame of recommended next experiments.
@@ -4384,6 +4462,9 @@ def run_gpbo_loop(
         n_duplicates=n_duplicates,
         mc_samples=mc_samples,
         desirability_gate=desirability_gate,
+        n_controls=n_controls,
+        train_X_df=X_active,
+        train_Y_df=Y,
     )
 
     # Inverse log-scale: convert recommendations back to original µM units
@@ -4538,6 +4619,8 @@ if __name__ == "__main__":
                         help="Number of experiments to recommend (default: 24)")
     parser.add_argument("--n-duplicates", type=int, default=2,
                         help="Number of QC duplicate slots for noise estimation (default: 2)")
+    parser.add_argument("--n-controls", type=int, default=0,
+                        help="Number of top conditions to carry forward as controls (Kanda eLife 2022)")
     parser.add_argument("--round", type=int, default=1,
                         help="Optimization round number (default: 1)")
     parser.add_argument("--no-ilr", action="store_true",
@@ -4875,6 +4958,7 @@ if __name__ == "__main__":
         saasbo_warmup=256 if getattr(args, "saasbo_fast", False) else 512,
         saasbo_num_samples=128 if getattr(args, "saasbo_fast", False) else 256,
         saasbo_thinning=16,
+        n_controls=args.n_controls,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

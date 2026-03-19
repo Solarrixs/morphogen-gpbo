@@ -1697,3 +1697,78 @@ class TestComputeConditionComposition:
         result = step03.compute_condition_composition(obs)
         assert result.loc["A", "X"] == pytest.approx(0.7)
         assert result.loc["A", "Y"] == pytest.approx(0.3)
+
+
+# =============================================================================
+# 03_fidelity_scoring.py — compute_hit_threshold
+# =============================================================================
+
+class TestComputeHitThreshold:
+    """Tests for compute_hit_threshold."""
+
+    @pytest.fixture
+    def report_with_spread(self):
+        """Report where one condition clearly exceeds the control + 3*MAD."""
+        return pd.DataFrame({
+            "composite_fidelity": [0.3, 0.32, 0.31, 0.29, 0.9],
+        }, index=["control", "cond_A", "cond_B", "cond_C", "cond_D"])
+
+    @pytest.fixture
+    def report_uniform(self):
+        """Report where all conditions are very similar to control."""
+        return pd.DataFrame({
+            "composite_fidelity": [0.50, 0.51, 0.49, 0.50, 0.52],
+        }, index=["control", "cond_A", "cond_B", "cond_C", "cond_D"])
+
+    def test_basic_hit_calling(self, report_with_spread):
+        """Conditions above threshold should be identified as hits."""
+        result = step03.compute_hit_threshold(report_with_spread, "control")
+        assert result["control_median"] == pytest.approx(0.3)
+        assert result["mad"] > 0
+        assert result["threshold"] > 0.3
+        assert "cond_D" in result["hit_conditions"]
+        assert result["n_hits"] >= 1
+
+    def test_no_hits_when_all_similar(self, report_uniform):
+        """When all conditions are similar to control, no hits."""
+        result = step03.compute_hit_threshold(report_uniform, "control")
+        assert result["n_hits"] == 0
+        assert result["hit_conditions"] == []
+
+    def test_missing_control_raises(self, report_with_spread):
+        """Missing control condition should raise KeyError."""
+        with pytest.raises(KeyError, match="not_a_condition"):
+            step03.compute_hit_threshold(report_with_spread, "not_a_condition")
+
+    def test_custom_n_mad(self, report_with_spread):
+        """Lower n_mad should produce more hits."""
+        strict = step03.compute_hit_threshold(report_with_spread, "control", n_mad=5.0)
+        lenient = step03.compute_hit_threshold(report_with_spread, "control", n_mad=1.0)
+        assert lenient["n_hits"] >= strict["n_hits"]
+        assert lenient["threshold"] < strict["threshold"]
+
+    def test_mad_scaling_constant(self, report_with_spread):
+        """MAD should use 1.4826 consistency constant."""
+        scores = report_with_spread["composite_fidelity"]
+        median_val = scores.median()
+        expected_mad = float(np.median(np.abs(scores - median_val))) * 1.4826
+        result = step03.compute_hit_threshold(report_with_spread, "control")
+        assert result["mad"] == pytest.approx(expected_mad)
+
+    def test_is_hit_column_in_score_all_conditions(self):
+        """score_all_conditions with control_condition should add is_hit column."""
+        from gopro.config import ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_LEVEL_3, ANNOT_REGION
+        n = 30
+        obs = pd.DataFrame({
+            "condition": ["control"] * 15 + ["treated"] * 15,
+            f"predicted_{ANNOT_LEVEL_1}": ["Neuron"] * 30,
+            f"predicted_{ANNOT_LEVEL_2}": ["Cortical EN"] * 30,
+            f"predicted_{ANNOT_LEVEL_3}": ["L2-3 CPN"] * 30,
+            f"predicted_{ANNOT_REGION}": ["Dorsal telencephalon"] * 30,
+        }, index=[f"c{i}" for i in range(n)])
+        adata = ad.AnnData(X=sp.csr_matrix((n, 5)), obs=obs)
+        braun = pd.DataFrame({"Neuron": [0.7]}, index=["Dorsal"])
+        report = step03.score_all_conditions(
+            adata, braun, control_condition="control",
+        )
+        assert "is_hit" in report.columns

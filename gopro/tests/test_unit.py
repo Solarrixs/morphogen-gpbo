@@ -191,6 +191,73 @@ class TestBuildTrainingSet:
         )
         assert len(X_out) == 1
 
+    def test_status_column_filters_failed(self, tmp_path):
+        """Rows with status != valid/success are filtered out (TODO-37)."""
+        Y = pd.DataFrame(
+            {
+                "ct_A": [0.6, 0.3, 0.5],
+                "ct_B": [0.4, 0.7, 0.5],
+                "status": ["valid", "failed", "invalid"],
+            },
+            index=["cond_1", "cond_2", "cond_3"],
+        )
+        X = pd.DataFrame(
+            {"CHIR99021_uM": [1.5, 3.0, 2.0], "SAG_uM": [0.25, 1.0, 0.5]},
+            index=["cond_1", "cond_2", "cond_3"],
+        )
+        Y.to_csv(tmp_path / "Y.csv")
+        X.to_csv(tmp_path / "X.csv")
+        X_out, Y_out = step04.build_training_set(
+            tmp_path / "Y.csv", tmp_path / "X.csv"
+        )
+        assert len(X_out) == 1
+        assert len(Y_out) == 1
+        assert "cond_1" in X_out.index
+        assert "cond_2" not in X_out.index
+        assert "cond_3" not in X_out.index
+        # status column should not leak into output
+        assert "status" not in Y_out.columns
+
+    def test_status_column_accepts_success(self, tmp_path):
+        """Rows with status 'success' (case-insensitive) are kept."""
+        Y = pd.DataFrame(
+            {
+                "ct_A": [0.6, 0.3],
+                "ct_B": [0.4, 0.7],
+                "status": ["Valid", "SUCCESS"],
+            },
+            index=["cond_1", "cond_2"],
+        )
+        X = pd.DataFrame(
+            {"CHIR99021_uM": [1.5, 3.0], "SAG_uM": [0.25, 1.0]},
+            index=["cond_1", "cond_2"],
+        )
+        Y.to_csv(tmp_path / "Y.csv")
+        X.to_csv(tmp_path / "X.csv")
+        X_out, Y_out = step04.build_training_set(
+            tmp_path / "Y.csv", tmp_path / "X.csv"
+        )
+        assert len(X_out) == 2
+        assert len(Y_out) == 2
+
+    def test_status_column_optional(self, tmp_path):
+        """When no status column exists, all rows are kept (backward compatible)."""
+        Y = pd.DataFrame(
+            {"ct_A": [0.6, 0.3], "ct_B": [0.4, 0.7]},
+            index=["cond_1", "cond_2"],
+        )
+        X = pd.DataFrame(
+            {"CHIR99021_uM": [1.5, 3.0], "SAG_uM": [0.25, 1.0]},
+            index=["cond_1", "cond_2"],
+        )
+        Y.to_csv(tmp_path / "Y.csv")
+        X.to_csv(tmp_path / "X.csv")
+        X_out, Y_out = step04.build_training_set(
+            tmp_path / "Y.csv", tmp_path / "X.csv"
+        )
+        assert len(X_out) == 2
+        assert len(Y_out) == 2
+
 
 class TestComputeCellTypeFractions:
     """Tests for compute_cell_type_fractions function."""
@@ -993,7 +1060,7 @@ class TestMultiSourceRealData:
                 (tmpdir / "fracs_primary.csv", tmpdir / "morph_primary.csv", 1.0),
                 (tmpdir / "fracs_sag.csv", tmpdir / "morph_sag.csv", 1.0),
             ]
-            X, Y = step04.merge_multi_fidelity_data(sources)
+            X, Y, _noise = step04.merge_multi_fidelity_data(sources)
 
             assert len(X) == 5  # 3 + 2
             assert len(Y) == 5
@@ -4072,6 +4139,135 @@ class TestDesirabilityGate:
         sig = inspect.signature(step04.run_gpbo_loop)
         assert "desirability_gate" in sig.parameters
         assert sig.parameters["desirability_gate"].default is False
+
+
+class TestCarryForwardControls:
+    """Tests for carry-forward top-K controls (TODO-36, Kanda eLife 2022)."""
+
+    _D = 3  # default dimensionality
+
+    def _fit_simple_model(self, n=20, d=_D):
+        """Fit a simple SingleTaskGP for testing."""
+        from botorch.models import SingleTaskGP
+        from botorch.models.transforms import Normalize, Standardize
+        from botorch.fit import fit_gpytorch_mll
+        from gpytorch.mlls import ExactMarginalLogLikelihood
+
+        torch.manual_seed(42)
+        np.random.seed(42)
+        train_X = torch.rand(n, d, dtype=torch.float64)
+        train_Y = (train_X.sum(dim=-1, keepdim=True) +
+                    0.1 * torch.randn(n, 1, dtype=torch.float64))
+        model = SingleTaskGP(
+            train_X, train_Y,
+            input_transform=Normalize(d=d),
+            outcome_transform=Standardize(m=1),
+        )
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+        return model, train_X, train_Y
+
+    def _make_training_dfs(self, n=20, d=_D):
+        """Build training DataFrames matching the tensor data."""
+        np.random.seed(42)
+        columns = [f"x{i}" for i in range(d)]
+        X_df = pd.DataFrame(
+            np.random.rand(n, d), columns=columns,
+            index=[f"cond_{i}" for i in range(n)],
+        )
+        Y_df = pd.DataFrame(
+            np.random.rand(n, 1), columns=["y0"],
+            index=X_df.index,
+        )
+        return X_df, Y_df
+
+    def test_carry_forward_controls_present(self):
+        """With n_controls=2, verify 2 rows have is_control=True."""
+        model, train_X, train_Y = self._fit_simple_model()
+        X_df, Y_df = self._make_training_dfs()
+        columns = list(X_df.columns)
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        recs = step04.recommend_next_experiments(
+            model, train_X, train_Y,
+            bounds=bounds, columns=columns,
+            n_recommendations=6,
+            mc_samples=64,
+            n_controls=2,
+            train_X_df=X_df,
+            train_Y_df=Y_df,
+        )
+        assert "is_control" in recs.columns
+        n_ctrl = int(recs["is_control"].sum())
+        assert n_ctrl == 2, f"Expected 2 controls, got {n_ctrl}"
+        # Total rows = (6 - 2) BO-recommended + 2 controls = 6
+        assert len(recs) == 6
+
+        # Control rows should have morphogen values from training data
+        ctrl_rows = recs[recs["is_control"]]
+        for col in columns:
+            assert ctrl_rows[col].notna().all(), f"Control column {col} has NaN"
+
+    def test_carry_forward_zero_controls(self):
+        """With n_controls=0, verify no rows have is_control=True."""
+        model, train_X, train_Y = self._fit_simple_model()
+        columns = [f"x{i}" for i in range(self._D)]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        recs = step04.recommend_next_experiments(
+            model, train_X, train_Y,
+            bounds=bounds, columns=columns,
+            n_recommendations=4,
+            mc_samples=64,
+            n_controls=0,
+        )
+        assert "is_control" in recs.columns
+        assert recs["is_control"].sum() == 0
+
+    def test_controls_are_top_k_by_mean_y(self):
+        """Controls should be the conditions with highest mean Y."""
+        model, train_X, train_Y = self._fit_simple_model()
+        X_df, Y_df = self._make_training_dfs()
+
+        # Identify expected top-2 conditions
+        mean_y = Y_df.mean(axis=1)
+        expected_top2 = set(mean_y.nlargest(2).index)
+
+        columns = list(X_df.columns)
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        recs = step04.recommend_next_experiments(
+            model, train_X, train_Y,
+            bounds=bounds, columns=columns,
+            n_recommendations=6,
+            mc_samples=64,
+            n_controls=2,
+            train_X_df=X_df,
+            train_Y_df=Y_df,
+        )
+        ctrl_rows = recs[recs["is_control"]]
+        # Verify control morphogen values match training data for top-2 conditions
+        for _, row in ctrl_rows.iterrows():
+            matched = False
+            for cond in expected_top2:
+                if np.allclose(row[columns].values, X_df.loc[cond, columns].values):
+                    matched = True
+                    break
+            assert matched, "Control row does not match any expected top-K condition"
+
+    def test_run_gpbo_loop_accepts_n_controls_param(self):
+        """run_gpbo_loop accepts n_controls parameter."""
+        import inspect
+        sig = inspect.signature(step04.run_gpbo_loop)
+        assert "n_controls" in sig.parameters
+        assert sig.parameters["n_controls"].default == 0
+
+    def test_recommend_accepts_n_controls_param(self):
+        """recommend_next_experiments accepts n_controls parameter."""
+        import inspect
+        sig = inspect.signature(step04.recommend_next_experiments)
+        assert "n_controls" in sig.parameters
+        assert sig.parameters["n_controls"].default == 0
 
 
 class TestCellFlowRelevanceCheck:
