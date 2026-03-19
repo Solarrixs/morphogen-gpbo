@@ -29,3 +29,4 @@
 | 1 | `1a958ab` | working | ralph/fix-review-issues | [ralph-simplify] Fix TVR test: capture baseline before optimization, assert improvement direction |
 | 2 | `0438a12` | working | ralph/fix-review-issues | [ralph-simplify] Reuse scorer.py YAML loader instead of duplicating it |
 | 3 | `574e099` | working | ralph/fix-review-issues | [ralph-3] I-1: Inline _inflate_cellflow_variance — remove importlib from 04_gpbo_loop.py |
+| 4 | `9727e60` | working | ralph/fix-review-issues | [ralph-simplify] Hoist ToyMorphogenFunction out of inner loop, rename arr→vals |
