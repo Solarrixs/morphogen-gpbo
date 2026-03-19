@@ -2,6 +2,13 @@
 
 ## Iteration Log
 
+## Iteration 8 (ralph-8) — 2026-03-19
+- Task: S-5 — Add 12+ unit tests for untested new features
+- Result: pass
+- Files changed: gopro/tests/test_unit.py (+195), task_plan.md (+1/-1)
+- Quality: 17 new tests across 5 test classes covering ZeroPassingKernel phi_mask method, _TVRPosterior properties, confidence_to_noise_variance edge cases, apply_desirability_gate clamping/sorting, and generate_validation_plate well labels. All 388 tests pass (4 pre-existing Gruffi failures excluded).
+- Notes: All 8 code review items from ralph-task.md are now complete. Branch ralph/fix-review-issues is ready for merge.
+
 ## Iteration 7 (ralph-7) — 2026-03-19
 - Task: S-4 — Fix _fidelity_to_task_idx dtype to torch.long
 - Result: pass

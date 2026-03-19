@@ -1,3 +1,4 @@
+| 8 | `b18af48` | working | ralph/fix-review-issues | [ralph-8] S-5: Add 17 unit tests for new features, 388 tests pass |
 | 7 | `71aa6b2` | working | ralph/fix-review-issues | [ralph-7] S-4: Fix _fidelity_to_task_idx dtype to torch.long, 2 tests pass |
 | 6 | `c7f84ab` | working | ralph/fix-review-issues | [ralph-6] S-3: Rename run_noise_sweep → run_random_baseline_noise_sweep, 26 benchmark tests pass |
 | 17 | `b39acc4` | working | ralph/production-readiness-phase2 | [ralph-17] TODO-11: ALR transform as alternative to ILR (--alr), 679 tests |
