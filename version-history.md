@@ -38,3 +38,4 @@
 | 6 | `bc3098c` | working | ralph/fix-review-issues | [ralph-simplify] Fix RNG reuse bug, remove dead accumulation, clean up noise sweep |
 | 7 | `774f663` | working | ralph/fix-review-issues | [ralph-meta-7] Version history update |
 | 8 | `9a8d36b` | working | ralph/fix-review-issues | [ralph-simplify] Reuse _make_top_conditions helper, fix redundant .abs(), rename misleading test |
+| 9 | `e8a39d0` | working | ralph/fix-review-issues | [ralph-simplify] Merge Extra test classes, add _densify helper, seed flaky tests |
