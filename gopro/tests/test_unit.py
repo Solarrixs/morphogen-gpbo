@@ -5388,7 +5388,7 @@ class TestTVRPosteriorProperties:
         """Build a _TVRPosterior for testing."""
         import torch
         mean = torch.randn(5, 3, dtype=torch.double)
-        var = torch.rand(5, 3, dtype=torch.double).abs() + 0.01
+        var = torch.rand(5, 3, dtype=torch.double) + 0.01
         return step04._TVRPosterior(mean, var)
 
     def test_device_and_dtype(self, tvr_posterior):
@@ -5410,8 +5410,8 @@ class TestTVRPosteriorProperties:
         assert samples.shape == (7, 2, 5, 3)
         assert torch.all(torch.isfinite(samples))
 
-    def test_sample_delegates_to_rsample(self, tvr_posterior):
-        """sample() should return same shape as rsample()."""
+    def test_sample_returns_correct_shape(self, tvr_posterior):
+        """sample() returns correct shape."""
         s1 = tvr_posterior.sample(torch.Size([4]))
         assert s1.shape == (4, 5, 3)
 
@@ -5480,19 +5480,13 @@ class TestValidationPlateExtra:
 
     def test_well_labels_unique(self):
         """All well_label values should be unique."""
-        np.random.seed(42)
-        cols = ["WNT_uM", "BMP_uM", "SHH_uM", "RA_uM"]
-        data = np.random.uniform(0.1, 10.0, size=(8, len(cols)))
-        top = pd.DataFrame(data, columns=cols, index=[f"cond_{i}" for i in range(8)])
+        top = TestValidationPlate._make_top_conditions(8)
         plate = step04.generate_validation_plate(top)
         assert plate["well_label"].nunique() == len(plate), "well_labels should be unique"
 
     def test_source_condition_column_present(self):
         """Output should have source_condition column referencing input index."""
-        np.random.seed(42)
-        cols = ["WNT_uM", "BMP_uM"]
-        data = np.random.uniform(0.1, 10.0, size=(8, len(cols)))
-        top = pd.DataFrame(data, columns=cols, index=[f"cond_{i}" for i in range(8)])
+        top = TestValidationPlate._make_top_conditions(8)
         plate = step04.generate_validation_plate(top)
         assert "source_condition" in plate.columns
         # All source conditions should come from top's index
