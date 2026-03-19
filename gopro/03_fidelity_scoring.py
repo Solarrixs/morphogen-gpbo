@@ -62,6 +62,7 @@ from gopro.region_targets import (
     HNOCA_TO_BRAUN_REGION,
     build_hnoca_to_braun_label_map,
 )
+from gopro.signature_utils import compute_nest_score
 
 logger = get_logger(__name__)
 
@@ -863,6 +864,22 @@ def score_all_conditions(
         .set_index("condition")
         .sort_values("composite_fidelity", ascending=False)
     )
+
+    # NEST-Score: transcriptomic fidelity via KNN distance to reference
+    if "mean_knn_dist_to_ref" in obs.columns:
+        try:
+            nest_scores = compute_nest_score(
+                obs, condition_key=condition_key, knn_dist_col="mean_knn_dist_to_ref"
+            )
+            report["nest_score"] = nest_scores.reindex(report.index)
+            logger.info(
+                "NEST scores added: mean=%.3f, min=%.3f, max=%.3f",
+                report["nest_score"].mean(),
+                report["nest_score"].min(),
+                report["nest_score"].max(),
+            )
+        except Exception as exc:
+            logger.warning("Failed to compute NEST scores: %s", exc)
 
     if control_condition is not None:
         hit_info = compute_hit_threshold(report, control_condition)

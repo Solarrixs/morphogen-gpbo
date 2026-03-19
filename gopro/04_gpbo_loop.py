@@ -2483,6 +2483,84 @@ def fit_gp_botorch(
     return model, train_X, train_Y, cell_type_cols
 
 
+def compute_ard_lipschitz(model, columns: list[str]) -> pd.DataFrame:
+    """Compute per-dimension Lipschitz constant estimate from ARD lengthscales.
+
+    For a Matern/RBF kernel with ARD, L_d ~ outputscale / lengthscale_d.
+    Short lengthscales = steep gradients = large Lipschitz constant =
+    the function changes rapidly in that dimension.
+
+    Handles SingleTaskGP, ModelListGP (averages across sub-models), and
+    SAASBO models (uses median lengthscale).
+
+    Args:
+        model: Fitted BoTorch GP model with ARD kernel.
+        columns: Morphogen column names corresponding to input dimensions.
+
+    Returns:
+        DataFrame with columns: dimension, lengthscale, lipschitz_estimate,
+        sorted by lipschitz_estimate descending.
+    """
+    n_dims = len(columns)
+
+    # Extract lengthscales
+    lengthscales = _extract_lengthscales(model, n_dims)
+    if lengthscales is None:
+        raise ValueError("Could not extract lengthscales from model")
+    lengthscales = np.asarray(lengthscales).flatten()
+
+    if len(lengthscales) != n_dims:
+        raise ValueError(
+            f"Lengthscale dimension mismatch: got {len(lengthscales)}, "
+            f"expected {n_dims}"
+        )
+
+    # Extract outputscale(s)
+    outputscales = []
+    if hasattr(model, "models"):
+        # ModelListGP: average outputscale across sub-models
+        for sub_model in model.models:
+            covar = getattr(sub_model, "covar_module", None)
+            if covar is not None and hasattr(covar, "outputscale"):
+                outputscales.append(
+                    covar.outputscale.detach().cpu().item()
+                )
+    else:
+        covar = getattr(model, "covar_module", None)
+        if covar is not None and hasattr(covar, "outputscale"):
+            outputscales.append(covar.outputscale.detach().cpu().item())
+
+    if outputscales:
+        outputscale = float(np.mean(outputscales))
+    else:
+        # Fallback: assume outputscale = 1.0 (e.g. SAASBO without explicit outputscale)
+        outputscale = 1.0
+        logger.warning(
+            "Could not extract outputscale from model; defaulting to 1.0"
+        )
+
+    # Compute Lipschitz estimate per dimension
+    lipschitz = outputscale / np.clip(lengthscales, 1e-10, None)
+
+    df = pd.DataFrame({
+        "dimension": columns,
+        "lengthscale": lengthscales,
+        "lipschitz_estimate": lipschitz,
+    })
+    df = df.sort_values("lipschitz_estimate", ascending=False).reset_index(drop=True)
+
+    logger.info("ARD Lipschitz diagnostic (outputscale=%.4f):", outputscale)
+    for _, row in df.head(5).iterrows():
+        logger.info(
+            "  %s: lengthscale=%.4f, L=%.4f",
+            row["dimension"],
+            row["lengthscale"],
+            row["lipschitz_estimate"],
+        )
+
+    return df
+
+
 # --- Desirability-based feasibility gate (Cosenza 2022) ---
 # Maps each signaling pathway to its agonist and antagonist morphogen columns.
 # When both are present at high concentration, the protocol is biologically
@@ -2612,6 +2690,7 @@ def recommend_next_experiments(
     n_controls: int = 0,
     train_X_df: Optional[pd.DataFrame] = None,
     train_Y_df: Optional[pd.DataFrame] = None,
+    contextual_cols: Optional[list[str]] = None,
 ) -> pd.DataFrame:
     """Use acquisition function to recommend next experiments.
 
@@ -2654,6 +2733,11 @@ def recommend_next_experiments(
             to recover condition indices and morphogen values).
         train_Y_df: Training Y as a pandas DataFrame (needed when n_controls > 0
             to rank conditions by mean Y).
+        contextual_cols: Column names to hold fixed during acquisition
+            optimization. These are "contextual" parameters (e.g.,
+            log_harvest_day, base media) that cannot vary between wells on
+            the same plate. Each is fixed to its training-data mean value.
+            Uses BoTorch's native ``fixed_features`` in ``optimize_acqf``.
 
     Returns:
         DataFrame with recommended morphogen concentrations and predictions.
@@ -2690,6 +2774,28 @@ def recommend_next_experiments(
     bounds_tensor = torch.tensor(
         [lower, upper], dtype=DTYPE, device=DEVICE
     )
+
+    # Build fixed_features dict for contextual parameters (TODO-12 / TODO-41)
+    fixed_features: Optional[dict[int, float]] = None
+    if contextual_cols:
+        fixed_features = {}
+        for col_name in contextual_cols:
+            if col_name not in columns:
+                logger.warning(
+                    "Contextual column '%s' not found in active columns %s — skipping",
+                    col_name, columns,
+                )
+                continue
+            col_idx = columns.index(col_name)
+            col_mean = float(train_X[:, col_idx].mean())
+            fixed_features[col_idx] = col_mean
+            logger.info(
+                "Contextual parameter: fixing '%s' (index %d) to training-data mean %.4f",
+                col_name, col_idx, col_mean,
+            )
+        if not fixed_features:
+            fixed_features = None
+            logger.warning("No valid contextual columns found — proceeding without fixed features")
 
     if use_multi_objective and train_Y.shape[1] > 1:
         from botorch.acquisition.multi_objective import (
@@ -2839,7 +2945,7 @@ def recommend_next_experiments(
 
     # Optimize acquisition function
     logger.info("Optimizing acquisition function for %d candidates...", n_generate)
-    candidates, acq_values = optimize_acqf(
+    _acqf_kwargs: dict[str, Any] = dict(
         acq_function=acqf,
         bounds=bounds_tensor,
         q=n_generate,
@@ -2849,6 +2955,9 @@ def recommend_next_experiments(
         num_restarts=10,
         raw_samples=1024,
     )
+    if fixed_features is not None:
+        _acqf_kwargs["fixed_features"] = fixed_features
+    candidates, acq_values = optimize_acqf(**_acqf_kwargs)
 
     # Apply desirability gate: D(x) = phi(x) * acq(x)
     if desirability_gate:
@@ -4009,6 +4118,7 @@ def run_gpbo_loop(
     saasbo_num_samples: int = 256,
     saasbo_thinning: int = 16,
     n_controls: int = 0,
+    contextual_cols: Optional[list[str]] = None,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -4465,6 +4575,7 @@ def run_gpbo_loop(
         n_controls=n_controls,
         train_X_df=X_active,
         train_Y_df=Y,
+        contextual_cols=contextual_cols,
     )
 
     # Inverse log-scale: convert recommendations back to original µM units
@@ -4765,6 +4876,9 @@ if __name__ == "__main__":
                              "from recommending biologically implausible cocktails "
                              "with simultaneous agonist+antagonist for the same "
                              "signaling pathway.")
+    parser.add_argument("--contextual-cols", nargs="+", default=None,
+                        help="Columns to hold fixed within plates (e.g., log_harvest_day). "
+                             "Fixed to training-data mean during acquisition optimization.")
     args = parser.parse_args()
 
     # Handle --list-regions
@@ -4959,6 +5073,7 @@ if __name__ == "__main__":
         saasbo_num_samples=128 if getattr(args, "saasbo_fast", False) else 256,
         saasbo_thinning=16,
         n_controls=args.n_controls,
+        contextual_cols=args.contextual_cols,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

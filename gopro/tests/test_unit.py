@@ -4382,3 +4382,139 @@ class TestCellFlowRelevanceCheck:
         sig = inspect.signature(step04.run_gpbo_loop)
         assert "do_cellflow_relevance_check" in sig.parameters
         assert sig.parameters["do_cellflow_relevance_check"].default is False
+
+
+class TestContextualParameters:
+    """Tests for contextual parameter support (TODO-12 / TODO-41)."""
+
+    def test_contextual_cols_accepted(self):
+        """recommend_next_experiments accepts contextual_cols parameter."""
+        import inspect
+        sig = inspect.signature(step04.recommend_next_experiments)
+        assert "contextual_cols" in sig.parameters
+        param = sig.parameters["contextual_cols"]
+        assert param.default is None
+
+    def test_run_gpbo_loop_accepts_contextual_cols(self):
+        """run_gpbo_loop accepts contextual_cols parameter."""
+        import inspect
+        sig = inspect.signature(step04.run_gpbo_loop)
+        assert "contextual_cols" in sig.parameters
+        param = sig.parameters["contextual_cols"]
+        assert param.default is None
+
+    def test_contextual_cols_in_cli_parser(self):
+        """CLI argparse includes --contextual-cols flag."""
+        import argparse
+        # Read the source to find the ArgumentParser and parse with --help-like introspection
+        # We'll create a parser the same way the script does and check the argument exists
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--contextual-cols", nargs="+", default=None)
+        # Verify it parses correctly
+        args = parser.parse_args(["--contextual-cols", "log_harvest_day", "BDNF_uM"])
+        assert args.contextual_cols == ["log_harvest_day", "BDNF_uM"]
+
+        # Also verify the actual source code contains the argument
+        import inspect
+        source = inspect.getsource(step04)
+        assert "--contextual-cols" in source
+
+
+class TestNestScore:
+    """Tests for NEST-inspired transcriptomic fidelity scoring."""
+
+    def test_basic_nest_score(self):
+        """Condition with lower KNN distances should get higher NEST score."""
+        from gopro.signature_utils import compute_nest_score
+
+        obs = pd.DataFrame({
+            "condition": ["good"] * 50 + ["bad"] * 50,
+            "mean_knn_dist_to_ref": [0.1] * 50 + [2.0] * 50,
+        })
+        scores = compute_nest_score(obs)
+        assert scores["good"] > scores["bad"]
+
+    def test_nest_score_range(self):
+        """All NEST scores should be in (0, 1]."""
+        from gopro.signature_utils import compute_nest_score
+
+        rng = np.random.default_rng(42)
+        n = 200
+        obs = pd.DataFrame({
+            "condition": rng.choice(["A", "B", "C", "D"], size=n),
+            "mean_knn_dist_to_ref": rng.exponential(scale=1.0, size=n),
+        })
+        scores = compute_nest_score(obs)
+        assert len(scores) == 4
+        assert (scores > 0).all()
+        assert (scores <= 1.0).all()
+
+    def test_missing_knn_dist_raises(self):
+        """ValueError when knn_dist_col is not in obs."""
+        from gopro.signature_utils import compute_nest_score
+
+        obs = pd.DataFrame({
+            "condition": ["A", "B"],
+            "some_other_col": [1.0, 2.0],
+        })
+        with pytest.raises(ValueError, match="mean_knn_dist_to_ref"):
+            compute_nest_score(obs)
+
+    def test_nest_score_handles_nan(self):
+        """NaN distances are handled gracefully (dropped, not propagated)."""
+        from gopro.signature_utils import compute_nest_score
+
+        obs = pd.DataFrame({
+            "condition": ["A"] * 10 + ["B"] * 10,
+            "mean_knn_dist_to_ref": [0.5] * 5 + [np.nan] * 5 + [1.0] * 10,
+        })
+        scores = compute_nest_score(obs)
+        assert len(scores) == 2
+        assert np.isfinite(scores["A"])
+        assert np.isfinite(scores["B"])
+
+
+class TestScoreGeneSignatures:
+    """Tests for gene signature scoring with optional permutation controls."""
+
+    def _make_adata(self, n_cells=10, n_genes=20, n_conditions=2):
+        """Create minimal AnnData for testing."""
+        import anndata as ad
+
+        rng = np.random.default_rng(42)
+        X = rng.random((n_cells, n_genes))
+        var = pd.DataFrame(index=[f"Gene{i}" for i in range(n_genes)])
+        obs = pd.DataFrame({
+            "condition": [f"cond{i % n_conditions}" for i in range(n_cells)],
+        })
+        return ad.AnnData(X=X, obs=obs, var=var)
+
+    def test_basic_signature_scoring(self):
+        """Score a 5-gene signature on minimal AnnData, verify output shape."""
+        from gopro.signature_utils import score_gene_signatures
+
+        adata = self._make_adata(n_cells=10, n_genes=20, n_conditions=2)
+        signatures = {"test_sig": [f"Gene{i}" for i in range(5)]}
+
+        scores_df, pvalues_df = score_gene_signatures(adata, signatures)
+
+        assert scores_df.shape == (2, 1)  # 2 conditions, 1 signature
+        assert "test_sig" in scores_df.columns
+        assert pvalues_df is None  # no permutations requested
+
+    def test_permutation_pvalues(self):
+        """With n_permutations=100, verify p-values are returned and in [0, 1]."""
+        from gopro.signature_utils import score_gene_signatures
+
+        adata = self._make_adata(n_cells=20, n_genes=30, n_conditions=3)
+        signatures = {"sig_a": [f"Gene{i}" for i in range(5)]}
+
+        scores_df, pvalues_df = score_gene_signatures(
+            adata, signatures, n_permutations=100,
+        )
+
+        assert scores_df.shape == (3, 1)
+        assert pvalues_df is not None
+        assert pvalues_df.shape == (3, 1)
+        assert (pvalues_df.values >= 0).all()
+        assert (pvalues_df.values <= 1).all()
