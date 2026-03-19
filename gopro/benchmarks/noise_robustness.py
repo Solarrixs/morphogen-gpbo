@@ -9,15 +9,13 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from typing import Optional
-
 from gopro.config import get_logger, MORPHOGEN_COLUMNS
 from gopro.benchmarks.toy_morphogen_function import ToyMorphogenFunction
 
 logger = get_logger(__name__)
 
 
-def run_noise_sweep(
+def run_random_baseline_noise_sweep(
     noise_levels: tuple[float, ...] = (0.01, 0.05, 0.1, 0.2),
     batch_sizes: tuple[int, ...] = (8, 16, 24),
     n_rounds: int = 3,
@@ -48,18 +46,21 @@ def run_noise_sweep(
     n_morphogens = len(MORPHOGEN_COLUMNS)
     records: list[dict] = []
 
-    for noise in noise_levels:
-        for batch_size in batch_sizes:
-            rng = np.random.RandomState(seed)
-            fn = ToyMorphogenFunction(noise_std=noise, seed=seed)
+    for ni, noise in enumerate(noise_levels):
+        for bi, batch_size in enumerate(batch_sizes):
+            # Derive a unique seed per (noise, batch_size) so combinations
+            # get independent random sequences.
+            combo_seed = seed + ni * len(batch_sizes) + bi
+            fn = ToyMorphogenFunction(noise_std=noise, seed=combo_seed)
+            rng = np.random.default_rng(combo_seed)
 
             # Generate initial random points
-            x_init = rng.rand(n_initial, n_morphogens) * 10.0
+            x_init = rng.random((n_initial, n_morphogens)) * 10.0
             y_init = fn.evaluate(x_init)
             # Neuron fraction is column 0
-            neuron_fracs = y_init[:, 0].tolist()
+            init_neuron = y_init[:, 0]
 
-            best_so_far = max(neuron_fracs)
+            best_so_far = float(np.max(init_neuron))
 
             records.append(
                 {
@@ -67,7 +68,7 @@ def run_noise_sweep(
                     "batch_size": batch_size,
                     "round": 0,
                     "best_observed": best_so_far,
-                    "mean_observed": float(np.mean(neuron_fracs)),
+                    "mean_observed": float(np.mean(init_neuron)),
                     "n_evaluated": n_initial,
                 }
             )
@@ -75,13 +76,12 @@ def run_noise_sweep(
             total_evaluated = n_initial
 
             for rnd in range(1, n_rounds + 1):
-                x_batch = rng.rand(batch_size, n_morphogens) * 10.0
+                x_batch = rng.random((batch_size, n_morphogens)) * 10.0
                 y_batch = fn.evaluate(x_batch)
-                batch_neuron = y_batch[:, 0].tolist()
-                neuron_fracs.extend(batch_neuron)
+                batch_neuron = y_batch[:, 0]
                 total_evaluated += batch_size
 
-                best_so_far = max(best_so_far, max(batch_neuron))
+                best_so_far = max(best_so_far, float(np.max(batch_neuron)))
 
                 records.append(
                     {
@@ -89,7 +89,7 @@ def run_noise_sweep(
                         "batch_size": batch_size,
                         "round": rnd,
                         "best_observed": best_so_far,
-                        "mean_observed": float(np.mean(batch_neuron)),
+                        "mean_observed": float(np.mean(batch_neuron)),  # current batch only
                         "n_evaluated": total_evaluated,
                     }
                 )
@@ -105,7 +105,7 @@ def run_noise_sweep(
     return pd.DataFrame(records)
 
 
-def summarize_noise_sweep(results: pd.DataFrame) -> pd.DataFrame:
+def summarize_random_baseline_noise_sweep(results: pd.DataFrame) -> pd.DataFrame:
     """Summarize sweep results with regret and robustness assessment.
 
     Groups by (noise_level, batch_size), takes the final round's
@@ -113,7 +113,7 @@ def summarize_noise_sweep(results: pd.DataFrame) -> pd.DataFrame:
     and labels each configuration as 'robust' if regret < 0.1.
 
     Args:
-        results: Output of :func:`run_noise_sweep`.
+        results: Output of :func:`run_random_baseline_noise_sweep`.
 
     Returns:
         DataFrame with columns: noise_level, batch_size, final_best,
@@ -131,9 +131,7 @@ def summarize_noise_sweep(results: pd.DataFrame) -> pd.DataFrame:
     final["regret"] = optimum_neuron - final["best_observed"]
     # Clamp negative regret (random search could exceed optimum with noise)
     final["regret"] = final["regret"].clip(lower=0.0)
-    final["recommendation"] = final["regret"].apply(
-        lambda r: "robust" if r < 0.1 else "sensitive"
-    )
+    final["recommendation"] = np.where(final["regret"] < 0.1, "robust", "sensitive")
 
     summary = final[
         ["noise_level", "batch_size", "best_observed", "regret", "recommendation"]

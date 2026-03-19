@@ -1,3 +1,6 @@
+| 8 | `b18af48` | working | ralph/fix-review-issues | [ralph-8] S-5: Add 17 unit tests for new features, 388 tests pass |
+| 7 | `71aa6b2` | working | ralph/fix-review-issues | [ralph-7] S-4: Fix _fidelity_to_task_idx dtype to torch.long, 2 tests pass |
+| 6 | `c7f84ab` | working | ralph/fix-review-issues | [ralph-6] S-3: Rename run_noise_sweep → run_random_baseline_noise_sweep, 26 benchmark tests pass |
 | 17 | `b39acc4` | working | ralph/production-readiness-phase2 | [ralph-17] TODO-11: ALR transform as alternative to ILR (--alr), 679 tests |
 | 3 | `48212c6` | working | ralph/production-readiness-phase2 | TODO-26: Fix CellFlow dose encoding to use log1p, 602 tests |
 | 3 | `df3ea3a` | working | ralph/production-readiness-phase2 | [ralph-simplify] Add concentration_scale field to CellFlow encoding |
@@ -26,3 +29,14 @@
 | 15 | `73e0d42` | working | ralph/production-readiness-phase2 | [ralph-simplify] Remove dead code from ZeroPassingKernel: orphaned _phi and forward methods after return statement |
 | 16 | `8b6c435` | working | ralph/production-readiness-phase2 | [ralph-simplify] Remove redundant compute_desirability call, add per-pathway debug logging |
 | 17 | `f9ebf5d` | working | ralph/production-readiness-phase2 | [ralph-simplify] Clean up ALR transform: remove overly strict guard, vectorize variance loop, fix docstrings |
+| 1 | `1a958ab` | working | ralph/fix-review-issues | [ralph-simplify] Fix TVR test: capture baseline before optimization, assert improvement direction |
+| 2 | `0438a12` | working | ralph/fix-review-issues | [ralph-simplify] Reuse scorer.py YAML loader instead of duplicating it |
+| 3 | `574e099` | working | ralph/fix-review-issues | [ralph-3] I-1: Inline _inflate_cellflow_variance — remove importlib from 04_gpbo_loop.py |
+| 5 | pending | working | ralph/fix-review-issues | [ralph-5] S-2: Optimize score_gene_signatures — avoid full AnnData copy |
+| 4 | `9727e60` | working | ralph/fix-review-issues | [ralph-simplify] Hoist ToyMorphogenFunction out of inner loop, rename arr→vals |
+| 5 | `377a140` | working | ralph/fix-review-issues | [ralph-simplify] Fix permutation column leak and cache filtered genes in score_gene_signatures |
+| 6 | `bc3098c` | working | ralph/fix-review-issues | [ralph-simplify] Fix RNG reuse bug, remove dead accumulation, clean up noise sweep |
+| 7 | `774f663` | working | ralph/fix-review-issues | [ralph-meta-7] Version history update |
+| 8 | `9a8d36b` | working | ralph/fix-review-issues | [ralph-simplify] Reuse _make_top_conditions helper, fix redundant .abs(), rename misleading test |
+| 9 | `e8a39d0` | working | ralph/fix-review-issues | [ralph-simplify] Merge Extra test classes, add _densify helper, seed flaky tests |
+| 10 | `a057c02` | working | ralph/fix-review-issues | [ralph-meta-9] Version history update |

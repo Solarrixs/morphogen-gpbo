@@ -1,44 +1,30 @@
-# Handoff to Iteration 26
+# Handoff to Iteration 8
 
-## Last Completed: §1.9 — Ingest 98 Sanchis-Calleja conditions
-Added `SanchisCallejaParser` class to `morphogen_parser.py` with:
-- 98 conditions parsed via regex tokenizer (`_SC_TOKEN_RE`)
-- Concentration levels A-E from Supplementary Figure 1 (CHIR, RA, SHH+PM, FGF8 early/late, BMP4, BMP7, XAV939, Cyclopamine)
-- Fixed timing doses for tA-tE experiments
-- SHH always paired with purmorphamine at proportional doses
-- Gradient conditions (Grad_<A, Grad_C-E) approximated as scalar
-- No Amin/Kelley base media (different protocol, Day 21 harvest)
-- `SANCHIS_CALLEJA_CONDITIONS` exported (98 names, MOESM5 canonical)
-- 10 new tests, 689 total passing
+## Last Completed: S-4 — Fix _fidelity_to_task_idx dtype to torch.long
+- Changed `dtype=fidelity_values.dtype` → `dtype=torch.long` in `gopro/04_gpbo_loop.py:394`
+- Added dtype assertions to both existing tests
+- Commit: `71aa6b2`
 
-## Next Up: Wire Sanchis-Calleja into multi-fidelity merge (§1.9 follow-up)
-- Assign fidelity 0.85 to Sanchis-Calleja data
-- Add to `merge_multi_fidelity_data()` auto-discovery in `04_gpbo_loop.py`
-- Add `--sanchis-fractions`/`--sanchis-morphogens` CLI flags
-- Acceptance: 3× training data when Sanchis-Calleja CSVs present; test verifies merge; 3+ new tests
-
-Alternative next tasks:
-- TODO-12: Contextual parameter support (§1.5)
-- TODO-36: Carry-forward top-K controls (§1.6)
-- TODO-49: Exact v-score formula (§1.7)
-- TODO-53: Domain-informed toy morphogen function (§1.8)
+## Next Up: S-5 — Add 12+ unit tests for new features
+- TVRModelEnsemble (2+ tests)
+- ZeroPassingKernel (2+ tests)
+- generate_validation_plate (2+ tests)
+- generate_confirmation_plate (2+ tests)
+- apply_desirability_gate (2+ tests)
+- confidence_to_noise_variance (2+ tests)
+- Acceptance: 12+ new tests added, all pass
 
 ## Warnings
 - Data CSVs in `data/` are modified but uncommitted (convergence_diagnostics, gp_diagnostics, gp_recommendations)
-- `papers/` directory and `INDEX.md` are untracked — not committed
-- MOESM5 has 98 conditions (not 97 as originally estimated in task plan)
-- `ZeroPassingKernel` created via lazy factory `_get_zero_passing_kernel_class()` — never reference global directly
-- `use_alr` and `use_ilr` are mutually exclusive — ALR takes precedence when both set
+- `ralph-task.md` is untracked
+- 9 pre-existing test failures (gruffi/scgpt/numba) — ignore these
+- `ZeroPassingKernel` uses lazy factory `_get_zero_passing_kernel_class()` — never reference global
 - CellFlow uses JAX (`jax.random`), NOT torch
-- Sanchis-Calleja parser does NOT set base media (BDNF, NT3, cAMP, AscorbicAcid) — different protocol from Amin/Kelley
 
 ## Key Context
-- Branch: `ralph/production-readiness-phase2`
-- Task plan: `docs/task_plan.md` (~100+ tasks across 5 sections)
-- Tests: `source .venv/bin/activate && python -m pytest gopro/tests/ -v` (689 passing)
-- §1.1 COMPLETE, §1.2 COMPLETE, §1.3 COMPLETE, §1.4 nearly complete (11/13, remaining 2 deferred)
-- §1.9 parser COMPLETE, merge follow-up pending
-- Config: `gopro/config.py` — all constants
-- Conventions: import from `gopro.config`, use `get_logger(__name__)`, `.copy()` before mutating DFs
+- Branch: `ralph/fix-review-issues`
+- Task definition: `ralph-task.md` (8 subtasks from code review; 7 complete, 1 remaining)
+- Tests: `.venv/bin/python -m pytest gopro/tests/ -v`
+- Config: `gopro/config.py` — all constants; import from here, never hardcode
 
-## Remaining: ~78 tasks todo, 0 blocked, ~52 complete
+## Remaining: 1 task todo, 0 blocked, 7 complete

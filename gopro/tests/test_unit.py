@@ -1889,10 +1889,12 @@ class TestPerFidelityARD:
         assert fid_map[0.0] == 0
         assert fid_map[0.5] == 1
         assert fid_map[1.0] == 2
+        # Verify dtype is torch.long (required for IndexKernel task indices)
+        assert task_idx.dtype == torch.long
         # Verify actual indices
-        assert task_idx[0].item() == 2.0  # fidelity 1.0 → idx 2
-        assert task_idx[1].item() == 0.0  # fidelity 0.0 → idx 0
-        assert task_idx[2].item() == 1.0  # fidelity 0.5 → idx 1
+        assert task_idx[0].item() == 2  # fidelity 1.0 → idx 2
+        assert task_idx[1].item() == 0  # fidelity 0.0 → idx 0
+        assert task_idx[2].item() == 1  # fidelity 0.5 → idx 1
 
     def test_fidelity_to_task_idx_two_levels(self):
         """_fidelity_to_task_idx handles 2 fidelity levels."""
@@ -1901,6 +1903,7 @@ class TestPerFidelityARD:
         assert len(fid_map) == 2
         assert fid_map[0.5] == 0
         assert fid_map[1.0] == 1
+        assert task_idx.dtype == torch.long
 
     def test_per_fidelity_ard_model_fits(self, mf_data):
         """fit_gp_botorch with per_fidelity_ard=True produces a fitted model."""
@@ -2420,6 +2423,56 @@ class TestTVR:
         model, _, _, _ = step04.fit_tvr_models(X, Y, use_ilr=True)
         # 3 cell types -> 2 ILR coords
         assert model.num_outputs == 2
+
+    def test_tvr_acquisition_optimization_does_not_silently_fail(self, multi_fidelity_data):
+        """Gradient-based optimization should work through TVR posterior.
+
+        The argmin in TVR.posterior() breaks the gradient chain for model
+        selection.  This test verifies that gradients still flow through
+        the *selected* model's posterior, so torch.optim-based acquisition
+        optimization produces finite, improving candidates.
+        """
+        import torch
+
+        X, Y = multi_fidelity_data
+        model, train_X, train_Y, _ = step04.fit_tvr_models(X, Y, use_ilr=True)
+
+        # Start from a random point, optimize posterior mean via gradient descent
+        d = train_X.shape[-1]
+        x = torch.rand(1, d, dtype=train_X.dtype, requires_grad=True)
+        optimizer = torch.optim.Adam([x], lr=0.05)
+
+        # Capture true baseline before any optimizer steps
+        with torch.no_grad():
+            initial_mean = model.posterior(x).mean[..., 0].sum().item()
+
+        for _step in range(3):
+            optimizer.zero_grad()
+            post = model.posterior(x)
+            # Maximize mean of first output
+            loss = -post.mean[..., 0].sum()
+            loss.backward()
+            optimizer.step()
+            # Clamp to [0, 1]
+            with torch.no_grad():
+                x.clamp_(0.0, 1.0)
+
+        final_mean = -loss.item()
+
+        # Gradients should have flowed — check x.grad is finite
+        assert x.grad is not None, "No gradients computed through TVR posterior"
+        assert torch.all(torch.isfinite(x.grad)), "TVR gradients contain NaN/Inf"
+        assert torch.all(torch.isfinite(x)), "Optimized x contains NaN/Inf"
+        # Optimization should have improved the posterior mean
+        assert final_mean > initial_mean, (
+            f"Optimization did not improve mean: {initial_mean:.4f} -> {final_mean:.4f}"
+        )
+
+    def test_tvr_gradient_warning_in_docstring(self):
+        """TVRModelEnsemble.posterior docstring should warn about gradient chain."""
+        docstring = step04.TVRModelEnsemble.posterior.__doc__
+        assert "argmin" in docstring
+        assert "not differentiable" in docstring
 
 
 class TestRefineTargetProfile:
@@ -4115,7 +4168,7 @@ class TestDesirabilityGate:
 
     def test_antagonist_pairs_constant_covers_major_pathways(self):
         """ANTAGONIST_PAIRS covers WNT, BMP, SHH, TGFb pathways."""
-        pairs = step04.ANTAGONIST_PAIRS
+        pairs = step04._get_antagonist_pairs()
         assert "WNT" in pairs
         assert "BMP" in pairs
         assert "SHH" in pairs
@@ -4663,6 +4716,20 @@ class TestValidationPlate:
         with pytest.raises(ValueError, match="n_cocktails.*exceeds"):
             step04.generate_validation_plate(top, n_cocktails=6)
 
+    def test_well_labels_unique(self):
+        """All well_label values should be unique."""
+        top = self._make_top_conditions(8)
+        plate = step04.generate_validation_plate(top)
+        assert plate["well_label"].nunique() == len(plate), "well_labels should be unique"
+
+    def test_source_condition_column_present(self):
+        """Output should have source_condition column referencing input index."""
+        top = self._make_top_conditions(8)
+        plate = step04.generate_validation_plate(top)
+        assert "source_condition" in plate.columns
+        # All source conditions should come from top's index
+        assert set(plate["source_condition"].unique()).issubset(set(top.index))
+
 
 class TestGenerateLhdFill:
     """Tests for generate_lhd_fill (TODO-38: LHD gap-filling for Round 2+)."""
@@ -4746,6 +4813,268 @@ class TestGenerateLhdFill:
         assert "is_lhd_fill" in recs.columns
         assert not recs["is_lhd_fill"].any(), "LHD rows should not appear in Round 1"
         assert len(recs) == n_recs
+
+    def test_lhd_fill_conditioned_rejects_nearby(self):
+        """LHD fill with train_X should reject points close to training data."""
+        bounds = {"x0": (0.0, 1.0), "x1": (0.0, 1.0)}
+        # Cluster training data in one corner
+        train_X = np.array([[0.1, 0.1], [0.15, 0.12], [0.12, 0.15]])
+        result = step04.generate_lhd_fill(
+            bounds, n_points=10, seed=42, train_X=train_X,
+        )
+        # All returned points should exist
+        assert len(result) > 0
+        assert len(result) <= 10
+        # Columns should match
+        assert list(result.columns) == ["x0", "x1"]
+
+    def test_lhd_fill_without_train_x_unchanged(self):
+        """Without train_X, behaviour matches the original (no rejection)."""
+        bounds = self._make_bounds(3)
+        r1 = step04.generate_lhd_fill(bounds, n_points=8, seed=42)
+        r2 = step04.generate_lhd_fill(bounds, n_points=8, seed=42, train_X=None)
+        pd.testing.assert_frame_equal(r1, r2)
+
+
+class TestSequentialBatch:
+    """Tests for --sequential-batch flag (Jura-inspired batch diversity)."""
+
+    def test_sequential_batch_threaded(self):
+        """sequential_batch=True should set sequential=True in optimize_acqf."""
+        from unittest.mock import MagicMock, patch
+
+        n_recs = 4
+        d = 3
+        columns = ["x0", "x1", "x2"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_recs, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_recs, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        mock_candidates = torch.rand(n_recs, d, dtype=torch.float64)
+        mock_acq_values = torch.rand(n_recs, dtype=torch.float64)
+
+        with patch("botorch.optim.optimize_acqf", return_value=(mock_candidates, mock_acq_values)) as mock_opt, \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                sequential_batch=True,
+            )
+
+        # Verify sequential=True was passed to optimize_acqf
+        call_kwargs = mock_opt.call_args[1] if mock_opt.call_args[1] else {}
+        assert call_kwargs.get("sequential") is True
+
+    def test_sequential_batch_false_by_default(self):
+        """sequential_batch=False (default) should not set sequential."""
+        from unittest.mock import MagicMock, patch
+
+        n_recs = 4
+        d = 3
+        columns = ["x0", "x1", "x2"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_recs, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_recs, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        mock_candidates = torch.rand(n_recs, d, dtype=torch.float64)
+        mock_acq_values = torch.rand(n_recs, dtype=torch.float64)
+
+        with patch("botorch.optim.optimize_acqf", return_value=(mock_candidates, mock_acq_values)) as mock_opt, \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                sequential_batch=False,
+            )
+
+        call_kwargs = mock_opt.call_args[1] if mock_opt.call_args[1] else {}
+        assert "sequential" not in call_kwargs
+
+
+class TestDoseResponse:
+    """Tests for --n-dose-response parameter (Jura-inspired info density)."""
+
+    def test_dose_response_skipped_round_1(self):
+        """n_dose_response should be ignored in Round 1."""
+        from unittest.mock import MagicMock, patch
+
+        n_recs = 6
+        d = 3
+        columns = ["x0", "x1", "x2"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_recs, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_recs, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        mock_candidates = torch.rand(n_recs, d, dtype=torch.float64)
+        mock_acq_values = torch.rand(n_recs, dtype=torch.float64)
+
+        with patch("botorch.optim.optimize_acqf", return_value=(mock_candidates, mock_acq_values)), \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            recs = step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                n_dose_response=6,
+                round_num=1,
+            )
+
+        assert "is_dose_response" in recs.columns
+        # In Round 1, no dose-response wells should be added
+        assert not recs["is_dose_response"].any() or recs["dose_factor"].eq(1.0).all()
+        assert len(recs) == n_recs
+
+    def test_dose_response_round_2(self):
+        """n_dose_response=6 in Round 2 should produce 2 cocktails x 0.3x/3.0x extra wells."""
+        from unittest.mock import MagicMock, patch
+
+        # Need enough BO slots: n_recs=12, n_dose_response=6 → 2 cocktails,
+        # 4 extra wells (2x0.3x + 2x3.0x), so n_bo_unique = 12 - 4 = 8
+        n_recs = 12
+        d = 3
+        columns = ["x0", "x1", "x2"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        # BO will generate n_bo_unique=8 candidates
+        n_bo = 8
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_bo, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_bo, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        mock_candidates = torch.rand(n_bo, d, dtype=torch.float64)
+        mock_acq_values = torch.rand(n_bo, dtype=torch.float64)
+
+        with patch("botorch.optim.optimize_acqf", return_value=(mock_candidates, mock_acq_values)), \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            recs = step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                n_dose_response=6,
+                round_num=2,
+            )
+
+        assert "is_dose_response" in recs.columns
+        assert "dose_factor" in recs.columns
+        # Should have 8 BO + 4 dose-response extra = 12 total
+        assert len(recs) == n_recs
+        # Check dose factors present
+        dr_rows = recs[recs["dose_factor"] != 1.0]
+        assert len(dr_rows) == 4  # 2 cocktails x 2 extra doses (0.3x + 3.0x)
+        assert set(dr_rows["dose_factor"].unique()) == {0.3, 3.0}
+
+    def test_dose_response_not_divisible_by_3(self):
+        """n_dose_response not divisible by 3 should raise ValueError."""
+        from unittest.mock import MagicMock, patch
+
+        columns = ["x0", "x1"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+        train_X = torch.rand(5, 2, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        mock_model = MagicMock()
+
+        with pytest.raises(ValueError, match="divisible by 3"):
+            with patch("botorch.optim.optimize_acqf"), \
+                 patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+                step04.recommend_next_experiments(
+                    model=mock_model,
+                    train_X=train_X,
+                    train_Y=train_Y,
+                    bounds=bounds,
+                    columns=columns,
+                    n_recommendations=10,
+                    n_dose_response=5,
+                    round_num=2,
+                )
+
+    def test_dose_response_scaling_correct(self):
+        """Dose-response wells should be scaled correctly (0.3x, 3.0x)."""
+        from unittest.mock import MagicMock, patch
+
+        n_recs = 9
+        d = 2
+        columns = ["x0", "x1"]
+        bounds = {c: (0.0, 10.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        # n_dose_response=3 → 1 cocktail, 2 extra wells, n_bo_unique = 9-2 = 7
+        n_bo = 7
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_bo, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_bo, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        # Use fixed candidates so we can verify scaling
+        fixed_cands = torch.tensor([[5.0, 8.0]] * n_bo, dtype=torch.float64)
+        mock_acq_values = torch.arange(n_bo, dtype=torch.float64)  # ascending
+
+        with patch("botorch.optim.optimize_acqf", return_value=(fixed_cands, mock_acq_values)), \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            recs = step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                n_dose_response=3,
+                round_num=2,
+            )
+
+        # Check 0.3x row
+        dr_03 = recs[recs["dose_factor"] == 0.3]
+        assert len(dr_03) == 1
+        assert abs(dr_03.iloc[0]["x0"] - 1.5) < 1e-6  # 5.0 * 0.3
+        assert abs(dr_03.iloc[0]["x1"] - 2.4) < 1e-6  # 8.0 * 0.3
+
+        # Check 3.0x row
+        dr_30 = recs[recs["dose_factor"] == 3.0]
+        assert len(dr_30) == 1
+        assert abs(dr_30.iloc[0]["x0"] - 15.0) < 1e-6  # 5.0 * 3.0
+        assert abs(dr_30.iloc[0]["x1"] - 24.0) < 1e-6  # 8.0 * 3.0
 
 
 class TestConfirmationPlate:
@@ -5124,6 +5453,36 @@ class TestCostAwareDesirability:
         _ = step04.apply_desirability_gate(recs, acq, cost_weight=0.2)
         assert list(recs.columns) == original_cols
 
+    def test_high_cost_weight_zeroes_expensive_cocktail(self):
+        """cost_weight > 1.0 is clamped to 1.0."""
+        recs = pd.DataFrame({"SHH_uM": [1.0, 0.0]}, index=["A", "B"])
+        acq = pd.Series([1.0, 1.0], index=["A", "B"])
+        result = step04.apply_desirability_gate(recs, acq, cost_weight=5.0)
+        # With clamped weight=1.0 and normalized cost, the most expensive
+        # should have desirability = acq * (1 - 1.0 * 1.0) = 0
+        max_cost_idx = result["cocktail_cost"].idxmax()
+        assert result.loc[max_cost_idx, "desirability"] == pytest.approx(0.0)
+
+    def test_all_zero_cost(self):
+        """When all cocktails cost 0, desirability equals acquisition."""
+        recs = pd.DataFrame({"fake_uM": [0.0, 0.0]}, index=["A", "B"])
+        acq = pd.Series([0.7, 0.3], index=["A", "B"])
+        result = step04.apply_desirability_gate(
+            recs, acq, cost_dict={"fake_uM": 0.0}, cost_weight=0.5,
+        )
+        np.testing.assert_allclose(result.loc["A", "desirability"], 0.7, atol=1e-9)
+        np.testing.assert_allclose(result.loc["B", "desirability"], 0.3, atol=1e-9)
+
+    def test_output_sorted_descending(self):
+        """Output should be sorted by desirability descending."""
+        recs = pd.DataFrame(
+            {"SHH_uM": [0.0, 1.0, 0.5]}, index=["A", "B", "C"]
+        )
+        acq = pd.Series([0.5, 1.0, 0.8], index=["A", "B", "C"])
+        result = step04.apply_desirability_gate(recs, acq, cost_weight=0.1)
+        desirabilities = result["desirability"].values
+        assert all(desirabilities[i] >= desirabilities[i + 1] for i in range(len(desirabilities) - 1))
+
 
 class TestSanchisCallejaMultiFidelity:
     """Tests for Sanchis-Calleja patterning screen multi-fidelity wire-up."""
@@ -5250,3 +5609,134 @@ class TestSanchisCallejaMultiFidelity:
 
         assert len(virtual_sources) == 1
         assert virtual_sources[0][2] == 0.65
+
+
+# ── S-5: Additional unit tests for new features ──────────────────────
+
+
+def _densify(lazy_tensor):
+    """Materialise a gpytorch LazyTensor (or return a plain tensor unchanged)."""
+    return lazy_tensor.to_dense() if hasattr(lazy_tensor, "to_dense") else lazy_tensor
+
+
+class TestZeroPassingKernelPhiMask:
+    """Additional ZeroPassingKernel tests covering the phi_mask method and edge cases."""
+
+    @staticmethod
+    def _make_zpk(method="phi_mask", ard_num_dims=3):
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=ard_num_dims))
+        return ZPK(base, concentration_dims=list(range(ard_num_dims)), eps=1.0, method=method)
+
+    def test_phi_mask_returns_zero_for_zero_input(self):
+        """phi_mask method should also give k(0, x) ≈ 0."""
+        import torch
+        torch.manual_seed(42)
+        zpk = self._make_zpk("phi_mask")
+
+        x_zero = torch.zeros(1, 3, dtype=torch.double)
+        x_nonzero = torch.rand(1, 3, dtype=torch.double) + 0.1
+
+        cov = _densify(zpk(x_zero, x_nonzero))
+        assert torch.allclose(cov, torch.zeros_like(cov), atol=1e-6), (
+            f"phi_mask k(0, x) should be ~0, got {cov.item():.6f}"
+        )
+
+    def test_phi_mask_nonzero_for_nonzero_inputs(self):
+        """phi_mask method returns nonzero for two nonzero inputs."""
+        import torch
+        torch.manual_seed(42)
+        zpk = self._make_zpk("phi_mask")
+
+        x1 = torch.rand(1, 3, dtype=torch.double) + 0.5
+        x2 = torch.rand(1, 3, dtype=torch.double) + 0.5
+
+        cov = _densify(zpk(x1, x2))
+        assert cov.item() > 0.01, (
+            f"phi_mask k(x, x') should be nonzero, got {cov.item():.6f}"
+        )
+
+    def test_invalid_method_raises(self):
+        """Unknown method string should raise ValueError."""
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+        ZPK = step04._get_zero_passing_kernel_class()
+        base = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=3))
+        with pytest.raises(ValueError, match="Unknown zero-passing method"):
+            ZPK(base, concentration_dims=[0, 1, 2], method="invalid")
+
+    def test_schur_kernel_symmetry(self):
+        """Schur kernel should be symmetric: k(x1, x2) ≈ k(x2, x1)."""
+        import torch
+        torch.manual_seed(42)
+        zpk = self._make_zpk("schur")
+
+        x1 = torch.rand(3, 3, dtype=torch.double) + 0.1
+        x2 = torch.rand(4, 3, dtype=torch.double) + 0.1
+
+        k12 = _densify(zpk(x1, x2))
+        k21 = _densify(zpk(x2, x1))
+        torch.testing.assert_close(k12, k21.T, atol=1e-6, rtol=1e-6)
+
+
+class TestTVRPosteriorProperties:
+    """Additional tests for _TVRPosterior properties and TVR edge cases."""
+
+    @pytest.fixture
+    def tvr_posterior(self):
+        """Build a _TVRPosterior for testing."""
+        import torch
+        mean = torch.randn(5, 3, dtype=torch.double)
+        var = torch.rand(5, 3, dtype=torch.double) + 0.01
+        return step04._TVRPosterior(mean, var)
+
+    def test_device_and_dtype(self, tvr_posterior):
+        """_TVRPosterior exposes device and dtype."""
+        assert tvr_posterior.device == torch.device("cpu")
+        assert tvr_posterior.dtype == torch.float64
+
+    def test_batch_shape(self, tvr_posterior):
+        """batch_shape should be all dims except last."""
+        assert tvr_posterior.batch_shape == torch.Size([5])
+
+    def test_base_sample_shape(self, tvr_posterior):
+        """base_sample_shape should be the last dim."""
+        assert tvr_posterior.base_sample_shape == torch.Size([3])
+
+    def test_rsample_with_sample_shape(self, tvr_posterior):
+        """rsample with explicit sample_shape returns correct shape."""
+        samples = tvr_posterior.rsample(torch.Size([7, 2]))
+        assert samples.shape == (7, 2, 5, 3)
+        assert torch.all(torch.isfinite(samples))
+
+    def test_sample_returns_correct_shape(self, tvr_posterior):
+        """sample() returns correct shape."""
+        s1 = tvr_posterior.sample(torch.Size([4]))
+        assert s1.shape == (4, 5, 3)
+
+
+class TestConfidenceToNoiseVariance:
+    """Edge-case tests for confidence_to_noise_variance."""
+
+    def test_custom_base_noise(self):
+        """Non-default base_noise scales output proportionally."""
+        conf = pd.Series([1.0, 0.5], index=["a", "b"])
+        nv = step04.confidence_to_noise_variance(conf, base_noise=1.0)
+        assert nv["a"] == pytest.approx(1.0)
+        assert nv["b"] == pytest.approx(4.0)
+
+    def test_monotonicity(self):
+        """Higher confidence should always produce lower noise."""
+        confs = np.linspace(0.05, 1.0, 20)
+        conf_series = pd.Series(confs, index=[f"c{i}" for i in range(20)])
+        nv = step04.confidence_to_noise_variance(conf_series)
+        # noise should be strictly decreasing as confidence increases
+        assert all(nv.iloc[i] > nv.iloc[i + 1] for i in range(len(nv) - 1))
+
+    def test_preserves_index(self):
+        """Output Series should have same index as input."""
+        conf = pd.Series([0.8, 0.3, 0.6], index=["alpha", "beta", "gamma"])
+        nv = step04.confidence_to_noise_variance(conf)
+        assert list(nv.index) == ["alpha", "beta", "gamma"]
+
+

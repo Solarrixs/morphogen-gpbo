@@ -104,7 +104,7 @@ class ToyMorphogenFunction:
         self.n_cell_types = n_cell_types
         self.noise_std = noise_std
         self.n_morphogens = len(MORPHOGEN_COLUMNS)
-        self.rng = np.random.RandomState(seed)
+        self.rng = np.random.default_rng(seed)
 
         # Initialize EC50 values from realistic ranges
         self.ec50 = np.zeros(self.n_morphogens)

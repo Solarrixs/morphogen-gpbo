@@ -19,6 +19,16 @@
 
 ### Paper work: See docs/task_plan.md §4 for detailed paper TODOs (fact-checks, figures, methods expansion).
 
+### Code Review Fixes (ralph-task.md)
+- [x] I-3: Add TVR gradient warning docstring + acquisition optimization test | Acceptance: docstring updated, 2 tests added, all pass
+- [x] I-4: Deduplicate antagonist pairs — YAML single source of truth | Acceptance: ANTAGONIST_PAIRS removed from 04, both consumers load YAML
+- [x] I-1: Extract _inflate_cellflow_variance — remove importlib usage | Acceptance: no importlib.util in 04_gpbo_loop.py
+- [x] S-1: Replace np.random.RandomState with default_rng in benchmarks | Acceptance: no RandomState in benchmarks/
+- [x] S-2: Optimize score_gene_signatures memory — copy obs not full AnnData | Acceptance: reduced memory
+- [x] S-3: Rename run_noise_sweep → run_random_baseline_noise_sweep | Acceptance: name clarified
+- [x] S-4: Fix _fidelity_to_task_idx dtype to torch.long | Acceptance: dtype is torch.long, tests pass
+- [x] S-5: Add 17 unit tests for new features | Acceptance: 17 new tests added, all pass
+
 ## Architecture Decisions
 | Decision | Rationale |
 |----------|-----------|
