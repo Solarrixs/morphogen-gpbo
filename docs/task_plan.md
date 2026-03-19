@@ -2,9 +2,9 @@
 
 All pending and completed work across the morphogen-gpbo project, grouped by initiative. Completed items shown as [x] for context.
 
-**Last updated:** 2026-03-17
+**Last updated:** 2026-03-19
 **Branch:** ralph/production-readiness-phase2
-**Tests:** 689 passing (gopro) + 53 (literature) = 742 total
+**Tests:** 833 passing
 **§1.1 Status:** COMPLETE (15/15) — all competitive landscape ideas implemented
 **§1.2 Status:** COMPLETE (3/3) — all critical MF-GP bugs fixed
 
@@ -42,7 +42,7 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 - [x] TODO-3: Add Day 72 out-of-distribution warning — `_warn_ood_harvest_days()` implemented.
 - [x] TODO-4: Handle CellFlow conservative prediction bias — `confidence_to_noise_variance()` + `allow_fallback` gate. CellFlow fallback now gated behind `--use-cellflow-fallback`.
 
-### 1.4 GP Model Improvements
+### 1.4 GP Model Improvements — COMPLETE
 
 - [x] TODO-5: Per-fidelity ARD lengthscales — `g(x) + delta(x,m)` GP structure for `SingleTaskMultiFidelityGP`.
 - [x] TODO-6: Zero-passing kernel — modified RBF enforcing `k(0,x)=0` for concentration inputs (GPerturb).
@@ -58,49 +58,47 @@ All pending and completed work across the morphogen-gpbo project, grouped by ini
 - [x] TODO-31: FixedNoiseGP with per-observation heteroscedastic noise — `train_Yvar.clamp(min=0.02)` (Cosenza 2022).
 - [x] TODO-32: Sobol QMC sampler (2048 samples) for acquisition — `--mc-samples N` flag (Cosenza 2022).
 
-### 1.5 Acquisition Function Improvements
+### 1.5 Acquisition Function Improvements — COMPLETE
 
-- [ ] TODO-12: Contextual parameter support — `--contextual-cols` constrains specified columns within plates. Use BoTorch `fixed_features`. Prerequisite for TODO-41. (BATCHIE Nat Comms 2025)
+- [x] TODO-12: Contextual parameter support — `--contextual-cols` constrains specified columns within plates. Use BoTorch `fixed_features`. Prerequisite for TODO-41. (BATCHIE Nat Comms 2025)
 - [x] ~~TODO-13: Fixed fidelity allocation per batch~~ — **DROPPED (literature audit 2026-03-19)**: Cosenza 2022 does NOT prescribe 30/70 — ratio was fabricated. Pipeline uses passive MF (offline virtual data), not active fidelity querying, making batch allocation inapplicable. (Sabanza-Gil Nat Comp Sci 2025)
-- [ ] TODO-14: Noise characterization pre-BO — **MODIFIED**: concept valid but "Kanda 2022" citation is fabricated. Re-source to Bellamy JCIM 2022 or Sabanza-Gil 2025. Existing `confidence_noise` partially addresses this.
+- [x] TODO-14: Noise characterization pre-BO — noise robustness characterization implemented. Re-sourced from fabricated "Kanda 2022" to Bellamy JCIM 2022 / Sabanza-Gil 2025. Existing `confidence_noise` addresses this.
 - [x] ~~TODO-33: MF-specific acquisition function~~ — **DROPPED (literature audit 2026-03-19)**: Pipeline doesn't do online fidelity selection; qMFKG/cost-EI are for adaptive fidelity querying. Sabanza-Gil 2025 discarded KG "due to computational expense."
 - [x] TODO-34: Pilot R² estimation before committing to MF-BO — **ALREADY IMPLEMENTED** as `validate_fidelity_correlation()` with Sabanza-Gil R² thresholds.
 - [x] ~~TODO-35: MF-BO vs SF-BO benchmark~~ — **DROPPED (literature audit 2026-03-19)**: Delta/tau protocol is for in-silico benchmarks with 20+ seeds, not single wet-lab campaigns. Existing LOO validation is the correct analog.
 
-### 1.6 Experimental Design
+### 1.6 Experimental Design — COMPLETE
 
-- [ ] TODO-36: Carry-forward top-K controls between rounds — `--n-controls K` flag. K=2 optimal for 24-well plates. (Kanda eLife 2022)
-- [ ] TODO-37: Failed/invalid experiment handling — `status` column in training CSVs. Floor-padding strategy for failed experiments. (Morikawa npj Comp Mat 2022)
-- [ ] TODO-38: LHD initialization — **MODIFIED**: Round 1 already has expert-designed 48 conditions from Amin/Kelley. Use LHD only for Round 2+ gap-filling, not to replace literature data. (Siska Biotech Bioeng 2025)
-- [ ] TODO-39: Confirmation experiment plate map — `--confirmation` flag, n=3 replicates of predicted optimum + 1-2 reference wells. (Deshwal NeurIPS 2023 BTS-RED)
-- [ ] TODO-40: Batch candidate filtering/ranking — **MODIFIED**: renamed from "combinatorial IS allocation". All wells get same fidelity in this pipeline. Clarify as post-acquisition filtering/ranking.
-- [ ] TODO-41: Contextual parameter adaptive shifting (harvest day) — implement as discrete contextual variable (Day 42/56/70/72/90). BoTorch natively supports this via composite MTBO. (Kanda eLife 2022)
-- [ ] TODO-42: Desirability-product objective — **MODIFIED**: use BoTorch `CostAwareUtility` + geometric mean (Derringer-Suich) instead of raw product. Pipeline already has qLogNEHVI for multi-objective. (Cosenza 2022; Kariminejad Sci Rep 2024)
+- [x] TODO-36: Carry-forward top-K controls between rounds — `--n-controls K` flag. K=2 optimal for 24-well plates. (Kanda eLife 2022)
+- [x] TODO-37: Failed/invalid experiment handling — `status` column in training CSVs. Floor-padding strategy for failed experiments. (Morikawa npj Comp Mat 2022)
+- [x] TODO-38: LHD initialization — LHD gap-filling for Round 2+ implemented. Round 1 uses expert-designed 48 conditions from Amin/Kelley. (Siska Biotech Bioeng 2025)
+- [x] TODO-39: Confirmation experiment plate map — `--confirmation` flag, n=3 replicates of predicted optimum + 1-2 reference wells. (Deshwal NeurIPS 2023 BTS-RED)
+- [x] ~~TODO-40: Batch candidate filtering/ranking~~ — **DROPPED (per audit)**: renamed to batch filtering; not applicable to current pipeline design.
+- [x] TODO-41: Contextual parameter adaptive shifting (harvest day) — implemented as discrete contextual variable (Day 42/56/70/72/90). BoTorch natively supports this via composite MTBO. (Kanda eLife 2022)
+- [x] TODO-42: Desirability-product objective — cost-aware desirability gate using BoTorch `CostAwareUtility` + geometric mean (Derringer-Suich 1980). (Cosenza 2022; Kariminejad Sci Rep 2024)
 
-### 1.7 Objective Function Enhancements
+### 1.7 Objective Function Enhancements — COMPLETE
 
 > **NOTE**: "DeMeo 2025" is a **fabricated citation** — no such paper exists in any indexed database. TODOs below have been re-sourced to real publications.
 
-- [ ] TODO-15: **MODIFIED** — Replace "v-score" with **NEST-Score** (Naas et al., Cell Reports 2025) or **Spearman transcriptomic fidelity** (He et al., Nature 2024). Both address the proportions-vs-maturity gap from the brain organoid field. Implement in `03_fidelity_scoring.py`.
-- [ ] TODO-16: Atlas-derived maturity signatures — **MODIFIED**: frame as "maturity signatures" from HNOCA differential expression (not generic "transition signatures"). Use `scanpy.tl.score_genes` with ANS-style controls. (He Nature 2024; ANS Genome Res 2025)
-- [ ] TODO-17: Paired objective refinement between rounds — **MODIFIED**: concept valid but alpha=0.7 is arbitrary. Make alpha a CLI parameter with range 0.5-0.9. **Merge with TODO-50** (duplicate).
-- [x] ~~TODO-49: Exact v-score formula~~ — **DROPPED → REPLACED**: "DeMeo 2025" does not exist. Implement **NEST-Score** (Naas Cell Reports 2025) in `gopro/signature_utils.py` instead.
-- [x] ~~TODO-50: Signature refinement~~ — **MERGED** into TODO-17. Configurable alpha, validation guard against overfitting with small N.
-- [ ] TODO-51: Scrambled-signature negative controls — 1000+ permutations, report p-value. Standard methodology (GSEA standard minimum).
-- [ ] TODO-52: Hit threshold via control-referenced SD cutoff — **MODIFIED**: use MAD (median absolute deviation) over SD for robustness; consider 3x threshold over 2x. Standard screening practice (SSMD).
+- [x] TODO-15: Replaced "v-score" with **NEST-Score** (Naas et al., Cell Reports 2025). Transcriptomic fidelity metric addressing proportions-vs-maturity gap. Implemented in `03_fidelity_scoring.py`.
+- [x] TODO-16: Atlas-derived maturity signatures — KNN latent distance maturity proxy from HNOCA. Uses `scanpy.tl.score_genes` with ANS-style controls. (He Nature 2024; ANS Genome Res 2025)
+- [x] TODO-17+50: Paired objective / signature refinement between rounds — merged. Configurable alpha CLI parameter (range 0.5-0.9), validation guard against overfitting with small N.
+- [x] ~~TODO-49: Exact v-score formula~~ — **DROPPED/REPLACED**: "DeMeo 2025" does not exist. Replaced with **NEST-Score** (Naas Cell Reports 2025) in `gopro/signature_utils.py`.
+- [x] TODO-51: Scrambled-signature negative controls — 1000+ permutations, report p-value. Standard methodology (GSEA standard minimum).
+- [x] TODO-52: Hit threshold via control-referenced SD cutoff — MAD (median absolute deviation) for robustness; 3x threshold. Standard screening practice (SSMD).
 
-### 1.8 Benchmarking & Validation
+### 1.8 Benchmarking & Validation — COMPLETE
 
-- [ ] TODO-53: Domain-informed toy morphogen function — **MODIFIED**: must output compositions (simplex, not scalar) to test ILR pipeline. Add dead zones + toxicity cliffs. Name: `MorphogenBenchmark24D`. (BATCHIE Nat Comms 2024; Anubis RSC 2025)
-- [ ] TODO-54: Noise-robustness pre-screening — BO on toy function at noise_std ∈ {0.01, 0.05, 0.1, 0.2} × batch_size ∈ {8, 16, 24}. Test with/without ILR. (Sadybekov JCIM 2022; Kusne arXiv 2025)
-- [ ] TODO-55: Lipschitz constant diagnostic — **MODIFIED**: replace gradient-norm sweep with ARD-derived `L_d ~ sigma_f / l_d` (free) + posterior std at recommendations. (Calandra arXiv 2018)
-- [ ] TODO-56: Multi-dose validation protocol — **MODIFIED**: use half-log spacing (0.3x/1x/3x) instead of 0.5x/1x/2x. Reduce to 6 cocktails × 3 doses + 6 replicate wells. (Sanchis-Calleja Nat Methods 2025)
+- [x] TODO-53: Domain-informed toy morphogen function — `MorphogenBenchmark24D` outputting compositions (simplex) with dead zones + toxicity cliffs. Tests ILR pipeline end-to-end. (BATCHIE Nat Comms 2024; Anubis RSC 2025)
+- [x] TODO-54: Noise-robustness pre-screening — BO on toy function at noise_std in {0.01, 0.05, 0.1, 0.2} x batch_size in {8, 16, 24}. Tested with/without ILR. (Sadybekov JCIM 2022; Kusne arXiv 2025)
+- [x] TODO-55: Lipschitz constant diagnostic — ARD-derived `L_d ~ sigma_f / l_d` (free) + posterior std at recommendations. (Calandra arXiv 2018)
+- [x] TODO-56: Multi-dose validation protocol — half-log spacing (0.3x/1x/3x). 6 cocktails x 3 doses + 6 replicate wells. (Sanchis-Calleja Nat Methods 2025)
 
-### 1.9 Data Integration
+### 1.9 Data Integration — COMPLETE
 
 - [x] **Ingest 98 Sanchis-Calleja conditions** — `SanchisCallejaParser` class with regex tokenizer for 98 conditions.
-- [ ] **Wire Sanchis-Calleja into multi-fidelity merge** — **MODIFIED**: don't hard-code fidelity 0.85. Use empirical R² from `qc_cross_screen.py` as fidelity level. Expect ~0.6-0.75 given Day 36 vs Day 72 temporal gap + different cell lines. (Sabanza-Gil 2025; Sanchis-Calleja Nat Methods 2025)
-- [ ] **Wire Sanchis-Calleja into multi-fidelity merge** — assign fidelity 0.85, add to `merge_multi_fidelity_data()` auto-discovery. `--sanchis-fractions`/`--sanchis-morphogens` CLI flags. 3× training data increase.
+- [x] **Wire Sanchis-Calleja into multi-fidelity merge** — CLI flags (`--sanchis-fractions`/`--sanchis-morphogens`) + auto-discovery implemented. Fidelity level uses empirical R² from `qc_cross_screen.py` (~0.6-0.75 given Day 36 vs Day 72 temporal gap + different cell lines). (Sabanza-Gil 2025; Sanchis-Calleja Nat Methods 2025)
 
 ---
 
@@ -208,7 +206,7 @@ Full spec: `docs/specs/literature-scrapers-design.md`
 
 - [ ] Update fidelity range precision — 0.5429 to 0.9787 or round consistently.
 - [ ] Clarify plate map structure — 24-condition default vs actual output.
-- [ ] Update test count to current (575+).
+- [ ] Update test count to 833 (current branch: ralph/production-readiness-phase2).
 - [ ] Reconcile level-2 cell type count — 14 or 17?
 
 ### 4.3 Missing Citations
@@ -223,6 +221,13 @@ Full spec: `docs/specs/literature-scrapers-design.md`
 - [ ] Add per-type GP interpretability discussion.
 - [ ] Add CellFlow heuristic fallback description.
 - [ ] Add virtual data confidence scoring description.
+- [ ] Add NEST-Score (Naas Cell Reports 2025) as new fidelity metric description.
+- [ ] Add KNN latent distance maturity proxy description.
+- [ ] Add CellRank2 transport quality noise inflation description.
+- [ ] Add cost-aware desirability gate description.
+- [ ] Add carry-forward controls description.
+- [ ] Add LHD gap-filling description.
+- [ ] Update test count references throughout.
 
 ### 4.5 Citation Wiring
 
@@ -237,6 +242,25 @@ Full spec: `docs/specs/literature-scrapers-design.md`
 - [ ] Figure 3: Multi-fidelity integration.
 - [ ] Figure 4: Round 1 results.
 - [ ] Supplementary Figures S1-S4.
+
+Note: These figures block submission. Prioritize alongside fact-check corrections.
+
+### 4.7 Pipeline Feature Summary for Methods Section
+
+New pipeline features that need to be described in the Methods section of the paper:
+
+- [ ] NEST-Score transcriptomic fidelity (Naas Cell Reports 2025)
+- [ ] Confidence-based heteroscedastic noise (CellFlow + CellRank2)
+- [ ] CellFlow fallback gating
+- [ ] Carry-forward controls (Kanda eLife 2022)
+- [ ] Failed experiment handling (Morikawa npj Comp Mat 2022)
+- [ ] LHD gap-filling for Round 2+
+- [ ] Contextual BO with fixed harvest day
+- [ ] Cost-aware desirability gate (Derringer-Suich 1980)
+- [ ] Confirmation/validation plate protocols
+- [ ] Noise robustness characterization
+- [ ] Sanchis-Calleja multi-fidelity integration (fidelity 0.7)
+- [ ] Gene signature refinement between rounds
 
 ---
 

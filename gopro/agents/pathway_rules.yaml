@@ -1,0 +1,28 @@
+# Morphogen pathway antagonism rules for plausibility filtering.
+# Based on developmental biology (Amin & Kelley 2024, Sanchis-Calleja 2025).
+antagonist_pairs:
+  - pair: [BMP4_uM, LDN193189_uM]
+    pathway: BMP
+    reason: "LDN193189 is a BMP receptor inhibitor; co-administering with BMP4 is contradictory"
+  - pair: [BMP4_uM, SB431542_uM]
+    pathway: TGFb/BMP
+    reason: "SB431542 inhibits ALK4/5/7; partial BMP pathway overlap"
+  - pair: [CHIR99021_uM, IWP2_uM]
+    pathway: WNT
+    reason: "CHIR activates canonical WNT; IWP2 inhibits WNT secretion"
+  - pair: [CHIR99021_uM, XAV939_uM]
+    pathway: WNT
+    reason: "XAV939 is a tankyrase inhibitor that promotes beta-catenin degradation"
+  - pair: [SAG_uM, cyclopamine_uM]
+    pathway: SHH
+    reason: "Cyclopamine inhibits Smoothened; SAG activates it"
+  - pair: [SHH_uM, cyclopamine_uM]
+    pathway: SHH
+    reason: "Direct SHH/Cyclopamine antagonism at Smoothened"
+  - pair: [purmorphamine_uM, cyclopamine_uM]
+    pathway: SHH
+    reason: "Both target Smoothened with opposite effects"
+
+# Concentration thresholds below which a morphogen is considered "absent"
+# (used to avoid flagging trace amounts as antagonistic)
+absence_threshold_uM: 0.001

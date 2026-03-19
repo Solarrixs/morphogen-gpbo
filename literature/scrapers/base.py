@@ -1,90 +1,55 @@
-"""Base scraper ABC and shared utilities."""
-import time
+"""Base scraper ABC and result dataclasses."""
+
+from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
-
-SCRNA_KEYWORDS = [
-    "single-cell",
-    "single cell",
-    "scrna-seq",
-    "snrna-seq",
-    "10x genomics",
-    "drop-seq",
-    "smart-seq",
-    "cel-seq",
-    "single-nucleus",
-    "single nucleus",
-]
-
-SPATIAL_KEYWORDS = [
-    "spatial transcriptom",
-    "merfish",
-    "visium",
-    "slide-seq",
-    "seqfish",
-    "starmap",
-    "osmfish",
-    "10x xenium",
-]
-
-
-def detect_scrna_seq(text: str) -> bool:
-    """Check if text contains any scRNA-seq keyword (case-insensitive)."""
-    lower = text.lower()
-    return any(kw in lower for kw in SCRNA_KEYWORDS)
-
-
-def detect_spatial(text: str) -> bool:
-    """Check if text contains any spatial transcriptomics keyword (case-insensitive)."""
-    lower = text.lower()
-    return any(kw in lower for kw in SPATIAL_KEYWORDS)
 
 
 @dataclass
 class PaperResult:
+    """Structured result from a paper search."""
     title: str
-    source: str
+    authors: list[str]
+    abstract: Optional[str] = None
     doi: Optional[str] = None
     pmid: Optional[str] = None
-    authors: Optional[str] = None
+    biorxiv_id: Optional[str] = None
     journal: Optional[str] = None
     year: Optional[int] = None
-    abstract: Optional[str] = None
     url: Optional[str] = None
-    accession_numbers: Optional[dict] = field(default=None)
+    source: str = "unknown"
+    search_query: Optional[str] = None
 
 
 @dataclass
 class DatasetResult:
-    accession: str
-    source: str
-    title: Optional[str] = None
+    """Structured result from a dataset search."""
+    name: str
+    accession: Optional[str] = None
+    repository: str = "unknown"
+    url: Optional[str] = None
     species: Optional[str] = None
-    cell_count: Optional[int] = None
-    format: Optional[str] = None
-    download_url: Optional[str] = None
-    size_bytes: Optional[int] = None
+    tissue: Optional[str] = None
+    n_cells: Optional[int] = None
+    description: Optional[str] = None
 
 
 class BaseScraper(ABC):
-    """Abstract base class for literature and dataset scrapers."""
-
-    name: str = "base"
-    rate_limit_delay: float = 1.0
+    """Abstract base class for literature scrapers."""
 
     @abstractmethod
-    def search(
-        self,
-        query: str,
-        max_results: int = 100,
-        date_from: Optional[str] = None,
-    ) -> list:
-        """Search for papers or datasets matching the query.
+    def search_papers(self, query: str, max_results: int = 100) -> list[PaperResult]:
+        """Search for papers matching the query."""
+        ...
 
-        Returns a list of PaperResult or DatasetResult objects.
-        """
+    def search_datasets(self, query: str, max_results: int = 100) -> list[DatasetResult]:
+        """Search for datasets. Override in subclasses that support this."""
+        return []
 
-    def _rate_limit(self) -> None:
-        """Sleep to respect rate limits."""
-        time.sleep(self.rate_limit_delay)
+    @property
+    @abstractmethod
+    def source_name(self) -> str:
+        """Name of this data source (e.g., 'pubmed', 'biorxiv')."""
+        ...
