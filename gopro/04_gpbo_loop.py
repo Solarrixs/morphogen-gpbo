@@ -391,7 +391,7 @@ def _fidelity_to_task_idx(
     # exact float constants (0.0, 0.5, 1.0) assigned by merge_multi_fidelity_data.
     task_idx = torch.tensor(
         [fidelity_map[f] for f in fidelity_values.tolist()],
-        dtype=fidelity_values.dtype,
+        dtype=torch.long,
     )
     return task_idx, fidelity_map
 

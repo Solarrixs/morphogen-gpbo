@@ -26,7 +26,7 @@
 - [x] S-1: Replace np.random.RandomState with default_rng in benchmarks | Acceptance: no RandomState in benchmarks/
 - [x] S-2: Optimize score_gene_signatures memory — copy obs not full AnnData | Acceptance: reduced memory
 - [x] S-3: Rename run_noise_sweep → run_random_baseline_noise_sweep | Acceptance: name clarified
-- [ ] S-4: Fix _fidelity_to_task_idx dtype to torch.long | Acceptance: dtype is torch.long
+- [x] S-4: Fix _fidelity_to_task_idx dtype to torch.long | Acceptance: dtype is torch.long, tests pass
 - [ ] S-5: Add 12+ unit tests for new features | Acceptance: 12+ new tests, all pass
 
 ## Architecture Decisions

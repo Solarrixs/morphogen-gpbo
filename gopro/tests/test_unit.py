@@ -1889,10 +1889,12 @@ class TestPerFidelityARD:
         assert fid_map[0.0] == 0
         assert fid_map[0.5] == 1
         assert fid_map[1.0] == 2
+        # Verify dtype is torch.long (required for IndexKernel task indices)
+        assert task_idx.dtype == torch.long
         # Verify actual indices
-        assert task_idx[0].item() == 2.0  # fidelity 1.0 → idx 2
-        assert task_idx[1].item() == 0.0  # fidelity 0.0 → idx 0
-        assert task_idx[2].item() == 1.0  # fidelity 0.5 → idx 1
+        assert task_idx[0].item() == 2  # fidelity 1.0 → idx 2
+        assert task_idx[1].item() == 0  # fidelity 0.0 → idx 0
+        assert task_idx[2].item() == 1  # fidelity 0.5 → idx 1
 
     def test_fidelity_to_task_idx_two_levels(self):
         """_fidelity_to_task_idx handles 2 fidelity levels."""
@@ -1901,6 +1903,7 @@ class TestPerFidelityARD:
         assert len(fid_map) == 2
         assert fid_map[0.5] == 0
         assert fid_map[1.0] == 1
+        assert task_idx.dtype == torch.long
 
     def test_per_fidelity_ard_model_fits(self, mf_data):
         """fit_gp_botorch with per_fidelity_ard=True produces a fitted model."""
