@@ -51,17 +51,21 @@ MORPHOGEN_COLUMNS: list[str] = [
 
 # --- Molecular weights (kDa) for recombinant protein morphogens ---
 # Used to convert ng/mL → µM: µM = (ng/mL) / (MW_kDa × 1000)
+# For disulfide-linked homodimers (BMPs, Activin A), use DIMER MW because
+# vendors weigh and lyophilize the intact dimer — ng/mL is total dimer mass.
+# For non-covalent dimers (BDNF, NT3) and monomers, use monomer MW per
+# vendor convention.
 PROTEIN_MW_KDA: dict[str, float] = {
-    "BMP4":     13.0,   # Mature monomer (recombinant human BMP4)
-    "BMP7":     15.7,   # Mature monomer
-    "SHH":      19.6,   # N-terminal signaling domain
-    "FGF2":     17.2,   # 154-aa isoform (bFGF)
-    "FGF4":     19.2,
-    "FGF8":     22.5,   # FGF8b isoform
-    "EGF":       6.2,
-    "ActivinA": 26.0,   # Homodimer
-    "BDNF":     13.5,   # Mature monomer (recombinant human BDNF)
-    "NT3":      13.6,   # Mature monomer (neurotrophin-3)
+    "BMP4":     24.2,   # Disulfide-linked homodimer (PeproTech E. coli, 2×107 aa)
+    "BMP7":     26.4,   # Disulfide-linked homodimer (PeproTech, 2×~132 aa)
+    "SHH":      19.6,   # N-terminal signaling domain monomer (Cys24-Gly197)
+    "FGF2":     17.2,   # 154-aa isoform monomer (bFGF, PeproTech 100-18B)
+    "FGF4":     19.7,   # Monomer (PeproTech 100-31, 182 aa)
+    "FGF8":     22.5,   # FGF8b isoform monomer
+    "EGF":       6.2,   # Monomer (53 aa, PeproTech)
+    "ActivinA": 26.0,   # Disulfide-linked homodimer (2×116 aa betaA chains)
+    "BDNF":     13.5,   # Monomer basis (non-covalent homodimer; vendor reports per chain)
+    "NT3":      13.6,   # Monomer basis (non-covalent homodimer; vendor reports per chain)
 }
 
 
@@ -306,7 +310,7 @@ MORPHOGEN_ACTIVITY_THRESHOLDS: dict[str, float] = {
     "LDN193189_uM": 0.005,    # IC50 ~5 nM (ALK2/ALK3)
     "SAG_uM": 0.003,           # EC50 ~3 nM (Chen et al. 2002, DOI:10.1073/pnas.212323999)
     "SB431542_uM": 0.05,       # IC50 ~94 nM (Inman et al. 2002)
-    "DAPT_uM": 0.5,            # IC50 ~115 nM (gamma-secretase)
+    "DAPT_uM": 0.1,            # IC50 ~20 nM cell-free, ~100-200 nM cellular (Dovey 2001, DOI:10.1046/j.1471-4159.2001.00012.x)
     "Dorsomorphin_uM": 0.5,    # IC50 ~500 nM (ALK2/3/6)
     "IWP2_uM": 0.1,            # IC50 ~27 nM (Porcupine)
 }

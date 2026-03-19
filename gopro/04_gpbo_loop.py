@@ -609,10 +609,12 @@ def _set_dim_scaled_lengthscale_prior(model, d: int) -> None:
 
 
 def _set_noise_prior(model) -> None:
-    """Set a Gamma(1.1, 0.05) prior on the GP likelihood noise variance.
+    """Set a Gamma(2.0, 20.0) prior on the GP likelihood noise variance.
 
-    Gamma(concentration=1.1, rate=0.05) has mean=22, mode=2.  This prior
-    prevents the optimiser from collapsing noise to near-zero (overfitting).
+    Gamma(concentration=2.0, rate=20.0) has mean=0.1, mode=0.05 in standardized
+    space (after Standardize transform, Y has variance ~1).  This prior encodes
+    that noise explains ~5-10% of total variance — preventing collapse to zero
+    (overfitting) without over-smoothing predictions.
     Cosenza et al. 2022 (DOI:10.1002/bit.28132) inspired the multi-source BO
     approach; specific noise prior parameters are pipeline heuristics.
 
@@ -626,11 +628,11 @@ def _set_noise_prior(model) -> None:
     try:
         model.likelihood.noise_covar.register_prior(
             "noise_prior",
-            GammaPrior(concentration=1.1, rate=0.05),
+            GammaPrior(concentration=2.0, rate=20.0),
             lambda m: m.noise,
             lambda m, v: m._set_noise(v),
         )
-        logger.info("Set Gamma(1.1, 0.05) noise prior on likelihood")
+        logger.info("Set Gamma(2.0, 20.0) noise prior on likelihood")
     except Exception as exc:
         logger.warning("Could not set noise prior: %s", exc)
 
@@ -639,7 +641,7 @@ def _set_explicit_priors(model, d: int) -> None:
     """Set both lengthscale and noise priors on a GP model.
 
     Combines the dimensionality-scaled LogNormal lengthscale prior
-    (Hvarfner et al. ICML 2024) with a Gamma(1.1, 0.05) noise prior.
+    (Hvarfner et al. ICML 2024) with a Gamma(2.0, 20.0) noise prior.
     Cosenza et al. 2022 (DOI:10.1002/bit.28132) inspired the multi-source BO
     approach; specific noise prior parameters are pipeline heuristics.
 
@@ -2034,7 +2036,7 @@ def fit_gp_botorch(
             for SAASBO and LassoBO. (default: 1 = single fit)
         explicit_priors: If True, set explicit priors on GP hyperparameters:
             LogNormal lengthscale prior (Hvarfner et al. ICML 2024) +
-            Gamma(1.1, 0.05) noise prior (pipeline heuristic). Applies to MAP
+            Gamma(2.0, 20.0) noise prior (pipeline heuristic). Applies to MAP
             paths only (standard, MixedSingleTaskGP, per-type-GP,
             multi-fidelity). Ignored for SAASBO and LassoBO which have their
             own priors. (default: False)
@@ -3926,7 +3928,7 @@ def run_gpbo_loop(
             hyperparameters and keeps the fit with the highest MLL.
             Only applies to MAP fitting paths. (default: 1)
         explicit_priors: If True, set explicit priors on GP hyperparameters:
-            LogNormal lengthscale prior + Gamma(1.1, 0.05) noise prior
+            LogNormal lengthscale prior + Gamma(2.0, 20.0) noise prior
             (pipeline heuristic). Only applies to MAP fitting paths. (default: False)
         mc_samples: Number of Sobol QMC samples for acquisition function
             evaluation (Cosenza 2022). Higher values reduce variance in
@@ -4536,7 +4538,7 @@ if __name__ == "__main__":
     parser.add_argument("--explicit-priors", action="store_true",
                         help="Set explicit priors on GP hyperparameters: "
                              "LogNormal lengthscale prior (Hvarfner 2024) + "
-                             "Gamma(1.1, 0.05) noise prior (pipeline heuristic). "
+                             "Gamma(2.0, 20.0) noise prior (pipeline heuristic). "
                              "Only applies to MAP paths.")
     parser.add_argument("--mc-samples", type=int, default=512,
                         help="Number of Sobol QMC samples for acquisition "

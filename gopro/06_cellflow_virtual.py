@@ -550,7 +550,7 @@ MORPHOGEN_PATHWAY_MAP: dict[str, dict] = {
         },
     },
     "IWP2_uM": {
-        "pathway": "WNT", "direction": "antagonist", "ec50": 2.5, "hill": 1.0,
+        "pathway": "WNT", "direction": "antagonist", "ec50": 0.5, "hill": 1.0,  # Phenotypic; biochem IC50=27nM (Chen 2009, DOI:10.1038/nchembio.137)
         "effects": {
             "NPC": +0.15, "Neuroepithelium": +0.10, "Neuron": -0.05,
         },
@@ -592,7 +592,7 @@ MORPHOGEN_PATHWAY_MAP: dict[str, dict] = {
         },
     },
     "SAG_uM": {
-        "pathway": "SHH", "direction": "agonist", "ec50": 0.5, "hill": 1.0,
+        "pathway": "SHH", "direction": "agonist", "ec50": 0.1, "hill": 1.0,  # Phenotypic EC50; biochem EC50=3nM (Chen 2002)
         "effects": {
             "Neuron": +0.10, "IP": +0.05, "NPC": +0.03,
         },

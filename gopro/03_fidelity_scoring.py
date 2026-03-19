@@ -360,9 +360,12 @@ def compute_rss(
     all_labels = sorted(set(condition_vec.index) | set(reference_profiles.columns))
     cond_aligned = np.array([condition_vec.get(l, 0.0) for l in all_labels])
 
-    # Compute all Aitchison distances first, then derive the scale via the
-    # median heuristic (Garreau, Jitkrittum & Kanagawa, 2017): set kernel
-    # bandwidth to the median of observed pairwise distances.
+    # Compute all Aitchison distances first, then derive the scale via an
+    # adapted median heuristic (Garreau, Jitkrittum & Kanagawa, 2017).
+    # NOTE: This uses per-query distances (condition → all references), not
+    # all-pairwise distances. Per-query bandwidth makes absolute similarity
+    # values non-comparable across conditions, but relative rankings within
+    # a single scoring call are valid.
     ref_aligned_vecs = {}
     distances = {}
     for region in reference_profiles.index:
