@@ -2439,8 +2439,11 @@ class TestTVR:
         x = torch.rand(1, d, dtype=train_X.dtype, requires_grad=True)
         optimizer = torch.optim.Adam([x], lr=0.05)
 
-        initial_mean = None
-        for step in range(10):
+        # Capture true baseline before any optimizer steps
+        with torch.no_grad():
+            initial_mean = model.posterior(x).mean[..., 0].sum().item()
+
+        for _step in range(3):
             optimizer.zero_grad()
             post = model.posterior(x)
             # Maximize mean of first output
@@ -2450,8 +2453,6 @@ class TestTVR:
             # Clamp to [0, 1]
             with torch.no_grad():
                 x.clamp_(0.0, 1.0)
-            if step == 0:
-                initial_mean = -loss.item()
 
         final_mean = -loss.item()
 
@@ -2459,8 +2460,10 @@ class TestTVR:
         assert x.grad is not None, "No gradients computed through TVR posterior"
         assert torch.all(torch.isfinite(x.grad)), "TVR gradients contain NaN/Inf"
         assert torch.all(torch.isfinite(x)), "Optimized x contains NaN/Inf"
-        # Optimization should not have gotten stuck (mean should have changed)
-        assert final_mean != initial_mean, "Optimization made no progress through TVR"
+        # Optimization should have improved the posterior mean
+        assert final_mean > initial_mean, (
+            f"Optimization did not improve mean: {initial_mean:.4f} -> {final_mean:.4f}"
+        )
 
     def test_tvr_gradient_warning_in_docstring(self):
         """TVRModelEnsemble.posterior docstring should warn about gradient chain."""

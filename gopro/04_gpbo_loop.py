@@ -1923,7 +1923,7 @@ class TVRModelEnsemble:
             posterior *is* smooth, and (b) ``optimize_acqf`` uses random
             restarts that sample across fidelity regions.  However, any
             downstream code that relies on end-to-end differentiability
-            through the ensemble (e.g. second-order optimizers) will break.
+            through the ensemble (e.g. full Hessian-based optimizers) will break.
         """
         # Collect posteriors from all models (no torch.no_grad — gradients
         # must flow for BoTorch acquisition function optimization)
