@@ -49,9 +49,9 @@ def run_noise_sweep(
     records: list[dict] = []
 
     for noise in noise_levels:
+        fn = ToyMorphogenFunction(noise_std=noise, seed=seed)
         for batch_size in batch_sizes:
             rng = np.random.default_rng(seed)
-            fn = ToyMorphogenFunction(noise_std=noise, seed=seed)
 
             # Generate initial random points
             x_init = rng.random((n_initial, n_morphogens)) * 10.0

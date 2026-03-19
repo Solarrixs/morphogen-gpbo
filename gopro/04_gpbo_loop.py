@@ -77,8 +77,9 @@ def _inflate_cellflow_variance(
     if factor == 1.0 or len(fractions) == 0:
         return fractions
 
-    mean_composition = fractions.values.mean(axis=0, keepdims=True)
-    inflated = mean_composition + factor * (fractions.values - mean_composition)
+    vals = fractions.values
+    mean_composition = vals.mean(axis=0, keepdims=True)
+    inflated = mean_composition + factor * (vals - mean_composition)
 
     # Clamp to non-negative, then re-normalise rows to sum to 1
     inflated = np.maximum(inflated, 0.0)
