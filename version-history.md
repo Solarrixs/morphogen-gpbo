@@ -33,3 +33,4 @@
 | 5 | pending | working | ralph/fix-review-issues | [ralph-5] S-2: Optimize score_gene_signatures — avoid full AnnData copy |
 | 4 | `9727e60` | working | ralph/fix-review-issues | [ralph-simplify] Hoist ToyMorphogenFunction out of inner loop, rename arr→vals |
 | 5 | `377a140` | working | ralph/fix-review-issues | [ralph-simplify] Fix permutation column leak and cache filtered genes in score_gene_signatures |
+| 6 | `bc3098c` | working | ralph/fix-review-issues | [ralph-simplify] Fix RNG reuse bug, remove dead accumulation, clean up noise sweep |
