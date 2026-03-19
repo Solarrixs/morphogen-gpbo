@@ -12,7 +12,7 @@ from gopro.benchmarks.toy_morphogen_function import (
     CELL_TYPES,
     MORPHOGEN_COLUMNS,
 )
-from gopro.benchmarks.noise_robustness import run_noise_sweep, summarize_noise_sweep
+from gopro.benchmarks.noise_robustness import run_random_baseline_noise_sweep, summarize_random_baseline_noise_sweep
 from conftest import _import_pipeline_module
 
 step04 = _import_pipeline_module("04_gpbo_loop")
@@ -220,12 +220,12 @@ class TestARDLipschitz:
 class TestRunNoiseSweep:
     """Tests for the noise-robustness sweep."""
 
-    def test_run_noise_sweep_shape(self):
+    def test_run_random_baseline_noise_sweep_shape(self):
         """Output has expected columns and correct number of rows."""
         noise_levels = (0.01, 0.1)
         batch_sizes = (4, 8)
         n_rounds = 2
-        df = run_noise_sweep(
+        df = run_random_baseline_noise_sweep(
             noise_levels=noise_levels,
             batch_sizes=batch_sizes,
             n_rounds=n_rounds,
@@ -247,14 +247,14 @@ class TestRunNoiseSweep:
 
     def test_sweep_low_noise_better(self):
         """Low noise should produce lower regret than high noise."""
-        df = run_noise_sweep(
+        df = run_random_baseline_noise_sweep(
             noise_levels=(0.01, 0.5),
             batch_sizes=(16,),
             n_rounds=5,
             n_initial=20,
             seed=42,
         )
-        summary = summarize_noise_sweep(df)
+        summary = summarize_random_baseline_noise_sweep(df)
         low_regret = summary.loc[
             summary["noise_level"] == 0.01, "regret"
         ].values[0]
@@ -266,14 +266,14 @@ class TestRunNoiseSweep:
 
     def test_summarize_produces_recommendation(self):
         """Summary includes 'robust' or 'sensitive' recommendation."""
-        df = run_noise_sweep(
+        df = run_random_baseline_noise_sweep(
             noise_levels=(0.01, 0.2),
             batch_sizes=(8,),
             n_rounds=2,
             n_initial=5,
             seed=42,
         )
-        summary = summarize_noise_sweep(df)
+        summary = summarize_random_baseline_noise_sweep(df)
         assert "recommendation" in summary.columns
         assert set(summary["recommendation"].unique()).issubset(
             {"robust", "sensitive"}

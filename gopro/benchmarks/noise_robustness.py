@@ -17,7 +17,7 @@ from gopro.benchmarks.toy_morphogen_function import ToyMorphogenFunction
 logger = get_logger(__name__)
 
 
-def run_noise_sweep(
+def run_random_baseline_noise_sweep(
     noise_levels: tuple[float, ...] = (0.01, 0.05, 0.1, 0.2),
     batch_sizes: tuple[int, ...] = (8, 16, 24),
     n_rounds: int = 3,
@@ -105,7 +105,7 @@ def run_noise_sweep(
     return pd.DataFrame(records)
 
 
-def summarize_noise_sweep(results: pd.DataFrame) -> pd.DataFrame:
+def summarize_random_baseline_noise_sweep(results: pd.DataFrame) -> pd.DataFrame:
     """Summarize sweep results with regret and robustness assessment.
 
     Groups by (noise_level, batch_size), takes the final round's
@@ -113,7 +113,7 @@ def summarize_noise_sweep(results: pd.DataFrame) -> pd.DataFrame:
     and labels each configuration as 'robust' if regret < 0.1.
 
     Args:
-        results: Output of :func:`run_noise_sweep`.
+        results: Output of :func:`run_random_baseline_noise_sweep`.
 
     Returns:
         DataFrame with columns: noise_level, batch_size, final_best,

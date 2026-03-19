@@ -25,7 +25,7 @@
 - [x] I-1: Extract _inflate_cellflow_variance — remove importlib usage | Acceptance: no importlib.util in 04_gpbo_loop.py
 - [x] S-1: Replace np.random.RandomState with default_rng in benchmarks | Acceptance: no RandomState in benchmarks/
 - [x] S-2: Optimize score_gene_signatures memory — copy obs not full AnnData | Acceptance: reduced memory
-- [ ] S-3: Rename/document run_noise_sweep | Acceptance: name or docstring clarified
+- [x] S-3: Rename run_noise_sweep → run_random_baseline_noise_sweep | Acceptance: name clarified
 - [ ] S-4: Fix _fidelity_to_task_idx dtype to torch.long | Acceptance: dtype is torch.long
 - [ ] S-5: Add 12+ unit tests for new features | Acceptance: 12+ new tests, all pass
 
