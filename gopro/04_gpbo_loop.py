@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from gopro.config import (
+    CELLFLOW_DEFAULT_VARIANCE_INFLATION,
     CONVERGENCE_ACQUISITION_DECAY_THRESHOLD,
     CONVERGENCE_CLUSTER_SPREAD_THRESHOLD,
     CONVERGENCE_POSTERIOR_EVAL_POINTS,
@@ -63,14 +64,39 @@ from gopro.config import (
 logger = get_logger(__name__)
 
 
-def _inflate_cellflow_variance(fractions: pd.DataFrame, factor: float) -> pd.DataFrame:
-    """Lazy-import wrapper for inflate_cellflow_variance from step 06."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "step06", str(Path(__file__).parent / "06_cellflow_virtual.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.inflate_cellflow_variance(fractions, factor=factor)
+def _inflate_cellflow_variance(
+    fractions: pd.DataFrame,
+    factor: float = CELLFLOW_DEFAULT_VARIANCE_INFLATION,
+) -> pd.DataFrame:
+    """Inflate CellFlow prediction variance to counteract conservative bias.
+
+    Amplifies each condition's deviation from the global mean by *factor*,
+    then re-normalises to valid fractions:
+    ``inflated = mean + factor * (original - mean)``
+    """
+    if factor == 1.0 or len(fractions) == 0:
+        return fractions
+
+    mean_composition = fractions.values.mean(axis=0, keepdims=True)
+    inflated = mean_composition + factor * (fractions.values - mean_composition)
+
+    # Clamp to non-negative, then re-normalise rows to sum to 1
+    inflated = np.maximum(inflated, 0.0)
+    row_sums = inflated.sum(axis=1, keepdims=True)
+    # Replace all-zero rows with mean composition (avoids downstream ILR NaNs)
+    zero_rows = (row_sums == 0).ravel()
+    if zero_rows.any():
+        inflated[zero_rows] = mean_composition
+        row_sums[zero_rows] = mean_composition.sum()
+    inflated = inflated / row_sums
+
+    result = pd.DataFrame(inflated, index=fractions.index, columns=fractions.columns)
+    logger.info(
+        "Applied variance inflation (factor=%.1f) to %d CellFlow predictions",
+        factor,
+        len(result),
+    )
+    return result
 
 
 def confidence_to_noise_variance(

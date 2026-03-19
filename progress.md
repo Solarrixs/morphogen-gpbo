@@ -2,7 +2,14 @@
 
 ## Iteration Log
 
-## Iteration 3 — 2026-03-19T10:54:04Z
+## Iteration 3 (ralph-3) — 2026-03-19
+- Task: I-1 — Extract _inflate_cellflow_variance (remove importlib from 04_gpbo_loop.py)
+- Result: pass
+- Files changed: gopro/04_gpbo_loop.py (+25/-7)
+- Quality: Inlined inflate_cellflow_variance logic directly in 04_gpbo_loop.py, eliminating importlib.util dependency. Added CELLFLOW_DEFAULT_VARIANCE_INFLATION import from config. Function now self-contained with same logic as step 06. 471 tests pass (pre-existing Gruffi/numba failures excluded).
+- Notes: 5 code review items remaining (S-1 through S-5).
+
+## Iteration 3 (prev) — 2026-03-19T10:54:04Z
 - Task: I-4 — Deduplicate antagonist pairs (YAML single source of truth) + simplify pass
 - Result: pass
 - Commits:
