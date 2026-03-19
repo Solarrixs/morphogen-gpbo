@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from pathlib import Path
 
 from gopro.validation import (
     ValidationError,
@@ -219,3 +220,74 @@ class TestValidateFidelityReport:
     def test_nonexistent_file_raises(self, tmp_path):
         with pytest.raises(ValidationError, match="not found"):
             validate_fidelity_report(tmp_path / "nonexistent.csv")
+
+
+class TestGeoChecksumVerification:
+    """Tests for GEO file checksum verification logic."""
+
+    def test_verify_checksums_match(self, tmp_path, monkeypatch):
+        """Files matching md5_plain checksums should pass."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "step00a", str(Path(__file__).parent.parent / "00a_download_geo.py"))
+        step00a = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(step00a)
+
+        # Create a test file and compute its checksum
+        test_file = tmp_path / "test.csv"
+        test_file.write_text("hello,world\n1,2\n")
+        from gopro.config import md5_file
+        expected = md5_file(test_file)
+
+        monkeypatch.setattr(step00a, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(step00a, "FILES", [
+            {"name": "test.csv.gz", "md5": None, "md5_plain": expected},
+        ])
+
+        assert step00a.verify_checksums() is True
+
+    def test_verify_checksums_mismatch(self, tmp_path, monkeypatch):
+        """Files with wrong md5_plain should fail."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "step00a", str(Path(__file__).parent.parent / "00a_download_geo.py"))
+        step00a = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(step00a)
+
+        test_file = tmp_path / "test.csv"
+        test_file.write_text("hello,world\n1,2\n")
+
+        monkeypatch.setattr(step00a, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(step00a, "FILES", [
+            {"name": "test.csv.gz", "md5": None, "md5_plain": "0000000000000000"},
+        ])
+
+        assert step00a.verify_checksums() is False
+
+    def test_verify_missing_file(self, tmp_path, monkeypatch):
+        """Missing files should fail verification."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "step00a", str(Path(__file__).parent.parent / "00a_download_geo.py"))
+        step00a = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(step00a)
+
+        monkeypatch.setattr(step00a, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(step00a, "FILES", [
+            {"name": "nonexistent.csv.gz", "md5": None, "md5_plain": "abc"},
+        ])
+
+        assert step00a.verify_checksums() is False
+
+    def test_files_have_md5_plain(self):
+        """All FILES entries should have md5_plain checksums populated."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "step00a", str(Path(__file__).parent.parent / "00a_download_geo.py"))
+        step00a = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(step00a)
+
+        for entry in step00a.FILES:
+            assert entry.get("md5_plain") is not None, (
+                f"Missing md5_plain for {entry['name']}"
+            )
