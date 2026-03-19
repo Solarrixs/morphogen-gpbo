@@ -217,7 +217,7 @@ class TestARDLipschitz:
             step04.compute_ard_lipschitz(model, cols)
 
 
-class TestRunNoiseSweep:
+class TestRunRandomBaselineNoiseSweep:
     """Tests for the noise-robustness sweep."""
 
     def test_run_random_baseline_noise_sweep_shape(self):
