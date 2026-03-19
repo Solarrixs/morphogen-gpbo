@@ -26,3 +26,4 @@
 | 15 | `73e0d42` | working | ralph/production-readiness-phase2 | [ralph-simplify] Remove dead code from ZeroPassingKernel: orphaned _phi and forward methods after return statement |
 | 16 | `8b6c435` | working | ralph/production-readiness-phase2 | [ralph-simplify] Remove redundant compute_desirability call, add per-pathway debug logging |
 | 17 | `f9ebf5d` | working | ralph/production-readiness-phase2 | [ralph-simplify] Clean up ALR transform: remove overly strict guard, vectorize variance loop, fix docstrings |
+| 1 | `1a958ab` | working | ralph/fix-review-issues | [ralph-simplify] Fix TVR test: capture baseline before optimization, assert improvement direction |
