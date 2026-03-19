@@ -2,6 +2,16 @@
 
 ## Iteration Log
 
+## Iteration 3 — 2026-03-19T10:54:04Z
+- Task: I-4 — Deduplicate antagonist pairs (YAML single source of truth) + simplify pass
+- Result: pass
+- Commits:
+  - `e73a4c9` [ralph-2] I-4: Deduplicate antagonist pairs — YAML single source of truth
+  - `3d0cf86` [ralph-simplify] Reuse scorer.py YAML loader instead of duplicating it
+- Files changed: gopro/04_gpbo_loop.py (+15/-13), data/convergence_diagnostics.csv, data/gp_diagnostics_round1.csv, data/gp_recommendations_round1.csv
+- Quality: Simplify pass eliminated duplicated YAML loader — 04_gpbo_loop.py now imports `_load_pathway_rules()` from scorer.py instead of reimplementing. Both consumers share single YAML loading path. Backward-compatible `ANTAGONIST_PAIRS` alias kept.
+- Notes: 6 code review items remaining (I-1, S-1 through S-5). Next priority: I-1 (extract _inflate_cellflow_variance — remove importlib from 04_gpbo_loop.py).
+
 ## Iteration 2 — 2026-03-19
 - Task: I-4 — Deduplicate antagonist pairs (YAML single source of truth)
 - Result: pass
