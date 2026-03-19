@@ -494,6 +494,16 @@ DEFAULT_COMPOSITE_WEIGHTS: dict[str, float] = {
     "entropy": 0.15,
 }
 
+# Weights when maturity proxy is available (still heuristic, not literature-backed).
+# Maturity gets 0.15 weight, taken proportionally from other sub-scores.
+DEFAULT_COMPOSITE_WEIGHTS_WITH_MATURITY: dict[str, float] = {
+    "rss": 0.30,
+    "on_target": 0.20,
+    "off_target": 0.20,
+    "entropy": 0.15,
+    "maturity": 0.15,
+}
+
 
 def compute_composite_fidelity(
     rss_score: float,
@@ -502,6 +512,7 @@ def compute_composite_fidelity(
     norm_entropy: float,
     weights: Optional[dict[str, float]] = None,
     entropy_center: Optional[float] = None,
+    maturity_score: Optional[float] = None,
 ) -> float:
     """Compute a single composite fidelity score in [0, 1].
 
@@ -543,7 +554,10 @@ def compute_composite_fidelity(
         Composite fidelity score in [0, 1].
     """
     if weights is None:
-        weights = dict(DEFAULT_COMPOSITE_WEIGHTS)
+        if maturity_score is not None and not np.isnan(maturity_score):
+            weights = dict(DEFAULT_COMPOSITE_WEIGHTS_WITH_MATURITY)
+        else:
+            weights = dict(DEFAULT_COMPOSITE_WEIGHTS)
 
     if entropy_center is None:
         entropy_center = _DEFAULT_ENTROPY_CENTER
@@ -564,6 +578,10 @@ def compute_composite_fidelity(
         + weights["off_target"] * (1.0 - off_target_frac)
         + weights["entropy"] * entropy_score
     )
+
+    # Add maturity contribution if available and weighted
+    if maturity_score is not None and not np.isnan(maturity_score) and "maturity" in weights:
+        score += weights["maturity"] * maturity_score
 
     return float(np.clip(score, 0.0, 1.0))
 
@@ -747,6 +765,23 @@ def score_all_conditions(
     conditions = obs[condition_key].unique()
     logger.info("Scoring %d conditions...", len(conditions))
 
+    # Check if KNN latent distance is available (transcriptomic maturity proxy)
+    has_maturity = "mean_knn_dist_to_ref" in obs.columns
+    if has_maturity:
+        # Compute a global scale factor for converting distance → similarity.
+        # Use median distance so the score is relative to the dataset.
+        all_dists = obs["mean_knn_dist_to_ref"].dropna()
+        dist_scale = float(all_dists.median()) if len(all_dists) > 0 else 1.0
+        logger.info(
+            "Maturity proxy available: median KNN dist=%.3f (scale factor)",
+            dist_scale,
+        )
+    else:
+        logger.info(
+            "No mean_knn_dist_to_ref in obs — skipping maturity sub-score. "
+            "Run step 02 with updated transfer_labels_knn to enable."
+        )
+
     # Total unique cell types across all conditions for consistent entropy normalization
     total_cell_types = obs[pred_level2].nunique()
 
@@ -781,6 +816,19 @@ def score_all_conditions(
             rss_fracs = align_composition_to_braun(rss_fracs, label_map)
         rss_region, rss_score = compute_rss(rss_fracs, rss_profiles)
 
+        # Maturity proxy: mean KNN latent distance per condition → similarity score.
+        # Lower distance = closer to reference in latent space = more mature.
+        # Converted to [0, 1] via exp(-dist/scale) so 1.0 = transcriptomically close.
+        if has_maturity:
+            cond_dists = subset["mean_knn_dist_to_ref"].dropna()
+            if len(cond_dists) > 0:
+                mean_dist = float(cond_dists.mean())
+                maturity_score = float(np.exp(-mean_dist / dist_scale))
+            else:
+                maturity_score = 0.0
+        else:
+            maturity_score = np.nan
+
         # Composite fidelity
         fidelity = compute_composite_fidelity(
             rss_score=rss_score,
@@ -788,6 +836,7 @@ def score_all_conditions(
             off_target_frac=off_target,
             norm_entropy=h_norm,
             entropy_center=entropy_center,
+            maturity_score=maturity_score if has_maturity else None,
         )
 
         results.append({
@@ -801,6 +850,7 @@ def score_all_conditions(
             "normalized_entropy": round(h_norm, 4),
             "rss_best_region": rss_region,
             "rss_score": round(rss_score, 4),
+            "maturity_score": round(maturity_score, 4) if not np.isnan(maturity_score) else np.nan,
             "composite_fidelity": round(fidelity, 4),
         })
 

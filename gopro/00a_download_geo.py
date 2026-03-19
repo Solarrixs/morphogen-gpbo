@@ -154,7 +154,8 @@ def main():
     # Download phase
     logger.info("\nDownloading %d files to %s ...\n", len(FILES), DATA_DIR)
 
-    for i, filename in enumerate(FILES, 1):
+    for i, entry in enumerate(FILES, 1):
+        filename = entry["name"]
         url = GEO_FTP_BASE + filename
         filepath = DATA_DIR / filename
 

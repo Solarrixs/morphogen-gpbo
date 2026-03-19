@@ -311,6 +311,15 @@ def transfer_labels_knn(
     # Distance-based weights (inverse distance, avoid division by zero)
     dist_weights = 1.0 / (distances + 1e-10)  # shape: (n_query, k)
 
+    # Save mean KNN distance per cell as transcriptomic maturity proxy.
+    # Low distance = close to reference in latent space = transcriptomically similar.
+    results["mean_knn_dist_to_ref"] = distances.mean(axis=1)
+    logger.info(
+        "KNN latent distance: mean=%.3f, median=%.3f, range=[%.3f, %.3f]",
+        distances.mean(), np.median(distances.mean(axis=1)),
+        distances.mean(axis=1).min(), distances.mean(axis=1).max(),
+    )
+
     for label_col in label_columns:
         if label_col not in ref_obs.columns:
             logger.warning("%s not in reference, skipping", label_col)

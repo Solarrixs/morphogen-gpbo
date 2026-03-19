@@ -233,6 +233,17 @@ class TestTransferLabelsKnnEdgeCases:
         prob_df = soft["annot_level_1"]
         assert np.allclose(prob_df.sum(axis=1), 1.0, atol=1e-6)
 
+    def test_mean_knn_dist_saved(self, knn_fixture):
+        """transfer_labels_knn should save mean_knn_dist_to_ref in results."""
+        ref_latent, query_latent, ref_obs, query_obs = knn_fixture
+        results, _ = step02.transfer_labels_knn(
+            ref_latent, query_latent, ref_obs, query_obs,
+            label_columns=["annot_level_1"], k=10,
+        )
+        assert "mean_knn_dist_to_ref" in results.columns
+        assert len(results["mean_knn_dist_to_ref"]) == len(query_obs)
+        assert (results["mean_knn_dist_to_ref"] >= 0).all()
+
     def test_multiple_label_columns(self, knn_fixture):
         """Should transfer labels for all specified columns."""
         ref_latent, query_latent, ref_obs, query_obs = knn_fixture
@@ -1397,6 +1408,86 @@ class TestComputeCompositeFidelity:
                 norm_entropy=np.random.rand(),
             )
             assert 0.0 <= score <= 1.0
+
+    def test_maturity_score_increases_composite(self):
+        """High maturity score should increase composite fidelity."""
+        base = step03.compute_composite_fidelity(
+            rss_score=0.7, on_target_frac=0.8, off_target_frac=0.1, norm_entropy=0.55,
+        )
+        with_maturity = step03.compute_composite_fidelity(
+            rss_score=0.7, on_target_frac=0.8, off_target_frac=0.1, norm_entropy=0.55,
+            maturity_score=1.0,
+        )
+        assert with_maturity > base
+
+    def test_maturity_nan_ignored(self):
+        """NaN maturity_score should fall back to 4-sub-score weights."""
+        score_no_maturity = step03.compute_composite_fidelity(
+            rss_score=0.7, on_target_frac=0.8, off_target_frac=0.1, norm_entropy=0.55,
+        )
+        score_nan_maturity = step03.compute_composite_fidelity(
+            rss_score=0.7, on_target_frac=0.8, off_target_frac=0.1, norm_entropy=0.55,
+            maturity_score=float("nan"),
+        )
+        assert score_no_maturity == pytest.approx(score_nan_maturity)
+
+    def test_maturity_weights_constant_exists(self):
+        """DEFAULT_COMPOSITE_WEIGHTS_WITH_MATURITY must exist and sum to ~1."""
+        w = step03.DEFAULT_COMPOSITE_WEIGHTS_WITH_MATURITY
+        assert "maturity" in w
+        assert abs(sum(w.values()) - 1.0) < 0.01
+
+
+class TestMaturityScoreInReport:
+    """Tests for maturity_score column in score_all_conditions output."""
+
+    def _make_query_adata(self, n_cells=60, include_knn_dist=True):
+        import anndata as ad
+        import scipy.sparse as sp
+        from gopro.config import ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_LEVEL_3, ANNOT_REGION
+        np.random.seed(42)
+        obs = pd.DataFrame({
+            "condition": ["cond_A"] * 30 + ["cond_B"] * 30,
+            f"predicted_{ANNOT_LEVEL_1}": (["Neuron"] * 15 + ["NPC"] * 15) * 2,
+            f"predicted_{ANNOT_LEVEL_2}": (["Cortical EN"] * 15 + ["Cortical RG"] * 15) * 2,
+            f"predicted_{ANNOT_LEVEL_3}": (["L2-3 CPN"] * 15 + ["oRG"] * 15) * 2,
+            f"predicted_{ANNOT_REGION}": ["Dorsal telencephalon"] * 60,
+        }, index=[f"c{i}" for i in range(n_cells)])
+        if include_knn_dist:
+            # cond_A: low distance (mature), cond_B: high distance (immature)
+            obs["mean_knn_dist_to_ref"] = [0.5] * 30 + [2.0] * 30
+        X = sp.eye(n_cells, format="csr", dtype=float)
+        return ad.AnnData(X=X, obs=obs)
+
+    def test_maturity_column_present_when_knn_available(self):
+        """maturity_score column appears in report when mean_knn_dist_to_ref exists."""
+        adata = self._make_query_adata(include_knn_dist=True)
+        # Build a minimal braun_profiles DataFrame
+        braun = pd.DataFrame({"Neuron": [0.6], "NPC": [0.4]}, index=["Dorsal"])
+        report = step03.score_all_conditions(
+            adata, braun_profiles=braun, condition_key="condition",
+        )
+        assert "maturity_score" in report.columns
+
+    def test_mature_condition_higher_maturity(self):
+        """Condition with lower KNN distance should have higher maturity_score."""
+        braun = pd.DataFrame({"Neuron": [0.6], "NPC": [0.4]}, index=["Dorsal"])
+        adata = self._make_query_adata(include_knn_dist=True)
+        report = step03.score_all_conditions(
+            adata, braun_profiles=braun, condition_key="condition",
+        )
+        # cond_A has dist=0.5, cond_B has dist=2.0 → cond_A should be more mature
+        assert report.loc["cond_A", "maturity_score"] > report.loc["cond_B", "maturity_score"]
+
+    def test_maturity_nan_when_no_knn_col(self):
+        """maturity_score should be NaN when mean_knn_dist_to_ref is absent."""
+        braun = pd.DataFrame({"Neuron": [0.6], "NPC": [0.4]}, index=["Dorsal"])
+        adata = self._make_query_adata(include_knn_dist=False)
+        report = step03.score_all_conditions(
+            adata, braun_profiles=braun, condition_key="condition",
+        )
+        assert "maturity_score" in report.columns
+        assert report["maturity_score"].isna().all()
 
 
 # =============================================================================

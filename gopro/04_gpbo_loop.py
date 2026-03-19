@@ -71,6 +71,26 @@ def _inflate_cellflow_variance(fractions: pd.DataFrame, factor: float) -> pd.Dat
     return mod.inflate_cellflow_variance(fractions, factor=factor)
 
 
+def confidence_to_noise_variance(
+    confidence: pd.Series,
+    base_noise: float = 1e-3,
+) -> pd.Series:
+    """Convert CellFlow per-condition confidence to observation noise variance.
+
+    Low confidence → high noise → GP trusts the point less.
+    Uses inverse-square mapping: noise = base_noise / confidence².
+
+    Args:
+        confidence: Per-condition confidence in (0, 1].
+        base_noise: Noise variance assigned to confidence=1.0 points.
+
+    Returns:
+        Per-condition noise variance values.
+    """
+    conf_clamped = confidence.clip(lower=0.01)
+    return base_noise / (conf_clamped ** 2)
+
+
 def cellflow_relevance_check(
     X_all: pd.DataFrame,
     Y_all: pd.DataFrame,
@@ -3444,7 +3464,9 @@ def merge_multi_fidelity_data(
     data_sources: list[tuple[Path, Path, float]],
     cellflow_confidence_threshold: float = 0.3,
     cellflow_variance_inflation: float = 1.0,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    cellflow_noise_from_confidence: bool = True,
+    base_noise: float = 1e-3,
+) -> tuple[pd.DataFrame, pd.DataFrame, Optional[pd.DataFrame]]:
     """Merge training data from multiple fidelity sources.
 
     Combines real, CellRank 2 virtual, and CellFlow virtual data into
@@ -3452,7 +3474,9 @@ def merge_multi_fidelity_data(
 
     For CellFlow data (fidelity=0.0), if a screening report CSV with a
     ``confidence`` column exists alongside the fractions CSV, points
-    below ``cellflow_confidence_threshold`` are filtered out.
+    below ``cellflow_confidence_threshold`` are filtered out. If
+    ``cellflow_noise_from_confidence`` is True, remaining points get
+    per-condition noise variance inversely proportional to confidence².
 
     Args:
         data_sources: List of (fractions_csv, morphogen_csv, fidelity) tuples.
@@ -3461,12 +3485,17 @@ def merge_multi_fidelity_data(
             virtual points. Points below this are dropped (default 0.3).
         cellflow_variance_inflation: Factor to inflate CellFlow prediction
             variance (>1 spreads predictions from global mean, 1.0 = no-op).
+        cellflow_noise_from_confidence: If True, convert CellFlow confidence
+            scores to per-point observation noise for heteroscedastic GP.
+        base_noise: Base noise variance for confidence=1.0 points.
 
     Returns:
-        Tuple of merged (X, Y) DataFrames with consistent column alignment.
+        Tuple of (X, Y, noise_variance) DataFrames. noise_variance is None
+        if no confidence-based noise was computed.
     """
     all_X = []
     all_Y = []
+    noise_parts: dict[str, float] = {}  # condition → noise variance
 
     for fractions_csv, morphogen_csv, fidelity in data_sources:
         if not fractions_csv.exists() or not morphogen_csv.exists():
@@ -3500,6 +3529,21 @@ def merge_multi_fidelity_data(
                                 "Filtered %d/%d CellFlow points below confidence threshold %.2f",
                                 n_filtered, n_before, cellflow_confidence_threshold,
                             )
+
+                        # Convert remaining confidence → noise variance for soft weighting
+                        if cellflow_noise_from_confidence:
+                            kept_conf = report.loc[
+                                report.index.intersection(X.index), "confidence"
+                            ]
+                            if len(kept_conf) > 0:
+                                nv = confidence_to_noise_variance(kept_conf, base_noise=base_noise)
+                                for cond, var in nv.items():
+                                    noise_parts[cond] = var
+                                logger.info(
+                                    "CellFlow confidence → noise: %d conditions, "
+                                    "mean=%.2e, range=[%.2e, %.2e]",
+                                    len(nv), nv.mean(), nv.min(), nv.max(),
+                                )
 
         # Apply variance inflation to CellFlow predictions
         if fidelity == 0.0 and cellflow_variance_inflation != 1.0 and len(Y) > 0:
@@ -3567,7 +3611,25 @@ def merge_multi_fidelity_data(
                      label, count, cost_per, level_cost)
     logger.info("  Total equivalent cost: %.2f real-experiment units", total_cost)
 
-    return merged_X, merged_Y
+    # Build noise variance DataFrame from confidence scores
+    confidence_noise_df = None
+    if noise_parts:
+        # Broadcast per-condition scalar noise to all Y columns
+        ct_cols = [c for c in merged_Y.columns if c != "fidelity"]
+        confidence_noise_df = pd.DataFrame(
+            base_noise,  # default noise for non-CellFlow conditions
+            index=merged_X.index,
+            columns=ct_cols,
+        )
+        for cond, var in noise_parts.items():
+            if cond in confidence_noise_df.index:
+                confidence_noise_df.loc[cond] = var
+        logger.info(
+            "Built confidence-based noise variance for %d/%d conditions",
+            len(noise_parts), len(merged_X),
+        )
+
+    return merged_X, merged_Y, confidence_noise_df
 
 
 
@@ -4030,7 +4092,7 @@ def run_gpbo_loop(
 
         if validated_virtual:
             all_sources = [(fractions_csv, morphogen_csv, 1.0)] + validated_virtual
-            X, Y = merge_multi_fidelity_data(
+            X, Y, confidence_noise = merge_multi_fidelity_data(
                 all_sources,
                 cellflow_variance_inflation=cellflow_variance_inflation,
             )
@@ -4038,8 +4100,10 @@ def run_gpbo_loop(
             logger.info("All virtual sources dropped by fidelity validation; "
                         "using single-fidelity GP on real data only")
             X, Y = X_real, Y_real
+            confidence_noise = None
     else:
         X, Y = X_real, Y_real
+        confidence_noise = None
 
     # CellFlow LOO-CV relevance check (rMFBO, Mikkola et al. 2023)
     # After merging, verify that CellFlow data actually helps GP predictions.
@@ -4062,6 +4126,7 @@ def run_gpbo_loop(
             keep_mask = X["fidelity"] != 0.0
             X = X.loc[keep_mask].copy()
             Y = Y.loc[keep_mask].copy()
+            confidence_noise = None  # discard CellFlow noise too
             # If only real data remains, drop fidelity column too
             if X["fidelity"].nunique() == 1:
                 logger.info("Single fidelity remaining after CellFlow removal; "
@@ -4186,6 +4251,22 @@ def run_gpbo_loop(
             noise_var_df = noise_var_df.fillna(noise_var_df.mean())
         except FileNotFoundError:
             logger.warning("Noise variance CSV not found: %s", _nv_path)
+
+    # Merge confidence-based noise from CellFlow into noise_var_df
+    if confidence_noise is not None:
+        if noise_var_df is None:
+            noise_var_df = confidence_noise
+            logger.info("Using CellFlow confidence-based noise variance")
+        else:
+            # Override CellFlow conditions in existing noise_var_df
+            overlap = confidence_noise.index.intersection(noise_var_df.index)
+            shared_cols = confidence_noise.columns.intersection(noise_var_df.columns)
+            if len(overlap) > 0 and len(shared_cols) > 0:
+                noise_var_df.loc[overlap, shared_cols] = confidence_noise.loc[overlap, shared_cols]
+                logger.info(
+                    "Merged CellFlow confidence noise into bootstrap noise for %d conditions",
+                    len(overlap),
+                )
 
     # Fit GP on active dimensions only (save/load handled inside fit_gp_botorch)
     if use_tvr and "fidelity" in X_active.columns and X_active["fidelity"].nunique() > 1:

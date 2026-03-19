@@ -369,6 +369,55 @@ class TestBaselinePredictor:
         assert "NPC" in result.columns
 
 
+class TestPredictCellflowFallbackGate:
+    """Tests for predict_cellflow allow_fallback parameter."""
+
+    def test_returns_none_when_fallback_disabled(self):
+        """Without allow_fallback, predict_cellflow returns None when no model exists."""
+        protocols = pd.DataFrame({
+            "CHIR99021_uM": [1.5],
+            "log_harvest_day": [math.log(21)],
+        }, index=["test"])
+        result = step06.predict_cellflow(
+            protocols, model_path=Path("/nonexistent/model"),
+            allow_fallback=False,
+        )
+        assert result is None
+
+    def test_returns_predictions_when_fallback_enabled(self):
+        """With allow_fallback=True, predict_cellflow uses heuristic baseline."""
+        protocols = pd.DataFrame({
+            "CHIR99021_uM": [1.5],
+            "log_harvest_day": [math.log(21)],
+        }, index=["test"])
+        result = step06.predict_cellflow(
+            protocols, model_path=Path("/nonexistent/model"),
+            allow_fallback=True,
+        )
+        assert result is not None
+        assert len(result) == 1
+        np.testing.assert_allclose(result.sum(axis=1), 1.0, atol=1e-6)
+
+    def test_run_virtual_screen_returns_none_when_fallback_disabled(self, tmp_path):
+        """run_virtual_screen returns None when fallback disabled and no model."""
+        # Create minimal morphogen CSV
+        morph = pd.DataFrame({
+            "CHIR99021_uM": [1.5],
+        }, index=["cond_A"])
+        morph_csv = tmp_path / "morphogens.csv"
+        morph.to_csv(morph_csv)
+
+        result = step06.run_virtual_screen(
+            morphogen_ranges={"CHIR99021_uM": [0.0, 1.5]},
+            real_morphogen_csv=morph_csv,
+            harvest_days=[21],
+            max_combinations=5,
+            model_path=Path("/nonexistent/model"),
+            allow_fallback=False,
+        )
+        assert result is None
+
+
 class TestPredictionConfidence:
     """Tests for CellFlow prediction confidence estimation."""
 
@@ -487,7 +536,7 @@ class TestMultiFidelityIntegration:
             (paths["cr2"][0], paths["cr2"][1], 0.5),
             (paths["cf"][0], paths["cf"][1], 0.0),
         ]
-        X, Y = step04.merge_multi_fidelity_data(sources)
+        X, Y, _noise = step04.merge_multi_fidelity_data(sources)
         assert len(X) == 100  # 20 + 30 + 50
         assert "fidelity" in X.columns
         assert X["fidelity"].nunique() == 3
@@ -498,7 +547,7 @@ class TestMultiFidelityIntegration:
             (paths["real"][0], paths["real"][1], 1.0),
             (paths["cr2"][0], paths["cr2"][1], 0.5),
         ]
-        X, Y = step04.merge_multi_fidelity_data(sources)
+        X, Y, _noise = step04.merge_multi_fidelity_data(sources)
         assert (X["fidelity"] == 1.0).sum() == 20
         assert (X["fidelity"] == 0.5).sum() == 30
 
@@ -517,7 +566,7 @@ class TestMultiFidelityIntegration:
             (tmp_path / "s1_Y.csv", tmp_path / "s1_X.csv", 1.0),
             (tmp_path / "s2_Y.csv", tmp_path / "s2_X.csv", 0.5),
         ]
-        X, Y = step04.merge_multi_fidelity_data(sources)
+        X, Y, _noise = step04.merge_multi_fidelity_data(sources)
         assert "ct_A" in Y.columns
         assert "ct_B" in Y.columns
         assert "ct_C" in Y.columns
@@ -529,7 +578,7 @@ class TestMultiFidelityIntegration:
             (paths["real"][0], paths["real"][1], 1.0),
             (tmp_path / "nonexistent.csv", tmp_path / "nonexistent2.csv", 0.5),
         ]
-        X, Y = step04.merge_multi_fidelity_data(sources)
+        X, Y, _noise = step04.merge_multi_fidelity_data(sources)
         assert len(X) == 20  # only real data
 
     def test_gpbo_loop_with_virtual_sources(self, multi_fidelity_data, tmp_path):
@@ -1264,7 +1313,7 @@ class TestConfidenceFiltering:
             (tmp_path / "cf_fracs.csv", tmp_path / "cf_morphs.csv", 0.0),
         ]
 
-        X, Y = step04.merge_multi_fidelity_data(
+        X, Y, _noise = step04.merge_multi_fidelity_data(
             sources, cellflow_confidence_threshold=0.3
         )
 
@@ -1308,8 +1357,72 @@ class TestConfidenceFiltering:
             (tmp_path / "real_fracs.csv", tmp_path / "real_morphs.csv", 1.0),
             (tmp_path / "cf_fracs.csv", tmp_path / "cf_morphs.csv", 0.0),
         ]
-        X, Y = step04.merge_multi_fidelity_data(sources)
+        X, Y, _noise = step04.merge_multi_fidelity_data(sources)
         assert len(X) == 8  # all points kept
+
+
+class TestConfidenceToNoiseVariance:
+    """Test confidence_to_noise_variance helper and merge integration."""
+
+    def test_basic_inverse_square(self):
+        """High confidence → low noise, low confidence → high noise."""
+        conf = pd.Series([1.0, 0.5, 0.1], index=["a", "b", "c"])
+        nv = step04.confidence_to_noise_variance(conf, base_noise=1e-3)
+        assert nv["a"] == pytest.approx(1e-3)
+        assert nv["b"] == pytest.approx(4e-3)
+        assert nv["c"] == pytest.approx(0.1)
+
+    def test_clamps_very_low_confidence(self):
+        """Confidence below 0.01 is clamped to avoid division by zero."""
+        conf = pd.Series([0.0, -0.5], index=["a", "b"])
+        nv = step04.confidence_to_noise_variance(conf, base_noise=1e-3)
+        expected = 1e-3 / (0.01 ** 2)
+        assert nv["a"] == pytest.approx(expected)
+        assert nv["b"] == pytest.approx(expected)
+
+    def test_merge_returns_noise_df_with_confidence(self, tmp_path):
+        """merge_multi_fidelity_data returns noise DataFrame when CellFlow confidence exists."""
+        # Real data
+        real_Y = pd.DataFrame({"Neuron": [0.7, 0.6], "Glia": [0.3, 0.4]},
+                              index=["c1", "c2"])
+        real_X = pd.DataFrame({"CHIR99021_uM": [1.5, 3.0]}, index=["c1", "c2"])
+        real_Y.to_csv(tmp_path / "real_fracs.csv")
+        real_X.to_csv(tmp_path / "real_morphs.csv")
+
+        # CellFlow data with confidence report
+        cf_Y = pd.DataFrame({"Neuron": [0.5, 0.8], "Glia": [0.5, 0.2]},
+                            index=["v1", "v2"])
+        cf_X = pd.DataFrame({"CHIR99021_uM": [2.0, 4.0]}, index=["v1", "v2"])
+        cf_Y.to_csv(tmp_path / "cf_fracs.csv")
+        cf_X.to_csv(tmp_path / "cf_morphs.csv")
+
+        report = pd.DataFrame({
+            "condition": ["v1", "v2"],
+            "confidence": [0.9, 0.4],
+        })
+        report.to_csv(tmp_path / "cellflow_screening_report.csv", index=False)
+
+        sources = [
+            (tmp_path / "real_fracs.csv", tmp_path / "real_morphs.csv", 1.0),
+            (tmp_path / "cf_fracs.csv", tmp_path / "cf_morphs.csv", 0.0),
+        ]
+        X, Y, noise = step04.merge_multi_fidelity_data(
+            sources, cellflow_noise_from_confidence=True
+        )
+        assert noise is not None
+        # v1 (high confidence) should have lower noise than v2 (low confidence)
+        assert noise.loc["v1", "Neuron"] < noise.loc["v2", "Neuron"]
+
+    def test_merge_returns_none_noise_without_cellflow(self, tmp_path):
+        """Without CellFlow data, noise_variance should be None."""
+        real_Y = pd.DataFrame({"Neuron": [0.7], "Glia": [0.3]}, index=["c1"])
+        real_X = pd.DataFrame({"CHIR99021_uM": [1.5]}, index=["c1"])
+        real_Y.to_csv(tmp_path / "real_fracs.csv")
+        real_X.to_csv(tmp_path / "real_morphs.csv")
+
+        sources = [(tmp_path / "real_fracs.csv", tmp_path / "real_morphs.csv", 1.0)]
+        X, Y, noise = step04.merge_multi_fidelity_data(sources)
+        assert noise is None
 
 
 class TestModelPathDiscovery:

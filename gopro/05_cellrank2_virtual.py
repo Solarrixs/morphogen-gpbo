@@ -2,15 +2,17 @@
 Step 5: CellRank 2 Virtual Data Generation via Temporal Projection.
 
 Uses moscot optimal transport + CellRank 2 RealTimeKernel to forward-predict
-cell fates from early timepoint data, generating medium-fidelity virtual
-training points for the multi-fidelity GP.
+cell fates from query data, generating medium-fidelity virtual training
+points for the multi-fidelity GP.
 
 The Azbukina temporal atlas (Days 7, 15, 30, 60, 90, 120) provides the
-transport maps. When a new experiment is mapped at Day 21, cells are projected
-forward through these maps to predict cell type fractions at later timepoints.
+transport maps. Query cells harvested at Day 72 (Amin/Kelley) are anchored
+to the nearest atlas timepoint (Day 60) and projected forward to Days 90
+and 120, yielding 2 virtual data points per real condition.
 
-Each real experiment generates 3 virtual data points (Day 30, 60, 90),
-providing 3x data amplification per dollar spent.
+Note: Day 72 is not a native atlas timepoint, so query cells are matched
+to Day 60 atlas neighbors via KNN. Transport then chains Day 60→90 (single
+hop) or Day 60→90→120 (two hops via matrix composition).
 
 Inputs:
   - data/azbukina_temporal_atlas.h5ad (temporal atlas with day annotations)
@@ -45,8 +47,10 @@ logger = get_logger(__name__)
 # Timepoints in the Azbukina temporal atlas
 ATLAS_TIMEPOINTS = [7, 15, 30, 60, 90, 120]
 
-# Virtual projection targets from Day 21 query data
-PROJECTION_TARGETS = [30, 60, 90]
+# Virtual projection targets from Day 72 query data (Amin/Kelley harvest day).
+# Query cells are anchored to Day 60 (nearest atlas timepoint ≤ 72) and
+# projected forward to Days 90 and 120.
+PROJECTION_TARGETS = [90, 120]
 
 # Medium fidelity level for CellRank 2 virtual data
 FIDELITY_LEVEL = 0.5

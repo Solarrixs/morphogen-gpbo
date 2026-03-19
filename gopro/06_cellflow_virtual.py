@@ -284,7 +284,8 @@ def predict_cellflow(
     batch_size: int = 256,
     n_cells_per_condition: int = 500,
     real_fractions_csv: Optional[Path] = None,
-) -> pd.DataFrame:
+    allow_fallback: bool = False,
+) -> Optional[pd.DataFrame]:
     """Run CellFlow predictions for a batch of protocols.
 
     Uses the CellFlow generative model to predict single-cell
@@ -300,9 +301,15 @@ def predict_cellflow(
         n_cells_per_condition: Number of virtual cells to generate.
         real_fractions_csv: Path to real training fractions CSV for
             cell type vocabulary alignment (used by heuristic fallback).
+        allow_fallback: If True, use the heuristic baseline predictor
+            when CellFlow is unavailable. Default False — the heuristic
+            uses hand-tuned effect magnitudes with no literature basis
+            and is harvest-day-blind, so it should only be enabled
+            explicitly.
 
     Returns:
-        DataFrame with predicted cell type fractions per protocol.
+        DataFrame with predicted cell type fractions per protocol,
+        or None if CellFlow is unavailable and allow_fallback is False.
     """
     # Warn about out-of-distribution harvest days
     _warn_ood_harvest_days(protocols)
@@ -323,16 +330,29 @@ def predict_cellflow(
         )
     else:
         if not HAS_CELLFLOW:
-            logger.info("CellFlow package not installed. Falling back to heuristic predictor.")
+            reason = "CellFlow package not installed."
         elif model_path is None:
-            logger.info(
-                "No pre-trained CellFlow model found. Searched: %s. "
-                "Falling back to heuristic predictor.",
-                [str(p) for p in CELLFLOW_MODEL_PATHS],
+            reason = (
+                f"No pre-trained CellFlow model found. "
+                f"Searched: {[str(p) for p in CELLFLOW_MODEL_PATHS]}."
             )
         else:
-            logger.info("CellFlow model path does not exist: %s. Falling back to heuristic.", model_path)
-        result = _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
+            reason = f"CellFlow model path does not exist: {model_path}."
+
+        if allow_fallback:
+            logger.warning(
+                "%s Using heuristic fallback (--use-cellflow-fallback). "
+                "Predictions use hand-tuned priors with no literature basis.",
+                reason,
+            )
+            result = _predict_baseline(protocols, real_fractions_csv=real_fractions_csv)
+        else:
+            logger.warning(
+                "%s Skipping CellFlow virtual screening. "
+                "Pass --use-cellflow-fallback to enable the heuristic predictor.",
+                reason,
+            )
+            return None
 
     return result
 
@@ -884,7 +904,8 @@ def run_virtual_screen(
     max_combinations: int = 5000,
     model_path: Optional[Path] = None,
     real_fractions_csv: Optional[Path] = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    allow_fallback: bool = False,
+) -> Optional[tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
     """Run full CellFlow virtual screen.
 
     Args:
@@ -895,9 +916,12 @@ def run_virtual_screen(
         model_path: Path to CellFlow model (optional).
         real_fractions_csv: Path to real training fractions CSV for
             cell type vocabulary alignment.
+        allow_fallback: If True, use heuristic baseline when CellFlow
+            is unavailable. Default False.
 
     Returns:
-        Tuple of (virtual_morphogens, virtual_fractions, quality_report).
+        Tuple of (virtual_morphogens, virtual_fractions, quality_report),
+        or None if CellFlow is unavailable and allow_fallback is False.
     """
     # Validate real fractions CSV if provided
     if real_fractions_csv is not None and real_fractions_csv.exists():
@@ -916,7 +940,11 @@ def run_virtual_screen(
         protocols,
         model_path=model_path,
         real_fractions_csv=real_fractions_csv,
+        allow_fallback=allow_fallback,
     )
+
+    if predictions is None:
+        return None
 
     # Compute confidence scores
     real_morphogens = pd.read_csv(str(real_morphogen_csv), index_col=0)
@@ -936,7 +964,17 @@ def run_virtual_screen(
 
 def main() -> None:
     """Run the full CellFlow virtual screening pipeline."""
+    import argparse
     import time
+
+    parser = argparse.ArgumentParser(description="CellFlow virtual screening")
+    parser.add_argument(
+        "--use-cellflow-fallback", action="store_true",
+        help="Enable heuristic fallback when CellFlow model is unavailable. "
+             "WARNING: uses hand-tuned priors with no literature basis.",
+    )
+    args = parser.parse_args()
+
     start = time.time()
 
     logger.info("=" * 60)
@@ -967,21 +1005,27 @@ def main() -> None:
         logger.info("  %s: %s", morph, vals)
 
     # Run virtual screen
-    virtual_X, virtual_Y, quality = run_virtual_screen(
+    result = run_virtual_screen(
         morphogen_ranges=morphogen_ranges,
         real_morphogen_csv=morphogen_path,
         harvest_days=[21, 45, 72],
         max_combinations=5000,
         model_path=DATA_DIR / "cellflow_model",
         real_fractions_csv=DATA_DIR / "gp_training_labels_amin_kelley.csv",
+        allow_fallback=args.use_cellflow_fallback,
     )
+
+    if result is None:
+        logger.info("No CellFlow predictions generated. Exiting.")
+        return
+
+    virtual_X, virtual_Y, quality = result
 
     # Save outputs
     logger.info("Saving virtual screening data")
 
     virtual_Y.to_csv(str(DATA_DIR / "cellflow_virtual_fractions.csv"))
     virtual_X.to_csv(str(DATA_DIR / "cellflow_virtual_morphogens.csv"))
-    # TODO: Wire confidence scores into merge_multi_fidelity_data() to filter low-confidence predictions
     quality.to_csv(str(DATA_DIR / "cellflow_screening_report.csv"), index=False)
 
     logger.info("Virtual fractions  -> data/cellflow_virtual_fractions.csv")
