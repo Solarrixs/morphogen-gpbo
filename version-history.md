@@ -1,3 +1,4 @@
+| 6 | `c7f84ab` | working | ralph/fix-review-issues | [ralph-6] S-3: Rename run_noise_sweep → run_random_baseline_noise_sweep, 26 benchmark tests pass |
 | 17 | `b39acc4` | working | ralph/production-readiness-phase2 | [ralph-17] TODO-11: ALR transform as alternative to ILR (--alr), 679 tests |
 | 3 | `48212c6` | working | ralph/production-readiness-phase2 | TODO-26: Fix CellFlow dose encoding to use log1p, 602 tests |
 | 3 | `df3ea3a` | working | ralph/production-readiness-phase2 | [ralph-simplify] Add concentration_scale field to CellFlow encoding |

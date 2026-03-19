@@ -2,6 +2,13 @@
 
 ## Iteration Log
 
+## Iteration 6 (ralph-6) — 2026-03-19
+- Task: S-3 — Rename run_noise_sweep → run_random_baseline_noise_sweep
+- Result: pass
+- Files changed: gopro/benchmarks/noise_robustness.py (+2/-2), gopro/tests/test_benchmarks.py (+4/-4), task_plan.md (+1/-1)
+- Quality: Renamed both functions (run_noise_sweep, summarize_noise_sweep) and updated all imports/references in tests. All 26 benchmark tests pass.
+- Notes: 2 code review items remaining (S-4, S-5).
+
 ## Iteration 5 (ralph-5) — 2026-03-19
 - Task: S-2 — Optimize score_gene_signatures memory (avoid full AnnData copy)
 - Result: pass
