@@ -2,6 +2,16 @@
 
 ## Iteration Log
 
+## Iteration 1 — 2026-03-19T10:45:17Z
+- Task: I-3 — Add TVR gradient warning docstring + acquisition optimization test (ralph-task.md code review fixes)
+- Result: pass
+- Commits:
+  - `aebe891` [ralph-1] I-3: Add TVR gradient warning docstring + acquisition test
+  - `e292247` [ralph-simplify] Fix TVR test: capture baseline before optimization, assert improvement direction
+- Files changed: gopro/04_gpbo_loop.py (+14), gopro/tests/test_unit.py (+50), task_plan.md (+10) — 3 files, +74 lines
+- Quality: Simplify pass fixed TVR test to capture baseline before optimization and assert improvement direction (not exact values). Docstring warns that argmin breaks gradient chain in TVRModelEnsemble.posterior().
+- Notes: 7 code review items remaining (I-4, I-1, S-1 through S-5). Next priority: I-4 (deduplicate antagonist pairs — YAML single source of truth) or I-1 (extract _inflate_cellflow_variance). Branch: ralph/fix-review-issues.
+
 ## Iteration 4 — 2026-03-17T12:13:40Z
 - Task: /bug-hunter final sweep (task_plan §1.1) + /simplify pass
 - Result: pass
