@@ -98,70 +98,80 @@ def score_gene_signatures(
     """
     import scanpy as sc
 
-    adata = adata.copy()  # avoid mutating caller's data
+    # Track columns added to adata.obs so we can clean up without copying
+    # the full AnnData (which duplicates the potentially large X matrix).
+    added_cols: list[str] = []
 
     all_genes = list(adata.var_names)
     rng = np.random.default_rng(42)
 
-    # Score each signature
-    for sig_name, gene_list in signatures.items():
-        # Filter to genes present in the data
-        valid_genes = [g for g in gene_list if g in adata.var_names]
-        if len(valid_genes) == 0:
-            logger.warning("Signature '%s': no genes found in adata.var_names", sig_name)
-            adata.obs[sig_name] = 0.0
-            continue
-        n_ctrl = min(len(valid_genes), max(1, len(all_genes) // 10))
-        n_bins = min(25, max(1, (len(all_genes) - len(valid_genes)) // n_ctrl))
-        sc.tl.score_genes(
-            adata, gene_list=valid_genes, score_name=sig_name,
-            ctrl_size=n_ctrl, n_bins=n_bins,
+    try:
+        # Score each signature
+        for sig_name, gene_list in signatures.items():
+            # Filter to genes present in the data
+            valid_genes = [g for g in gene_list if g in adata.var_names]
+            if len(valid_genes) == 0:
+                logger.warning("Signature '%s': no genes found in adata.var_names", sig_name)
+                adata.obs[sig_name] = 0.0
+                added_cols.append(sig_name)
+                continue
+            n_ctrl = min(len(valid_genes), max(1, len(all_genes) // 10))
+            n_bins = min(25, max(1, (len(all_genes) - len(valid_genes)) // n_ctrl))
+            sc.tl.score_genes(
+                adata, gene_list=valid_genes, score_name=sig_name,
+                ctrl_size=n_ctrl, n_bins=n_bins,
+            )
+            added_cols.append(sig_name)
+
+        # Aggregate per condition (mean score)
+        sig_names = list(signatures.keys())
+        scores_df = (
+            adata.obs
+            .groupby(condition_key)[sig_names]
+            .mean()
         )
 
-    # Aggregate per condition (mean score)
-    sig_names = list(signatures.keys())
-    scores_df = (
-        adata.obs
-        .groupby(condition_key)[sig_names]
-        .mean()
-    )
+        # Permutation testing
+        pvalues_df = None
+        if n_permutations > 0:
+            pvalues = {}
+            for sig_name, gene_list in signatures.items():
+                valid_genes = [g for g in gene_list if g in adata.var_names]
+                n_genes = max(len(valid_genes), 1)
+                observed = scores_df[sig_name]
 
-    # Permutation testing
-    pvalues_df = None
-    if n_permutations > 0:
-        pvalues = {}
-        for sig_name, gene_list in signatures.items():
-            valid_genes = [g for g in gene_list if g in adata.var_names]
-            n_genes = max(len(valid_genes), 1)
-            observed = scores_df[sig_name]
+                # Build null distribution
+                null_scores = np.zeros((n_permutations, len(observed)))
+                for i in range(n_permutations):
+                    perm_genes = list(rng.choice(all_genes, size=n_genes, replace=False))
+                    perm_col = f"_perm_{sig_name}_{i}"
+                    perm_n_ctrl = min(len(perm_genes), max(1, len(all_genes) // 10))
+                    perm_n_bins = min(25, max(1, (len(all_genes) - len(perm_genes)) // perm_n_ctrl))
+                    sc.tl.score_genes(
+                        adata, gene_list=perm_genes, score_name=perm_col,
+                        ctrl_size=perm_n_ctrl, n_bins=perm_n_bins,
+                    )
+                    null_per_cond = (
+                        adata.obs
+                        .groupby(condition_key)[perm_col]
+                        .mean()
+                    )
+                    null_scores[i] = null_per_cond.reindex(observed.index).values
+                    del adata.obs[perm_col]
 
-            # Build null distribution
-            null_scores = np.zeros((n_permutations, len(observed)))
-            for i in range(n_permutations):
-                perm_genes = list(rng.choice(all_genes, size=n_genes, replace=False))
-                perm_col = f"_perm_{sig_name}_{i}"
-                perm_n_ctrl = min(len(perm_genes), max(1, len(all_genes) // 10))
-                perm_n_bins = min(25, max(1, (len(all_genes) - len(perm_genes)) // perm_n_ctrl))
-                sc.tl.score_genes(
-                    adata, gene_list=perm_genes, score_name=perm_col,
-                    ctrl_size=perm_n_ctrl, n_bins=perm_n_bins,
-                )
-                null_per_cond = (
-                    adata.obs
-                    .groupby(condition_key)[perm_col]
-                    .mean()
-                )
-                null_scores[i] = null_per_cond.reindex(observed.index).values
-                del adata.obs[perm_col]
+                # p-value = fraction of null scores >= observed
+                observed_arr = observed.values[np.newaxis, :]  # (1, n_conditions)
+                p_vals = (null_scores >= observed_arr).mean(axis=0)
+                pvalues[sig_name] = pd.Series(p_vals, index=observed.index)
 
-            # p-value = fraction of null scores >= observed
-            observed_arr = observed.values[np.newaxis, :]  # (1, n_conditions)
-            p_vals = (null_scores >= observed_arr).mean(axis=0)
-            pvalues[sig_name] = pd.Series(p_vals, index=observed.index)
+            pvalues_df = pd.DataFrame(pvalues)
 
-        pvalues_df = pd.DataFrame(pvalues)
-
-    return scores_df, pvalues_df
+        return scores_df, pvalues_df
+    finally:
+        # Clean up columns added to caller's adata.obs
+        for col in added_cols:
+            if col in adata.obs.columns:
+                del adata.obs[col]
 
 
 def refine_signatures(

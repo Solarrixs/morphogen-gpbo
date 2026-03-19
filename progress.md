@@ -2,6 +2,13 @@
 
 ## Iteration Log
 
+## Iteration 5 (ralph-5) — 2026-03-19
+- Task: S-2 — Optimize score_gene_signatures memory (avoid full AnnData copy)
+- Result: pass
+- Files changed: gopro/signature_utils.py (+10/-3)
+- Quality: Replaced `adata.copy()` with try/finally cleanup of added obs columns. Avoids duplicating the potentially large expression matrix (X). All 7 signature tests pass.
+- Notes: 3 code review items remaining (S-3, S-4, S-5).
+
 ## Iteration 4 (ralph-4) — 2026-03-19
 - Task: S-1 — Replace np.random.RandomState with np.random.default_rng in benchmarks
 - Result: pass
