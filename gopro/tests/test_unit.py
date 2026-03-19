@@ -4168,7 +4168,7 @@ class TestDesirabilityGate:
 
     def test_antagonist_pairs_constant_covers_major_pathways(self):
         """ANTAGONIST_PAIRS covers WNT, BMP, SHH, TGFb pathways."""
-        pairs = step04.ANTAGONIST_PAIRS
+        pairs = step04._get_antagonist_pairs()
         assert "WNT" in pairs
         assert "BMP" in pairs
         assert "SHH" in pairs
@@ -4813,6 +4813,268 @@ class TestGenerateLhdFill:
         assert "is_lhd_fill" in recs.columns
         assert not recs["is_lhd_fill"].any(), "LHD rows should not appear in Round 1"
         assert len(recs) == n_recs
+
+    def test_lhd_fill_conditioned_rejects_nearby(self):
+        """LHD fill with train_X should reject points close to training data."""
+        bounds = {"x0": (0.0, 1.0), "x1": (0.0, 1.0)}
+        # Cluster training data in one corner
+        train_X = np.array([[0.1, 0.1], [0.15, 0.12], [0.12, 0.15]])
+        result = step04.generate_lhd_fill(
+            bounds, n_points=10, seed=42, train_X=train_X,
+        )
+        # All returned points should exist
+        assert len(result) > 0
+        assert len(result) <= 10
+        # Columns should match
+        assert list(result.columns) == ["x0", "x1"]
+
+    def test_lhd_fill_without_train_x_unchanged(self):
+        """Without train_X, behaviour matches the original (no rejection)."""
+        bounds = self._make_bounds(3)
+        r1 = step04.generate_lhd_fill(bounds, n_points=8, seed=42)
+        r2 = step04.generate_lhd_fill(bounds, n_points=8, seed=42, train_X=None)
+        pd.testing.assert_frame_equal(r1, r2)
+
+
+class TestSequentialBatch:
+    """Tests for --sequential-batch flag (Jura-inspired batch diversity)."""
+
+    def test_sequential_batch_threaded(self):
+        """sequential_batch=True should set sequential=True in optimize_acqf."""
+        from unittest.mock import MagicMock, patch
+
+        n_recs = 4
+        d = 3
+        columns = ["x0", "x1", "x2"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_recs, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_recs, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        mock_candidates = torch.rand(n_recs, d, dtype=torch.float64)
+        mock_acq_values = torch.rand(n_recs, dtype=torch.float64)
+
+        with patch("botorch.optim.optimize_acqf", return_value=(mock_candidates, mock_acq_values)) as mock_opt, \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                sequential_batch=True,
+            )
+
+        # Verify sequential=True was passed to optimize_acqf
+        call_kwargs = mock_opt.call_args[1] if mock_opt.call_args[1] else {}
+        assert call_kwargs.get("sequential") is True
+
+    def test_sequential_batch_false_by_default(self):
+        """sequential_batch=False (default) should not set sequential."""
+        from unittest.mock import MagicMock, patch
+
+        n_recs = 4
+        d = 3
+        columns = ["x0", "x1", "x2"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_recs, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_recs, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        mock_candidates = torch.rand(n_recs, d, dtype=torch.float64)
+        mock_acq_values = torch.rand(n_recs, dtype=torch.float64)
+
+        with patch("botorch.optim.optimize_acqf", return_value=(mock_candidates, mock_acq_values)) as mock_opt, \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                sequential_batch=False,
+            )
+
+        call_kwargs = mock_opt.call_args[1] if mock_opt.call_args[1] else {}
+        assert "sequential" not in call_kwargs
+
+
+class TestDoseResponse:
+    """Tests for --n-dose-response parameter (Jura-inspired info density)."""
+
+    def test_dose_response_skipped_round_1(self):
+        """n_dose_response should be ignored in Round 1."""
+        from unittest.mock import MagicMock, patch
+
+        n_recs = 6
+        d = 3
+        columns = ["x0", "x1", "x2"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_recs, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_recs, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        mock_candidates = torch.rand(n_recs, d, dtype=torch.float64)
+        mock_acq_values = torch.rand(n_recs, dtype=torch.float64)
+
+        with patch("botorch.optim.optimize_acqf", return_value=(mock_candidates, mock_acq_values)), \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            recs = step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                n_dose_response=6,
+                round_num=1,
+            )
+
+        assert "is_dose_response" in recs.columns
+        # In Round 1, no dose-response wells should be added
+        assert not recs["is_dose_response"].any() or recs["dose_factor"].eq(1.0).all()
+        assert len(recs) == n_recs
+
+    def test_dose_response_round_2(self):
+        """n_dose_response=6 in Round 2 should produce 2 cocktails x 0.3x/3.0x extra wells."""
+        from unittest.mock import MagicMock, patch
+
+        # Need enough BO slots: n_recs=12, n_dose_response=6 → 2 cocktails,
+        # 4 extra wells (2x0.3x + 2x3.0x), so n_bo_unique = 12 - 4 = 8
+        n_recs = 12
+        d = 3
+        columns = ["x0", "x1", "x2"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        # BO will generate n_bo_unique=8 candidates
+        n_bo = 8
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_bo, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_bo, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        mock_candidates = torch.rand(n_bo, d, dtype=torch.float64)
+        mock_acq_values = torch.rand(n_bo, dtype=torch.float64)
+
+        with patch("botorch.optim.optimize_acqf", return_value=(mock_candidates, mock_acq_values)), \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            recs = step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                n_dose_response=6,
+                round_num=2,
+            )
+
+        assert "is_dose_response" in recs.columns
+        assert "dose_factor" in recs.columns
+        # Should have 8 BO + 4 dose-response extra = 12 total
+        assert len(recs) == n_recs
+        # Check dose factors present
+        dr_rows = recs[recs["dose_factor"] != 1.0]
+        assert len(dr_rows) == 4  # 2 cocktails x 2 extra doses (0.3x + 3.0x)
+        assert set(dr_rows["dose_factor"].unique()) == {0.3, 3.0}
+
+    def test_dose_response_not_divisible_by_3(self):
+        """n_dose_response not divisible by 3 should raise ValueError."""
+        from unittest.mock import MagicMock, patch
+
+        columns = ["x0", "x1"]
+        bounds = {c: (0.0, 1.0) for c in columns}
+        train_X = torch.rand(5, 2, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        mock_model = MagicMock()
+
+        with pytest.raises(ValueError, match="divisible by 3"):
+            with patch("botorch.optim.optimize_acqf"), \
+                 patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+                step04.recommend_next_experiments(
+                    model=mock_model,
+                    train_X=train_X,
+                    train_Y=train_Y,
+                    bounds=bounds,
+                    columns=columns,
+                    n_recommendations=10,
+                    n_dose_response=5,
+                    round_num=2,
+                )
+
+    def test_dose_response_scaling_correct(self):
+        """Dose-response wells should be scaled correctly (0.3x, 3.0x)."""
+        from unittest.mock import MagicMock, patch
+
+        n_recs = 9
+        d = 2
+        columns = ["x0", "x1"]
+        bounds = {c: (0.0, 10.0) for c in columns}
+
+        train_X = torch.rand(5, d, dtype=torch.float64)
+        train_Y = torch.rand(5, 1, dtype=torch.float64)
+
+        # n_dose_response=3 → 1 cocktail, 2 extra wells, n_bo_unique = 9-2 = 7
+        n_bo = 7
+        mock_model = MagicMock()
+        mock_posterior = MagicMock()
+        mock_posterior.mean = torch.rand(n_bo, 1, dtype=torch.float64)
+        mock_posterior.variance = torch.rand(n_bo, 1, dtype=torch.float64).abs() + 1e-6
+        mock_model.posterior.return_value = mock_posterior
+
+        # Use fixed candidates so we can verify scaling
+        fixed_cands = torch.tensor([[5.0, 8.0]] * n_bo, dtype=torch.float64)
+        mock_acq_values = torch.arange(n_bo, dtype=torch.float64)  # ascending
+
+        with patch("botorch.optim.optimize_acqf", return_value=(fixed_cands, mock_acq_values)), \
+             patch("botorch.acquisition.qLogExpectedImprovement", return_value=MagicMock()):
+            recs = step04.recommend_next_experiments(
+                model=mock_model,
+                train_X=train_X,
+                train_Y=train_Y,
+                bounds=bounds,
+                columns=columns,
+                n_recommendations=n_recs,
+                n_dose_response=3,
+                round_num=2,
+            )
+
+        # Check 0.3x row
+        dr_03 = recs[recs["dose_factor"] == 0.3]
+        assert len(dr_03) == 1
+        assert abs(dr_03.iloc[0]["x0"] - 1.5) < 1e-6  # 5.0 * 0.3
+        assert abs(dr_03.iloc[0]["x1"] - 2.4) < 1e-6  # 8.0 * 0.3
+
+        # Check 3.0x row
+        dr_30 = recs[recs["dose_factor"] == 3.0]
+        assert len(dr_30) == 1
+        assert abs(dr_30.iloc[0]["x0"] - 15.0) < 1e-6  # 5.0 * 3.0
+        assert abs(dr_30.iloc[0]["x1"] - 24.0) < 1e-6  # 8.0 * 3.0
 
 
 class TestConfirmationPlate:

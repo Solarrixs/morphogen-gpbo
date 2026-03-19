@@ -64,40 +64,18 @@ from gopro.config import (
 logger = get_logger(__name__)
 
 
-def _inflate_cellflow_variance(
-    fractions: pd.DataFrame,
-    factor: float = CELLFLOW_DEFAULT_VARIANCE_INFLATION,
-) -> pd.DataFrame:
-    """Inflate CellFlow prediction variance to counteract conservative bias.
+def _inflate_cellflow_variance(fractions: pd.DataFrame, factor: float) -> pd.DataFrame:
+    """Delegate to the canonical implementation in step 06.
 
-    Amplifies each condition's deviation from the global mean by *factor*,
-    then re-normalises to valid fractions:
-    ``inflated = mean + factor * (original - mean)``
+    Uses importlib because 06_cellflow_virtual has a numeric prefix
+    that prevents standard Python import syntax.
     """
-    if factor == 1.0 or len(fractions) == 0:
-        return fractions
-
-    vals = fractions.values
-    mean_composition = vals.mean(axis=0, keepdims=True)
-    inflated = mean_composition + factor * (vals - mean_composition)
-
-    # Clamp to non-negative, then re-normalise rows to sum to 1
-    inflated = np.maximum(inflated, 0.0)
-    row_sums = inflated.sum(axis=1, keepdims=True)
-    # Replace all-zero rows with mean composition (avoids downstream ILR NaNs)
-    zero_rows = (row_sums == 0).ravel()
-    if zero_rows.any():
-        inflated[zero_rows] = mean_composition
-        row_sums[zero_rows] = mean_composition.sum()
-    inflated = inflated / row_sums
-
-    result = pd.DataFrame(inflated, index=fractions.index, columns=fractions.columns)
-    logger.info(
-        "Applied variance inflation (factor=%.1f) to %d CellFlow predictions",
-        factor,
-        len(result),
-    )
-    return result
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location(
+        "step06", str(Path(__file__).parent / "06_cellflow_virtual.py"))
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    return _mod.inflate_cellflow_variance(fractions, factor=factor)
 
 
 def confidence_to_noise_variance(
@@ -2667,11 +2645,17 @@ def compute_ard_lipschitz(model, columns: list[str]) -> pd.DataFrame:
 
 
 # --- Desirability-based feasibility gate (Cosenza 2022) ---
-# Agonist/antagonist groups loaded from gopro/agents/pathway_rules.yaml
+# Agonist/antagonist groups loaded lazily from gopro/agents/pathway_rules.yaml
 # (single source of truth shared with gopro/agents/scorer.py).
-from gopro.agents.scorer import load_pathway_rules
+_ANTAGONIST_PAIRS_CACHE = None
 
-ANTAGONIST_PAIRS = load_pathway_rules()["agonist_groups"]
+def _get_antagonist_pairs() -> dict:
+    """Lazy-load agonist groups from pathway_rules.yaml (cached after first call)."""
+    global _ANTAGONIST_PAIRS_CACHE
+    if _ANTAGONIST_PAIRS_CACHE is None:
+        from gopro.agents.scorer import load_pathway_rules
+        _ANTAGONIST_PAIRS_CACHE = load_pathway_rules().get("agonist_groups", {})
+    return _ANTAGONIST_PAIRS_CACHE
 
 
 def compute_desirability(
@@ -2710,7 +2694,7 @@ def compute_desirability(
 
     col_to_idx = {c: i for i, c in enumerate(columns)}
 
-    for pathway, pair in ANTAGONIST_PAIRS.items():
+    for pathway, pair in _get_antagonist_pairs().items():
         ag_names = [c for c in pair["agonists"] if c in col_to_idx]
         ant_names = [c for c in pair["antagonists"] if c in col_to_idx]
         ag_idxs = [col_to_idx[c] for c in ag_names]
@@ -2843,18 +2827,30 @@ def generate_lhd_fill(
     bounds: dict[str, tuple[float, float]],
     n_points: int,
     seed: int = 42,
+    train_X: Optional[np.ndarray] = None,
+    min_distance_quantile: float = 0.1,
 ) -> pd.DataFrame:
     """Generate Latin Hypercube Design space-filling points.
 
-    Uses ``scipy.stats.qmc.LatinHypercube`` to create ``n_points`` in the
-    unit hypercube, then scales to the actual bounds.  The ``fidelity``
-    column is excluded if present (LHD should not fill the fidelity
-    dimension).
+    Uses ``scipy.stats.qmc.LatinHypercube`` with centered-discrepancy
+    optimization to create ``n_points`` in the unit hypercube, then scales
+    to the actual bounds.  The ``fidelity`` column is excluded if present
+    (LHD should not fill the fidelity dimension).
+
+    When ``train_X`` is provided, points that fall too close to existing
+    training data are rejected and replaced by oversampling.  "Too close"
+    is defined as below the ``min_distance_quantile``-th percentile of
+    pairwise distances in the training set.
 
     Args:
         bounds: Dict mapping column names to (lo, hi) tuples.
         n_points: Number of LHD points to generate.
         seed: RNG seed for reproducibility.
+        train_X: Optional existing training X array for distance-based
+            rejection.  Columns must align with the non-fidelity bound
+            dimensions.
+        min_distance_quantile: Percentile (0-1) of training pairwise
+            distances used as rejection threshold. (default: 0.1)
 
     Returns:
         DataFrame with ``n_points`` rows and one column per non-fidelity
@@ -2868,13 +2864,38 @@ def generate_lhd_fill(
         raise ValueError("No non-fidelity dimensions in bounds for LHD fill")
 
     d = len(cols)
-    sampler = LatinHypercube(d=d, seed=seed)
-    unit_samples = sampler.random(n=n_points)  # (n_points, d) in [0, 1]
-
-    # Scale to actual bounds
     lower = np.array([bounds[c][0] for c in cols])
     upper = np.array([bounds[c][1] for c in cols])
+
+    # Oversample when rejection is active
+    oversample = 4 if train_X is not None else 1
+    sampler = LatinHypercube(d=d, seed=seed, optimization="random-cd")
+    unit_samples = sampler.random(n=n_points * oversample)
     scaled = unit_samples * (upper - lower) + lower
+
+    # Distance-based rejection: discard LHD points too close to training data
+    if train_X is not None and len(train_X) > 1:
+        from scipy.spatial.distance import pdist, cdist
+
+        # Compute rejection threshold from training data pairwise distances
+        train_dists = pdist(train_X, metric="euclidean")
+        threshold = float(np.percentile(train_dists, min_distance_quantile * 100))
+
+        # Reject candidates closer than threshold to any training point
+        dists_to_train = cdist(scaled, train_X, metric="euclidean")
+        min_dists = dists_to_train.min(axis=1)
+        keep_mask = min_dists > threshold
+        scaled = scaled[keep_mask]
+
+        if len(scaled) < n_points:
+            logger.warning(
+                "LHD rejection kept only %d/%d points (threshold=%.4f). "
+                "Using all kept points.",
+                len(scaled), n_points * oversample, threshold,
+            )
+        scaled = scaled[:n_points]
+    else:
+        scaled = scaled[:n_points]
 
     return pd.DataFrame(scaled, columns=cols)
 
@@ -2902,6 +2923,8 @@ def recommend_next_experiments(
     contextual_cols: Optional[list[str]] = None,
     n_lhd_fill: int = 0,
     round_num: int = 1,
+    sequential_batch: bool = False,
+    n_dose_response: int = 0,
 ) -> pd.DataFrame:
     """Use acquisition function to recommend next experiments.
 
@@ -2954,12 +2977,24 @@ def recommend_next_experiments(
             and are only active when ``round_num > 1``. (default: 0)
         round_num: Current optimization round number. LHD fill is skipped for
             Round 1 (expert-designed literature conditions). (default: 1)
+        sequential_batch: If True, use sequential greedy batch construction
+            (``sequential=True`` in ``optimize_acqf``). Each candidate is
+            optimized independently with previously selected points as
+            ``X_pending``, preventing batch clustering. Slower (~2-6x) but
+            produces more diverse batches. (default: False)
+        n_dose_response: Number of wells reserved for dose-response testing
+            of top BO recommendations. Allocated as N/3 cocktails x 3 doses
+            (0.3x/1.0x/3.0x). Only active when ``round_num > 1``. The 1.0x
+            well IS the BO recommendation (no wasted slot). Must be divisible
+            by 3. (default: 0, disabled)
 
     Returns:
         DataFrame with recommended morphogen concentrations and predictions.
         When ``n_controls > 0``, includes an ``is_control`` boolean column.
         When ``n_lhd_fill > 0`` and ``round_num > 1``, includes an
         ``is_lhd_fill`` boolean column.
+        When ``n_dose_response > 0`` and ``round_num > 1``, includes
+        ``is_dose_response`` boolean and ``dose_factor`` float columns.
     """
     from botorch.optim import optimize_acqf
     from botorch.acquisition import qLogExpectedImprovement
@@ -3165,11 +3200,34 @@ def recommend_next_experiments(
             f"n_lhd_fill ({n_lhd_fill}) must be less than the number of unique "
             f"BO slots ({n_unique})"
         )
-    n_bo_unique = n_unique - effective_lhd
+    # Dose-response: only active for Round 2+ (same pattern as LHD fill)
+    effective_dr = n_dose_response if (n_dose_response > 0 and round_num > 1) else 0
+    if effective_dr > 0 and effective_dr % 3 != 0:
+        raise ValueError(
+            f"n_dose_response must be divisible by 3, got {effective_dr}"
+        )
+    # Dose-response reserves n_dr_cocktails * 2 extra wells (the 1.0x is
+    # already the BO recommendation, so only 0.3x and 3.0x are extra)
+    n_dr_cocktails = effective_dr // 3 if effective_dr > 0 else 0
+    n_dr_extra_wells = n_dr_cocktails * 2  # 0.3x + 3.0x variants
+
+    n_bo_unique = n_unique - effective_lhd - n_dr_extra_wells
+    if n_bo_unique < 1:
+        raise ValueError(
+            f"Not enough BO slots: n_unique={n_unique}, n_lhd_fill={effective_lhd}, "
+            f"n_dose_response extra wells={n_dr_extra_wells}. "
+            f"n_bo_unique={n_bo_unique} must be >= 1"
+        )
     if effective_lhd > 0:
         logger.info(
             "LHD gap-fill: %d slots reserved for space-filling, %d for BO",
             effective_lhd, n_bo_unique,
+        )
+    if effective_dr > 0:
+        logger.info(
+            "Dose-response: %d cocktails x 3 doses (0.3x/1.0x/3.0x), "
+            "%d extra wells reserved, %d BO slots",
+            n_dr_cocktails, n_dr_extra_wells, n_bo_unique,
         )
 
     # When desirability gate is active, generate 2x candidates and filter
@@ -3189,6 +3247,9 @@ def recommend_next_experiments(
     )
     if fixed_features is not None:
         _acqf_kwargs["fixed_features"] = fixed_features
+    if sequential_batch:
+        _acqf_kwargs["sequential"] = True
+        logger.info("Using sequential greedy batch construction for diversity")
     candidates, acq_values = optimize_acqf(**_acqf_kwargs)
 
     # Apply desirability gate: D(x) = phi(x) * acq(x)
@@ -3268,7 +3329,10 @@ def recommend_next_experiments(
     # Append LHD space-filling points (Round 2+ only)
     recommendations["is_lhd_fill"] = False
     if effective_lhd > 0:
-        lhd_df = generate_lhd_fill(bounds, n_points=effective_lhd, seed=42)
+        lhd_df = generate_lhd_fill(
+            bounds, n_points=effective_lhd, seed=42,
+            train_X=train_X.cpu().numpy() if train_X is not None else None,
+        )
         # Align columns: add any missing columns as NaN
         for col in recommendations.columns:
             if col not in lhd_df.columns:
@@ -3281,6 +3345,51 @@ def recommend_next_experiments(
             [recommendations, lhd_df], ignore_index=True,
         )
         logger.info("Appended %d LHD space-filling points", effective_lhd)
+
+    # Append dose-response wells (Round 2+ only)
+    recommendations["is_dose_response"] = False
+    recommendations["dose_factor"] = 1.0
+    if effective_dr > 0 and n_dr_cocktails > 0:
+        # Select top n_dr_cocktails from BO recommendations by acquisition value
+        bo_recs = recommendations[
+            ~recommendations.get("is_lhd_fill", pd.Series(False, index=recommendations.index)).astype(bool)
+            & ~recommendations.get("is_qc_duplicate", pd.Series(False, index=recommendations.index)).astype(bool)
+        ].copy()
+        if "acquisition_value" in bo_recs.columns:
+            bo_recs = bo_recs.sort_values("acquisition_value", ascending=False)
+        top_cocktails = bo_recs.head(n_dr_cocktails)
+
+        # Mark the 1.0x originals as dose-response members
+        recommendations.loc[top_cocktails.index, "is_dose_response"] = True
+
+        # Generate 0.3x and 3.0x variants
+        conc_cols = [c for c in columns if c in recommendations.columns]
+        dr_rows: list[dict[str, Any]] = []
+        for dose_f in (0.3, 3.0):
+            for _, row in top_cocktails.iterrows():
+                scaled: dict[str, Any] = {}
+                for c in conc_cols:
+                    scaled[c] = max(0.0, float(row[c]) * dose_f)
+                # Copy metadata columns as NaN
+                for c in recommendations.columns:
+                    if c not in scaled:
+                        scaled[c] = np.nan
+                scaled["is_dose_response"] = True
+                scaled["dose_factor"] = dose_f
+                scaled["is_lhd_fill"] = False
+                scaled["is_qc_duplicate"] = False
+                scaled["acquisition_value"] = np.nan
+                dr_rows.append(scaled)
+
+        if dr_rows:
+            dr_df = pd.DataFrame(dr_rows)[recommendations.columns]
+            recommendations = pd.concat(
+                [recommendations, dr_df], ignore_index=True,
+            )
+            logger.info(
+                "Appended %d dose-response wells (%d cocktails x 0.3x/3.0x)",
+                len(dr_rows), n_dr_cocktails,
+            )
 
     # Append carry-forward controls
     recommendations["is_control"] = False
@@ -4370,6 +4479,8 @@ def run_gpbo_loop(
     contextual_cols: Optional[list[str]] = None,
     n_lhd_fill: int = 0,
     cost_weight: float = 0.0,
+    sequential_batch: bool = False,
+    n_dose_response: int = 0,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -4841,6 +4952,8 @@ def run_gpbo_loop(
         contextual_cols=contextual_cols,
         n_lhd_fill=n_lhd_fill,
         round_num=round_num,
+        sequential_batch=sequential_batch,
+        n_dose_response=n_dose_response,
     )
 
     # Inverse log-scale: convert recommendations back to original µM units
@@ -5369,6 +5482,13 @@ if __name__ == "__main__":
                              "Fixed to training-data mean during acquisition optimization.")
     parser.add_argument("--n-lhd-fill", type=int, default=0,
                         help="Number of LHD space-filling points per round (Round 2+ only)")
+    parser.add_argument("--sequential-batch", action="store_true",
+                        help="Use sequential greedy batch construction for acquisition "
+                             "optimization (slower but more diverse batches)")
+    parser.add_argument("--n-dose-response", type=int, default=0,
+                        help="Number of wells for dose-response testing of top BO "
+                             "recommendations (N/3 cocktails x 0.3x/1.0x/3.0x). "
+                             "Must be divisible by 3. Round 2+ only. (default: 0)")
     parser.add_argument("--validation", action="store_true",
                         help="Generate validation plate (6 cocktails x 0.3x/1x/3x + 6 replicates)")
     parser.add_argument("--confirmation", action="store_true",
@@ -5578,6 +5698,8 @@ if __name__ == "__main__":
         contextual_cols=args.contextual_cols,
         n_lhd_fill=args.n_lhd_fill,
         cost_weight=args.cost_weight,
+        sequential_batch=args.sequential_batch,
+        n_dose_response=args.n_dose_response,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")
