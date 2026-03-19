@@ -871,9 +871,7 @@ def _make_zero_passing_kernel_class():
 
         This is the mathematically principled formulation from GPerturb:
 
-        - Xing & Yau (2024), BMC Bioinformatics 25:104,
-          DOI: 10.1186/s12859-024-05682-0
-        - Xing & Yau (2025), Nature Communications,
+        - Xing & Yau (2025), "GPerturb", Nature Communications,
           DOI: 10.1038/s41467-025-61165-7
 
         **Multiplicative mask** (``method="phi_mask"``): Multiplies by
@@ -2574,9 +2572,9 @@ def recommend_next_experiments(
     """Use acquisition function to recommend next experiments.
 
     When ``use_multi_objective=True``, uses qLogNoisyExpectedHypervolume
-    Improvement (qLogNEHVI) from Daulton et al. (2020), "Differentiable
-    Expected Hypervolume Improvement for Parallel Multi-Objective Bayesian
-    Optimization", NeurIPS, arXiv:2006.05078.
+    Improvement (qLogNEHVI), combining qEHVI (Daulton et al. 2020,
+    arXiv:2006.05078) with LogEI transform (Ament et al. 2023,
+    arXiv:2310.20708).
 
     Args:
         model: Fitted BoTorch GP model.
@@ -2731,7 +2729,7 @@ def recommend_next_experiments(
                 )
                 best_f = float((train_Y @ weights.unsqueeze(1)).max())
 
-            # qLogEI (Ament et al. 2024, arXiv:2310.20708) applies log
+            # qLogEI (Ament et al. 2023, arXiv:2310.20708) applies log
             # transform for numerical stability in batched EI. Preferred
             # over standard qEI for robustness.
             acqf = qLogExpectedImprovement(
@@ -2741,7 +2739,7 @@ def recommend_next_experiments(
                 sampler=sampler,
             )
         else:
-            # qLogEI (Ament et al. 2024, arXiv:2310.20708) applies log
+            # qLogEI (Ament et al. 2023, arXiv:2310.20708) applies log
             # transform for numerical stability in batched EI. Preferred
             # over standard qEI for robustness.
             acqf = qLogExpectedImprovement(

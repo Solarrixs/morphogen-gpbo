@@ -309,7 +309,7 @@ LOG_SCALE_COLUMNS: list[str] = [
 MORPHOGEN_ACTIVITY_THRESHOLDS: dict[str, float] = {
     "LDN193189_uM": 0.005,    # IC50 ~5 nM (ALK2/ALK3)
     "SAG_uM": 0.003,           # EC50 ~3 nM (Chen et al. 2002, DOI:10.1073/pnas.212323999)
-    "SB431542_uM": 0.05,       # IC50 ~94 nM (Inman et al. 2002)
+    "SB431542_uM": 0.05,       # IC50 ~94 nM (Inman et al. 2002, DOI:10.1124/mol.62.1.65)
     "DAPT_uM": 0.1,            # IC50 ~20 nM cell-free, ~100-200 nM cellular (Dovey 2001, DOI:10.1046/j.1471-4159.2001.00012.x)
     "Dorsomorphin_uM": 0.5,    # IC50 ~500 nM (ALK2/3/6)
     "IWP2_uM": 0.1,            # IC50 ~27 nM (Porcupine)

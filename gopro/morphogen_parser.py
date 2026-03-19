@@ -292,7 +292,7 @@ def _i_activin_dapt_sr11(v: dict[str, float]) -> None:
       - Lammi et al. 2008 (DOI:10.1016/j.abb.2008.02.003):
         RXR-RAR heterodimers are non-permissive; RXR ligand alone
         does not activate the classical retinoid transcriptional program.
-      - Galindo-Alarran et al. 2025 (DOI:10.1093/narmme/ugaf018):
+      - Galindo-Albarran et al. 2025 (DOI:10.1093/narmme/ugaf018):
         RAR-specific agonists drive neural tissue formation, not RXR agonists.
     """
     v["IWP2_uM"] = _IWP2

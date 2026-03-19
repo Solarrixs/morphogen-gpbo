@@ -3,7 +3,7 @@
 Implements granular filtering of unhealthy cells based on stress pathway
 enrichment (glycolysis, ER stress, UPR, apoptosis). Cells are scored per
 pathway, clustered at high resolution, and entire stressed clusters are
-removed -- mirroring the Gruffi approach (Varga et al., 2022).
+removed -- mirroring the Gruffi approach (Vertesy et al., 2022, DOI:10.15252/embj.2022111118).
 
 Usage::
 
