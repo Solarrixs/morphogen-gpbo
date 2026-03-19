@@ -2221,7 +2221,7 @@ def fit_gp_botorch(
         else:
             from botorch.models import SingleTaskMultiFidelityGP
             # Remap fidelity values to open interval (0, 1) to prevent boundary
-            # collapse in LinearTruncatedFidelityKernel (TODO-24).
+            # collapse in LinearTruncatedFidelityKernel (see FIDELITY_KERNEL_REMAP).
             train_X[:, fidelity_idx] = _remap_fidelity(train_X[:, fidelity_idx])
             logger.info(
                 "Remapped fidelity for MF kernel: %s",
@@ -2646,7 +2646,7 @@ def recommend_next_experiments(
         if col in bounds:
             lo, hi = bounds[col]
         elif col == "fidelity":
-            # Fix fidelity to remapped highest-fidelity value (TODO-24).
+            # Fix fidelity to remapped highest-fidelity value (see FIDELITY_KERNEL_REMAP).
             remapped_hf = FIDELITY_KERNEL_REMAP.get(1.0, 1.0)
             lo, hi = remapped_hf, remapped_hf
         else:
@@ -4667,7 +4667,7 @@ if __name__ == "__main__":
                         help="Use g(x)+delta(x,m) kernel for multi-fidelity data "
                              "instead of LinearTruncatedFidelityKernel. Base kernel "
                              "has shared ARD; residual has per-fidelity ARD via "
-                             "IndexKernel. Requires >1 fidelity level (TODO-5).")
+                             "IndexKernel. Requires >1 fidelity level.")
     parser.add_argument("--zero-passing", action="store_true",
                         help="Wrap GP kernel with ZeroPassingKernel enforcing "
                              "k(0,x)=0 for concentration inputs (GPerturb, Xing "
