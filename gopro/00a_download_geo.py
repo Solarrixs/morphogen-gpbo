@@ -37,14 +37,15 @@ GEO_FTP_BASE = (
 )
 
 # Files to download with their MD5 checksums (of the .gz files).
-# Checksums obtained from GEO supplementary file listings.
-FILES = [
-    "GSE233574_OrganoidScreen_counts.mtx.gz",
-    "GSE233574_OrganoidScreen_cellMetaData.csv.gz",
-    "GSE233574_OrganoidScreen_geneInfo.csv.gz",
-    "GSE233574_Organoid.SAG.secondaryScreen_counts.mtx.gz",
-    "GSE233574_Organoid.SAG.secondaryScreen_cellMetaData.csv.gz",
-    "GSE233574_Organoid.SAG.secondaryScreen_geneInfo.csv.gz",
+# TODO: Populate checksums from a known-good download and GEO file listings.
+# Until checksums are populated, verification is size-based only.
+FILES: list[dict[str, str | None]] = [
+    {"name": "GSE233574_OrganoidScreen_counts.mtx.gz", "md5": None},
+    {"name": "GSE233574_OrganoidScreen_cellMetaData.csv.gz", "md5": None},
+    {"name": "GSE233574_OrganoidScreen_geneInfo.csv.gz", "md5": None},
+    {"name": "GSE233574_Organoid.SAG.secondaryScreen_counts.mtx.gz", "md5": None},
+    {"name": "GSE233574_Organoid.SAG.secondaryScreen_cellMetaData.csv.gz", "md5": None},
+    {"name": "GSE233574_Organoid.SAG.secondaryScreen_geneInfo.csv.gz", "md5": None},
 ]
 
 
@@ -74,7 +75,8 @@ def get_remote_size(url: str) -> int | None:
 def list_files():
     """Show files that would be downloaded."""
     logger.info("GEO GSE233574 — %d files:\n", len(FILES))
-    for filename in FILES:
+    for entry in FILES:
+        filename = entry["name"]
         url = GEO_FTP_BASE + filename
         size = get_remote_size(url)
         size_str = format_size(size) if size else "unknown"
@@ -176,7 +178,8 @@ def main():
     logger.info("DECOMPRESSING")
     logger.info("=" * 60)
 
-    for filename in FILES:
+    for entry in FILES:
+        filename = entry["name"]
         gz_path = DATA_DIR / filename
         if gz_path.exists():
             gunzip_file(gz_path)
@@ -189,22 +192,37 @@ def main():
     logger.info("=" * 60)
 
     all_ok = True
-    for filename in FILES:
+    for entry in FILES:
+        filename = entry["name"]
+        expected_md5 = entry.get("md5")
         gz_path = DATA_DIR / filename
         plain_path = gz_path.with_suffix("")  # strip .gz
 
         gz_exists = gz_path.exists()
         plain_exists = plain_path.exists()
 
-        if gz_exists and plain_exists:
-            logger.info("  [OK] %s  (gz + decompressed)", plain_path.name)
+        if not (gz_exists or plain_exists):
+            logger.error("  [!!] %s  MISSING", filename)
+            all_ok = False
+            continue
+
+        # Verify MD5 of .gz file if checksum is defined and file exists
+        if expected_md5 and gz_exists:
+            actual_md5 = md5_file(gz_path)
+            if actual_md5 != expected_md5:
+                logger.error(
+                    "  [!!] %s  MD5 MISMATCH (expected %s, got %s)",
+                    filename, expected_md5, actual_md5,
+                )
+                all_ok = False
+                continue
+            logger.info("  [OK] %s  (MD5 verified)", filename)
+        elif gz_exists and plain_exists:
+            logger.info("  [OK] %s  (gz + decompressed, no MD5 defined)", plain_path.name)
         elif plain_exists:
             logger.info("  [OK] %s  (decompressed only)", plain_path.name)
         elif gz_exists:
             logger.warning("  [!!] %s  (gz only, not decompressed)", gz_path.name)
-            all_ok = False
-        else:
-            logger.error("  [!!] %s  MISSING", filename)
             all_ok = False
 
     if not all_ok:

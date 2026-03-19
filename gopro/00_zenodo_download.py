@@ -170,7 +170,10 @@ def download_known_records():
                 # Fallback: construct URL
                 url = f"{ZENODO_API}/records/{record_id}/files/{filename}/content"
 
-            download_file(url, output_path, expected_md5=file_info["md5"])
+            ok = download_file(url, output_path, expected_md5=file_info["md5"])
+            if not ok:
+                logger.error("Download or checksum verification failed for %s", filename)
+                sys.exit(1)
 
 
 def search_zenodo(query, max_results=20):
