@@ -85,6 +85,7 @@ MORPHOGEN_IDENTITIES: dict[str, tuple[str, str]] = {
     "NT3_uM": ("protein", "NT3"),
     "cAMP_uM": ("small_molecule", "dibutyryl_cAMP"),
     "AscorbicAcid_uM": ("small_molecule", "ascorbic_acid_2_phosphate"),
+    "SR11237_uM": ("small_molecule", "SR11237"),  # RXR agonist (distinct from RA/RAR)
 }
 
 # Signaling pathway annotations for morphogens
@@ -112,6 +113,7 @@ MORPHOGEN_PATHWAYS: dict[str, str] = {
     "NT3_uM": "neurotrophin",
     "cAMP_uM": "unknown",
     "AscorbicAcid_uM": "unknown",
+    "SR11237_uM": "RXR",  # RXR agonist — distinct from RA/RAR pathway
 }
 
 # SMILES strings for small molecule morphogens (for RDKit fingerprints)

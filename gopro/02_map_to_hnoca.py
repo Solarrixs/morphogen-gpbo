@@ -193,6 +193,11 @@ def map_to_hnoca_scpoli(
     Returns:
         Tuple of (query_latent, ref_latent) numpy arrays.
     """
+    # scPoli chosen for architecture surgery capability (adding query batches
+    # without retraining reference). Alternative methods: scANVI (Xu et al.
+    # 2021) may give better label transfer per Luecken et al. 2022
+    # (DOI:10.1038/s41592-021-01336-8) benchmarks. Choice follows HNOCA team
+    # reference implementation.
     from scarches.models.scpoli import scPoli
 
     # Prepare reference: set X to counts
@@ -454,6 +459,8 @@ def compute_bootstrap_uncertainty(
     obs: pd.DataFrame,
     soft_probs: pd.DataFrame,
     condition_key: str = "condition",
+    # 200 resamples adequate for variance estimation (Efron & Tibshirani
+    # 1993); 1000+ recommended for confidence intervals.
     n_bootstrap: int = 200,
     seed: int = 42,
 ) -> pd.DataFrame:

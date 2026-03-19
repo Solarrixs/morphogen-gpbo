@@ -288,15 +288,30 @@ CONVERGENCE_POSTERIOR_EVAL_POINTS = 512
 ENSEMBLE_DEFAULT_N_RESTARTS = 5
 ENSEMBLE_STABILITY_LOW_THRESHOLD = 0.5  # below this → unstable recommendations
 
-# --- Selective log-scaling for concentration dimensions (Kanda 2022) ---
-# Morphogen dose-response is typically log-linear; log1p transform
-# compresses the dynamic range and helps the GP learn smoother functions.
+# --- Selective log-scaling for concentration dimensions ---
+# Log-scale morphogen concentrations follow pharmacological convention
+# (Hill equation log-linear dose-response). Kanda et al. 2022
+# (DOI:10.7554/eLife.77007) demonstrated robotic BO for cell culture
+# optimization.
 # Excludes log_harvest_day (already log-scaled) and base media columns
 # (usually constant across conditions → zero-variance → auto-dropped).
 LOG_SCALE_COLUMNS: list[str] = [
     col for col in MORPHOGEN_COLUMNS
     if col.endswith("_uM")
 ]
+
+# Per-morphogen activity thresholds (µM) based on published EC50/IC50.
+# Below this concentration, morphogen is considered inactive for antagonism detection.
+MORPHOGEN_ACTIVITY_THRESHOLDS: dict[str, float] = {
+    "LDN193189_uM": 0.005,    # IC50 ~5 nM (ALK2/ALK3)
+    "SAG_uM": 0.003,           # EC50 ~3 nM (Chen et al. 2002, DOI:10.1073/pnas.212323999)
+    "SB431542_uM": 0.05,       # IC50 ~94 nM (Inman et al. 2002)
+    "DAPT_uM": 0.5,            # IC50 ~115 nM (gamma-secretase)
+    "Dorsomorphin_uM": 0.5,    # IC50 ~500 nM (ALK2/3/6)
+    "IWP2_uM": 0.1,            # IC50 ~27 nM (Porcupine)
+}
+# Default 0.1 µM for morphogens not listed
+MORPHOGEN_ACTIVITY_THRESHOLD_DEFAULT: float = 0.1
 
 # --- Gruffi stress-filtering defaults ---
 # Pipeline-specific defaults; Gruffi (Vertesy et al. 2022,

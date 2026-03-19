@@ -38,3 +38,4 @@ L24,low,gruffi_qc.py,31,"Gruffi GO terms",3,3,"Vertesy et al 2022 DOI:10.15252/e
 L25,low,gruffi_qc.py,40,"Min cells per condition = 50",1,1,"No specific citation; practical heuristic",Reasonable,verified
 L26,low,04_gpbo_loop.py,932,"ILR Helmert basis",3,3,"Egozcue et al 2003 DOI:10.1023/A:1023818214614 (1753 citations)",Seminal paper,verified
 L27,low,03_fidelity_scoring.py,311,"Aitchison distance for compositions",3,3,"Quinn 2017 DOI:10.1038/s41598-017-16520-0; Aitchison 1986",Well-established,verified
+NEW1,critical,03_fidelity_scoring.py,173,"Cell type proportions vs transcriptomic fidelity as objective",3,3,"He et al 2024 DOI:10.1038/s41586-024-08172-8; Venkatesan et al 2025 bioRxiv",Documented as known architectural limitation,documented

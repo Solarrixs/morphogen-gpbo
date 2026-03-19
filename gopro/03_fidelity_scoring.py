@@ -1,5 +1,18 @@
 """Step 3: Score organoid cell fidelity against Braun fetal brain reference.
 
+KNOWN LIMITATION: This module optimizes cell type proportions (compositional
+vectors) rather than per-cell-type transcriptomic fidelity. He et al. 2024
+(Nature, DOI:10.1038/s41586-024-08172-8) demonstrated that organoid cell types
+can match primary references by proportion while remaining transcriptomically
+immature. The Tier 2 RSS scoring partially addresses this by measuring subtype
+similarity, but does not capture gene-level maturation signatures.
+
+Future enhancement: incorporate per-cell-type transcriptomic similarity scores
+from the HNOCA mapping (snapseed_pca_rss_level_* annotations in step 02) as
+additional GP objectives. See also: NEST-Score (Naas et al. 2025,
+DOI:10.1016/j.celrep.2025.116168) for a more comprehensive organoid evaluation
+metric.
+
 BrainSTEM-inspired two-tier fidelity scoring:
   Tier 1: Use HNOCA-transferred region labels to identify brain region identity
   Tier 2: Compare cell type composition to Braun fetal brain reference by region

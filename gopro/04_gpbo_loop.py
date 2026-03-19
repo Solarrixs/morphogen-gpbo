@@ -3,6 +3,10 @@ Step 4: GP-BO Active Reinforcement Learning Loop.
 
 This is the core optimization engine:
   1. Loads GP training data (X=morphogen conditions, Y=cell type fractions)
+     NOTE: Y targets are cell type fractions (compositional). Per-cell-type
+     transcriptomic fidelity (He et al. 2024, DOI:10.1038/s41586-024-08172-8)
+     is not yet incorporated as an objective. See 03_fidelity_scoring.py
+     docstring for details on this known limitation.
   2. Applies ILR transform to compositional Y data
   3. Fits a multi-fidelity GP using BoTorch with Matérn 5/2 + ARD kernel
   4. Runs multi-objective acquisition function to recommend next experiments
@@ -43,6 +47,8 @@ from gopro.config import (
     GP_STATE_DIR,
     KERNEL_COMPLEXITY_THRESHOLDS,
     LOG_SCALE_COLUMNS,
+    MORPHOGEN_ACTIVITY_THRESHOLDS,
+    MORPHOGEN_ACTIVITY_THRESHOLD_DEFAULT,
     MORPHOGEN_COLUMNS,
     PROTEIN_MW_KDA,
     TIMING_FULL,
@@ -326,6 +332,10 @@ def _build_per_fidelity_ard_model(
     d_morph = len(morph_dims)
 
     # Base kernel: shared ARD across all fidelities (morphogen dims only)
+    # Matérn 5/2 (twice differentiable) is the BoTorch default. For
+    # threshold-like morphogen responses, Matérn 3/2 (once differentiable)
+    # may be more appropriate. The choice is inherited from BoTorch defaults,
+    # not independently validated for morphogen dose-response.
     k_base = ScaleKernel(
         MaternKernel(nu=2.5, ard_num_dims=d_morph, active_dims=morph_dims)
     )
@@ -427,14 +437,19 @@ MORPHOGEN_BOUNDS = MORPHOGEN_BOUNDS_LITERATURE
 def _compute_active_bounds(
     X: pd.DataFrame,
     columns: list[str],
-    padding: float = 0.05,
+    padding: float = 0.50,
 ) -> tuple[dict[str, tuple[float, float]], list[str]]:
     """Compute bounds from training data, dropping zero-variance columns.
+
+    50% padding allows GP-BO to explore beyond training range toward literature
+    limits. Conservative 5% padding was overly restrictive (TuRBO uses 80% of
+    domain; standard practice is 25-50%). The literature bounds
+    (``MORPHOGEN_BOUNDS_LITERATURE``) still serve as a hard safety ceiling.
 
     Args:
         X: Training morphogen matrix (without fidelity column).
         columns: Morphogen column names.
-        padding: Fraction of training range to add as padding (default 5%).
+        padding: Fraction of training range to add as padding (default 50%).
 
     Returns:
         Tuple of (bounds_dict, active_columns) where zero-variance columns
@@ -509,8 +524,10 @@ def _apply_log_scale(
 ) -> pd.DataFrame:
     """Apply log1p transform to selected concentration columns.
 
-    Morphogen dose-response is typically log-linear; log1p(x) compresses
-    dynamic range and helps the GP learn smoother functions (Kanda 2022).
+    Log-scale morphogen concentrations follow pharmacological convention
+    (Hill equation log-linear dose-response). Kanda et al. 2022
+    (DOI:10.7554/eLife.77007) demonstrated robotic BO for cell culture
+    optimization.
 
     Args:
         X: Morphogen concentration DataFrame.
@@ -1184,6 +1201,12 @@ def _helmert_basis(D: int) -> np.ndarray:
     Compositional Data Analysis", Mathematical Geology 35:279-300,
     DOI:10.1023/A:1023818214614.
 
+    Helmert basis is arbitrary but standard (Egozcue et al. 2003). A
+    sequential binary partition (SBP, Pawlowsky-Glahn & Egozcue 2011)
+    could encode biological hierarchy (e.g., neuronal vs glial partition).
+    Not implemented as the choice of basis does not affect GP predictions,
+    only lengthscale interpretability.
+
     Args:
         D: Number of composition parts.
 
@@ -1426,7 +1449,11 @@ def build_training_set(
 def _sobol_eval_points(
     d: int, n_points: int, lower: torch.Tensor, upper: torch.Tensor,
 ) -> torch.Tensor:
-    """Generate Sobol evaluation points scaled to [lower, upper]."""
+    """Generate Sobol evaluation points scaled to [lower, upper].
+
+    Sobol quasi-random sequences (BoTorch default); adequate for d<=13
+    dimensions.
+    """
     from torch.quasirandom import SobolEngine
 
     sobol = SobolEngine(dimension=d, scramble=True, seed=42)
@@ -1928,10 +1955,12 @@ def fit_gp_botorch(
     use_ilr: bool = True,
     use_alr: bool = False,
     use_saasbo: bool = False,
-    saasbo_warmup: int = 256,       # Half BoTorch default (512) for speed
-    saasbo_num_samples: int = 128,  # Half BoTorch default (256) -> ~8 effective
-    saasbo_thinning: int = 16,      # posterior samples vs default 16.
-    # Ref: Eriksson & Jankowiak, UAI 2021 (arXiv:2103.00349).
+    # BoTorch library defaults (Eriksson & Jankowiak, UAI 2021).
+    # Tutorial-minimum (256/128) gives only 8 effective samples — insufficient
+    # for reliable sparsity prior. Use --saasbo-fast for reduced settings.
+    saasbo_warmup: int = 512,
+    saasbo_num_samples: int = 256,
+    saasbo_thinning: int = 16,
     use_lassobo: bool = False,
     lassobo_alpha: float = 0.1,
     warm_start: bool = False,
@@ -2452,13 +2481,18 @@ def compute_desirability(
 
     For each pathway, the penalty is:
         penalty = min(sum_agonist, sum_antagonist) / (max(sum_agonist, sum_antagonist) + eps)
-    scaled by how far above ``antagonism_threshold`` both sides are.
+    scaled by how far above per-morphogen activity thresholds both sides are.
+
+    Per-morphogen thresholds are looked up from ``MORPHOGEN_ACTIVITY_THRESHOLDS``
+    (based on published EC50/IC50 values). Morphogens not in the lookup table
+    use ``MORPHOGEN_ACTIVITY_THRESHOLD_DEFAULT`` (0.1 µM).
 
     Args:
         candidates: (N, D) array of candidate morphogen concentrations.
         columns: Column names matching the D dimensions.
-        antagonism_threshold: Minimum concentration (µM) below which a morphogen
-            is considered absent. Prevents penalising trace amounts. (default: 0.1)
+        antagonism_threshold: Legacy fallback threshold (µM). Overridden by
+            per-morphogen thresholds from ``MORPHOGEN_ACTIVITY_THRESHOLDS``
+            when available. (default: 0.1)
 
     Returns:
         (N,) array of desirability scores in [0, 1].
@@ -2469,18 +2503,31 @@ def compute_desirability(
     col_to_idx = {c: i for i, c in enumerate(columns)}
 
     for pathway, pair in ANTAGONIST_PAIRS.items():
-        ag_idxs = [col_to_idx[c] for c in pair["agonists"] if c in col_to_idx]
-        ant_idxs = [col_to_idx[c] for c in pair["antagonists"] if c in col_to_idx]
+        ag_names = [c for c in pair["agonists"] if c in col_to_idx]
+        ant_names = [c for c in pair["antagonists"] if c in col_to_idx]
+        ag_idxs = [col_to_idx[c] for c in ag_names]
+        ant_idxs = [col_to_idx[c] for c in ant_names]
 
         if not ag_idxs or not ant_idxs:
             continue
 
-        # Sum agonist and antagonist concentrations per candidate
-        ag_sum = candidates[:, ag_idxs].sum(axis=1)   # (N,)
-        ant_sum = candidates[:, ant_idxs].sum(axis=1)  # (N,)
+        # Per-morphogen thresholding: zero out concentrations below each
+        # morphogen's activity threshold (EC50/IC50-based) before summing.
+        def _threshold_sum(names: list[str], idxs: list[int]) -> np.ndarray:
+            total = np.zeros(n, dtype=np.float64)
+            for name, idx in zip(names, idxs):
+                thresh = MORPHOGEN_ACTIVITY_THRESHOLDS.get(
+                    name, MORPHOGEN_ACTIVITY_THRESHOLD_DEFAULT
+                )
+                vals = candidates[:, idx]
+                total += np.where(vals > thresh, vals, 0.0)
+            return total
 
-        # Both must exceed threshold to trigger penalty
-        both_active = (ag_sum > antagonism_threshold) & (ant_sum > antagonism_threshold)
+        ag_sum = _threshold_sum(ag_names, ag_idxs)   # (N,)
+        ant_sum = _threshold_sum(ant_names, ant_idxs)  # (N,)
+
+        # Both must have at least one active morphogen to trigger penalty
+        both_active = (ag_sum > 0.0) & (ant_sum > 0.0)
         n_conflicts = int(both_active.sum())
 
         # Penalty = ratio of minority side to majority side
@@ -2682,6 +2729,9 @@ def recommend_next_experiments(
                 )
                 best_f = float((train_Y @ weights.unsqueeze(1)).max())
 
+            # qLogEI (Ament et al. 2024, arXiv:2310.20708) applies log
+            # transform for numerical stability in batched EI. Preferred
+            # over standard qEI for robustness.
             acqf = qLogExpectedImprovement(
                 model=model,
                 best_f=best_f,
@@ -2689,6 +2739,9 @@ def recommend_next_experiments(
                 sampler=sampler,
             )
         else:
+            # qLogEI (Ament et al. 2024, arXiv:2310.20708) applies log
+            # transform for numerical stability in batched EI. Preferred
+            # over standard qEI for robustness.
             acqf = qLogExpectedImprovement(
                 model=model,
                 best_f=train_Y.max(),
@@ -2712,6 +2765,9 @@ def recommend_next_experiments(
         acq_function=acqf,
         bounds=bounds_tensor,
         q=n_generate,
+        # BoTorch defaults are 20 restarts / 512 raw_samples. We use
+        # 10/1024 (fewer restarts, more initial candidates). Consider
+        # increasing num_restarts for higher-dimensional spaces.
         num_restarts=10,
         raw_samples=1024,
     )
@@ -3788,6 +3844,9 @@ def run_gpbo_loop(
     zero_passing: bool = False,
     desirability_gate: bool = False,
     do_cellflow_relevance_check: bool = False,
+    saasbo_warmup: int = 512,
+    saasbo_num_samples: int = 256,
+    saasbo_thinning: int = 16,
 ) -> pd.DataFrame:
     """Run one iteration of the GP-BO loop.
 
@@ -4149,6 +4208,9 @@ def run_gpbo_loop(
             use_ilr=use_ilr,
             use_alr=use_alr,
             use_saasbo=kernel_spec.use_saasbo,
+            saasbo_warmup=saasbo_warmup,
+            saasbo_num_samples=saasbo_num_samples,
+            saasbo_thinning=saasbo_thinning,
             use_lassobo=use_lassobo,
             lassobo_alpha=lassobo_alpha,
             warm_start=warm_start,
@@ -4389,6 +4451,9 @@ if __name__ == "__main__":
                         help="Path to SAG screen morphogens CSV")
     parser.add_argument("--saasbo", action="store_true",
                         help="Use SAASBO (fully Bayesian GP with sparsity prior)")
+    parser.add_argument("--saasbo-fast", action="store_true",
+                        help="Use reduced SAASBO NUTS settings (warmup=256, samples=128) "
+                             "for faster prototyping. Implies --saasbo.")
     parser.add_argument("--lassobo", action="store_true",
                         help="Use LassoBO (L1-regularized MAP variable selection, AISTATS 2025). "
                              "Faster alternative to SAASBO for automatic variable selection.")
@@ -4647,6 +4712,10 @@ if __name__ == "__main__":
         target_profile = load_target_profile_csv(Path(args.target_profile))
         logger.info("Using custom target profile from %s", args.target_profile)
 
+    # --saasbo-fast implies --saasbo with reduced NUTS settings
+    if getattr(args, "saasbo_fast", False):
+        args.saasbo = True
+
     # Run GP-BO loop
     recs = run_gpbo_loop(
         fractions_csv=fractions_path,
@@ -4687,6 +4756,9 @@ if __name__ == "__main__":
         zero_passing=args.zero_passing,
         desirability_gate=args.desirability_gate,
         do_cellflow_relevance_check=args.cellflow_relevance_check,
+        saasbo_warmup=256 if getattr(args, "saasbo_fast", False) else 512,
+        saasbo_num_samples=128 if getattr(args, "saasbo_fast", False) else 256,
+        saasbo_thinning=16,
     )
 
     logger.info("--- NEXT EXPERIMENT RECOMMENDATIONS ---")

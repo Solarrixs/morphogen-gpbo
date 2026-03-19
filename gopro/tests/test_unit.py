@@ -4010,15 +4010,16 @@ class TestDesirabilityGate:
         assert phi[0] == 1.0, f"Expected no penalty for trace antagonist, got {phi[0]}"
 
     def test_custom_threshold(self):
-        """Custom antagonism threshold changes penalty behaviour."""
+        """Per-morphogen thresholds detect antagonism at pharmacologically relevant doses."""
         columns = ["CHIR99021_uM", "IWP2_uM"]
-        candidates = np.array([[5.0, 0.05]])
-        # Default threshold 0.1 → no penalty
-        phi_default = step04.compute_desirability(candidates, columns, antagonism_threshold=0.1)
-        assert phi_default[0] == 1.0
-        # Lower threshold 0.01 → triggers penalty
-        phi_low = step04.compute_desirability(candidates, columns, antagonism_threshold=0.01)
-        assert phi_low[0] < 1.0
+        # IWP2 at 0.5 µM (above its per-morphogen threshold of 0.1) → conflict detected
+        candidates_active = np.array([[5.0, 0.5]])
+        phi_active = step04.compute_desirability(candidates_active, columns)
+        assert phi_active[0] < 1.0, "Active WNT agonist+antagonist should be penalized"
+        # IWP2 at 0.05 µM (below its per-morphogen threshold of 0.1) → no penalty
+        candidates_sub = np.array([[5.0, 0.05]])
+        phi_sub = step04.compute_desirability(candidates_sub, columns)
+        assert phi_sub[0] == 1.0, "Sub-threshold antagonist should not penalize"
 
     def test_multiple_pathway_conflicts_compound(self):
         """Conflicts in multiple pathways compound multiplicatively."""
