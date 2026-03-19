@@ -172,7 +172,7 @@ class TestCellFlowConstants:
             )
 
     def test_pathway_values_valid(self):
-        valid_pathways = {"WNT", "BMP", "SHH", "RA", "FGF", "TGFb",
+        valid_pathways = {"WNT", "BMP", "SHH", "RA", "RXR", "FGF", "TGFb",
                          "Notch", "EGF", "neurotrophin", "unknown"}
         for col, pathway in step06.MORPHOGEN_PATHWAYS.items():
             assert pathway in valid_pathways, (
