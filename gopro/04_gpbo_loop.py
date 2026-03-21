@@ -300,8 +300,19 @@ def cellflow_relevance_check(
 
 # BoTorch requires float64, which MPS doesn't support. Use CPU for GP fitting.
 # MPS can be used for neural network components (CellFlow, scPoli) separately.
+# Note: scPoli on MPS currently produces NaN due to torch.lgamma bug (pytorch#132605).
 DEVICE = torch.device("cpu")
 DTYPE = torch.double
+
+# Apple Silicon CPU threading: match performance core count
+import platform as _plat
+if _plat.machine() == "arm64" and _plat.system() == "Darwin":
+    import os as _os
+    _perf = int(_os.environ.get("GPBO_PERF_CORES", "10"))
+    torch.set_num_threads(_perf)
+    torch.set_num_interop_threads(min(4, _perf))
+    del _os
+del _plat
 
 # --- Fidelity kernel remap ---
 # SingleTaskMultiFidelityGP uses LinearTruncatedFidelityKernel which collapses

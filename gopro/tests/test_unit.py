@@ -5611,6 +5611,42 @@ class TestSanchisCallejaMultiFidelity:
         assert virtual_sources[0][2] == 0.65
 
 
+# ── Device detection tests (step 02) ──────────────────────────────────
+
+
+class TestDetectDevice:
+    """Tests for _detect_device() GPU auto-detection in step 02."""
+
+    def test_returns_cpu_when_cuda_unavailable(self, monkeypatch):
+        """_detect_device returns 'cpu' when CUDA is not available."""
+        import torch as _torch
+        monkeypatch.setattr(_torch.cuda, "is_available", lambda: False)
+        assert step02._detect_device() == "cpu"
+
+    def test_returns_cuda_when_cuda_available(self, monkeypatch):
+        """_detect_device returns 'cuda' when CUDA is available."""
+        import torch as _torch
+        monkeypatch.setattr(_torch.cuda, "is_available", lambda: True)
+        assert step02._detect_device() == "cuda"
+
+    def test_mps_never_selected(self, monkeypatch):
+        """MPS is never selected even when available (NaN bug pytorch#132605)."""
+        import torch as _torch
+        monkeypatch.setattr(_torch.cuda, "is_available", lambda: False)
+        # Even if MPS were available, _detect_device must not return "mps"
+        if hasattr(_torch.backends, "mps"):
+            monkeypatch.setattr(_torch.backends.mps, "is_available", lambda: True)
+        result = step02._detect_device()
+        assert result != "mps", "MPS must not be selected due to torch.lgamma NaN bug"
+        assert result == "cpu"
+
+    def test_return_type_is_str(self):
+        """_detect_device always returns a plain string."""
+        result = step02._detect_device()
+        assert isinstance(result, str)
+        assert result in ("cpu", "cuda")
+
+
 # ── S-5: Additional unit tests for new features ──────────────────────
 
 
@@ -5738,5 +5774,111 @@ class TestConfidenceToNoiseVariance:
         conf = pd.Series([0.8, 0.3, 0.6], index=["alpha", "beta", "gamma"])
         nv = step04.confidence_to_noise_variance(conf)
         assert list(nv.index) == ["alpha", "beta", "gamma"]
+
+
+# ---------------------------------------------------------------------------
+# CellRank2 JAX device configuration
+# ---------------------------------------------------------------------------
+
+step05 = _import_pipeline_module("05_cellrank2_virtual")
+
+
+class TestConfigureJaxDevice:
+    """Tests for _configure_jax_device() GPU auto-detection."""
+
+    def test_returns_cpu_when_nvidia_smi_missing(self, monkeypatch):
+        """Falls back to CPU when nvidia-smi is not found."""
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+
+        import subprocess as _sp
+
+        orig_run = _sp.run
+
+        def fake_run(cmd, **kwargs):
+            if isinstance(cmd, list) and cmd[0] == "nvidia-smi":
+                raise FileNotFoundError("nvidia-smi not found")
+            return orig_run(cmd, **kwargs)
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        result = step05._configure_jax_device()
+        assert result == "cpu"
+        import os
+        assert os.environ["JAX_PLATFORMS"] == "cpu"
+
+    def test_returns_cuda_when_nvidia_smi_succeeds(self, monkeypatch):
+        """Sets CUDA when nvidia-smi exits 0."""
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+
+        import subprocess as _sp
+
+        orig_run = _sp.run
+
+        def fake_run(cmd, **kwargs):
+            if isinstance(cmd, list) and cmd[0] == "nvidia-smi":
+                return _sp.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
+            return orig_run(cmd, **kwargs)
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        result = step05._configure_jax_device()
+        assert result == "cuda"
+        import os
+        assert os.environ["JAX_PLATFORMS"] == "cuda"
+
+    def test_returns_cpu_when_nvidia_smi_times_out(self, monkeypatch):
+        """Falls back to CPU when nvidia-smi hangs."""
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+
+        import subprocess as _sp
+
+        def fake_run(cmd, **kwargs):
+            if isinstance(cmd, list) and cmd[0] == "nvidia-smi":
+                raise _sp.TimeoutExpired(cmd, 5)
+            return _sp.run(cmd, **kwargs)
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        result = step05._configure_jax_device()
+        assert result == "cpu"
+
+    def test_respects_existing_env_var(self, monkeypatch):
+        """Does not override JAX_PLATFORMS if already set."""
+        monkeypatch.setenv("JAX_PLATFORMS", "tpu")
+        result = step05._configure_jax_device()
+        assert result == "tpu"
+        import os
+        assert os.environ["JAX_PLATFORMS"] == "tpu"
+
+    def test_returns_cpu_when_nvidia_smi_nonzero_exit(self, monkeypatch):
+        """Falls back to CPU when nvidia-smi returns non-zero."""
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+
+        import subprocess as _sp
+
+        def fake_run(cmd, **kwargs):
+            if isinstance(cmd, list) and cmd[0] == "nvidia-smi":
+                return _sp.CompletedProcess(cmd, returncode=1, stdout=b"", stderr=b"")
+            return _sp.run(cmd, **kwargs)
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        result = step05._configure_jax_device()
+        assert result == "cpu"
+
+
+class TestLogJaxDevices:
+    """Tests for _log_jax_devices() logging helper."""
+
+    def test_does_not_crash_when_jax_unavailable(self, monkeypatch):
+        """_log_jax_devices should not raise even if jax import fails."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "jax":
+                raise ImportError("no jax")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", mock_import)
+        # Should not raise
+        step05._log_jax_devices()
 
 

@@ -9,7 +9,21 @@ to avoid circular imports.
 
 import logging
 import os
+import platform
 from pathlib import Path
+
+# --- Apple Silicon CPU optimization ---
+# Must be set BEFORE numpy/scipy import to take effect.
+# M4 Pro: 10P + 4E cores → use performance cores only.
+# M4 Max: 12P + 4E cores → use 12.
+# Override with GPBO_PERF_CORES env var.
+if platform.machine() == "arm64" and platform.system() == "Darwin":
+    _PERF_CORES = os.environ.get("GPBO_PERF_CORES", "10")
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", _PERF_CORES)
+    os.environ.setdefault("OMP_NUM_THREADS", _PERF_CORES)
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", _PERF_CORES)
+    os.environ.setdefault("NUMBA_NUM_THREADS", _PERF_CORES)
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", _PERF_CORES)
 
 # --- Paths ---
 PROJECT_DIR = Path(os.environ.get("GPBO_PROJECT_DIR", str(Path(__file__).resolve().parent.parent)))

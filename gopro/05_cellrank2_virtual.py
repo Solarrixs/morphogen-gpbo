@@ -44,6 +44,55 @@ from gopro.config import DATA_DIR, get_logger
 
 logger = get_logger(__name__)
 
+
+def _configure_jax_device() -> str:
+    """Configure JAX to use CUDA GPU if available, CPU otherwise.
+
+    Must be called **before** ``import jax`` or ``import moscot`` so that
+    the ``JAX_PLATFORMS`` environment variable takes effect.  If the env
+    var is already set (e.g. by the user or a job scheduler), it is left
+    untouched.
+
+    Returns:
+        The value of ``JAX_PLATFORMS`` after configuration.
+    """
+    if "JAX_PLATFORMS" in os.environ:
+        logger.info(
+            "JAX_PLATFORMS already set to '%s' — respecting user override",
+            os.environ["JAX_PLATFORMS"],
+        )
+        return os.environ["JAX_PLATFORMS"]
+
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["nvidia-smi"],
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            os.environ["JAX_PLATFORMS"] = "cuda"
+            logger.info("CUDA GPU detected via nvidia-smi — set JAX_PLATFORMS=cuda")
+            return "cuda"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    logger.info("No CUDA GPU detected — set JAX_PLATFORMS=cpu")
+    return "cpu"
+
+
+def _log_jax_devices() -> None:
+    """Log the active JAX devices after JAX has been imported."""
+    try:
+        import jax
+
+        devices = jax.devices()
+        logger.info("JAX devices: %s", devices)
+    except Exception as exc:
+        logger.debug("Could not query JAX devices: %s", exc)
+
 # Timepoints in the Azbukina temporal atlas
 ATLAS_TIMEPOINTS = [7, 15, 30, 60, 90, 120]
 
@@ -178,8 +227,11 @@ def compute_transport_maps(
         with open(str(cache_path), "rb") as f:
             return pickle.load(f)  # nosec B301
 
+    _configure_jax_device()
+
     import moscot as mt
 
+    _log_jax_devices()
     logger.info("Setting up moscot TemporalProblem...")
     problem = mt.problems.TemporalProblem(adata)
     problem = problem.prepare(

@@ -30,6 +30,8 @@ from scipy import sparse
 from pathlib import Path
 from typing import Optional
 
+import torch
+
 from gopro.config import (
     DATA_DIR, MODEL_DIR,
     ANNOT_LEVEL_1, ANNOT_LEVEL_2, ANNOT_REGION, ANNOT_LEVEL_3,
@@ -37,6 +39,18 @@ from gopro.config import (
 )
 
 logger = get_logger(__name__)
+
+
+def _detect_device() -> str:
+    """Auto-detect best available device for scPoli (CUDA > CPU, MPS excluded).
+
+    MPS is excluded due to a known ``torch.lgamma`` broadcasting bug that
+    produces NaN during VAE training (pytorch#132605).
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    # MPS excluded: torch.lgamma broadcasting NaN bug (pytorch#132605)
+    return "cpu"
 
 
 def filter_quality_cells(adata: sc.AnnData) -> sc.AnnData:
@@ -227,8 +241,9 @@ def map_to_hnoca_scpoli(
             ref.obs[new_col] = ref.obs[old_col].values
 
     # Load pre-trained scPoli model
-    logger.info("Loading pre-trained scPoli model from %s...", model_dir)
-    scpoli_model = scPoli.load(str(model_dir), ref, map_location="cpu")
+    _device = _detect_device()
+    logger.info("Loading pre-trained scPoli model from %s (device=%s)...", model_dir, _device)
+    scpoli_model = scPoli.load(str(model_dir), ref, map_location=_device)
     logger.info("Model loaded successfully.")
 
     # Load query data into the model (architecture surgery)
@@ -244,11 +259,14 @@ def map_to_hnoca_scpoli(
     )
 
     # Train on query data (partial retrain — only new batch embedding)
-    logger.info("Training scPoli on query data (%d epochs)...", n_epochs)
+    _accelerator = "gpu" if torch.cuda.is_available() else "cpu"
+    logger.info("Training scPoli on query data (%d epochs, accelerator=%s)...",
+                n_epochs, _accelerator)
     scpoli_query.train(
         n_epochs=n_epochs,
         pretraining_epochs=n_epochs,
         eta=10,
+        accelerator=_accelerator,
         unlabeled_prototype_training=False,
     )
     logger.info("Training complete.")
