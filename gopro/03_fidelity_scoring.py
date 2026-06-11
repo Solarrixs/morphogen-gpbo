@@ -458,11 +458,11 @@ def compute_braun_entropy_center(braun_profiles: pd.DataFrame) -> float:
     return float(entropies.mean())
 
 
-# Fallback when no Braun reference is available
-_DEFAULT_ENTROPY_CENTER = 0.55
-# Heuristic: no literature basis for sigma=0.2. Consider deriving from
-# variance of Braun region entropies for a data-driven alternative.
-_ENTROPY_SIGMA = 0.2
+# Fallback when no Braun reference is available (computed: 0.5257)
+_DEFAULT_ENTROPY_CENTER = 0.53
+# Moderate tightening: Braun region entropy SD=0.069; sigma=0.15 is ~2x SD,
+# penalizing extremes without dominating the composite score.
+_ENTROPY_SIGMA = 0.15
 
 # ---------------------------------------------------------------------------
 # Default composite fidelity weights — HEURISTIC, NOT LITERATURE-BACKED.

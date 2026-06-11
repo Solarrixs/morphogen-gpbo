@@ -1053,7 +1053,7 @@ def generate_report(
                 )
             )
             sections["Morphogen Space"] = (
-                "PCA projection of the 20-dimensional morphogen concentration space "
+                f"PCA projection of the {len(active_cols)}-dimensional morphogen concentration space "
                 "(zero-variance columns excluded). Each dot is a tested condition, colored by "
                 "composite fidelity. Red stars are GP-recommended next experiments. "
                 "Gray arrows show the top 5 morphogen loadings driving separation along PC1/PC2. "
