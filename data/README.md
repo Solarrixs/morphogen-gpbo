@@ -72,6 +72,18 @@ cd data
 git clone https://github.com/theislab/neural_organoid_atlas.git
 ```
 
+## 5. scGPT Brain Checkpoint
+
+Used by `gopro/scgpt_integration.py` for independent (cross-check) validation of scPoli cell-type annotations. The `data/scgpt_brain/` directory holds the official scGPT **brain** checkpoint (pretrained on ~13.2M brain cells from the CellxGene Census brain subset — see `args.json`).
+
+| File | Size | Description |
+|------|------|-------------|
+| `scgpt_brain/best_model.pt` | 196 MB | Pretrained brain model weights |
+| `scgpt_brain/vocab.json` | 1.3 MB | Gene-name → token vocabulary |
+| `scgpt_brain/args.json` | 1 KB | Training config (already tracked alongside weights) |
+
+**Source:** Download the **brain** checkpoint folder from the "Pretrained scGPT checkpoints" model-zoo table in the [bowang-lab/scGPT README](https://github.com/bowang-lab/scGPT?tab=readme-ov-file#pretrained-scgpt-model-zoo) (Google Drive links per model). Place the folder contents at `data/scgpt_brain/`. The integration tests in `gopro/tests/test_scgpt_integration.py` require this checkpoint and will fail without it.
+
 ## Pipeline-Generated Files
 
 These are created by the pipeline steps and don't need to be downloaded:
